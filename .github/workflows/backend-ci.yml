@@ -33,3 +33,21 @@ jobs:
 
       - name: Build
         run: npm run build --if-present
+
+      - name: Create Release
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ github.run_number }}
+          name: Backend Release ${{ github.run_number }}
+          files: backend/dist/**
+          draft: false
+          prerelease: false
+
+      - name: Deploy to Render
+        if: ${{ secrets.RENDER_API_KEY && secrets.RENDER_BACKEND_SERVICE_ID }}
+        run: |
+          curl -sS -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_BACKEND_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Accept: application/json" \
+            -d '{}'
