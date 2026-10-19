@@ -6,7 +6,11 @@ const cors = require('cors')
 const mongoose = require('mongoose')
 
 const Card = require('./models/Card')
+const User = require('./models/User')
 const spreads = require('./data/spreads')
+const { createAuthMiddleware } = require('./middleware/auth')
+const { createAuthRouter } = require('./routes/auth')
+const { createAdminRouter } = require('./routes/admin')
 const { buildReadingWithDictionary } = require('./services/readingService')
 const { isNarrationAvailable, streamNarration, NarrationRefusedError } = require('./services/narrationService')
 const { compareCards, validateManualCards } = require('./services/manualDraw')
@@ -108,6 +112,14 @@ function ensureDatabase(res) {
   return false
 }
 
+const { optionalAuth, requireAuth, requireAdmin, requireAiAccess } = createAuthMiddleware({
+  // token 裡的 sub 不一定是合法的 ObjectId（偽造或舊資料），先擋掉避免 CastError
+  findUserById: (id) => (mongoose.isValidObjectId(id) ? User.findById(id) : null),
+})
+
+app.use('/api/auth', createAuthRouter({ ensureDatabase, requireAuth }))
+app.use('/api/admin', createAdminRouter({ ensureDatabase, requireAdmin }))
+
 app.get('/api/health', async (_req, res) => {
   const cardCount = isDatabaseReady() ? await Card.countDocuments() : 0
 
@@ -141,7 +153,7 @@ app.get('/api/cards/random', async (req, res, next) => {
   }
 })
 
-app.post('/api/readings/draw', async (req, res, next) => {
+app.post('/api/readings/draw', optionalAuth, async (req, res, next) => {
   try {
     if (!ensureDatabase(res)) {
       return
@@ -201,7 +213,7 @@ app.get('/api/cards', async (_req, res, next) => {
 
 // 手動選牌解讀：依使用者挑選的牌與順序產生分析。
 // 有帶 spreadKey 就套牌陣位置（關係對與位置權重照常生效），沒帶就維持自由張數。
-app.post('/api/readings/manual', async (req, res, next) => {
+app.post('/api/readings/manual', optionalAuth, async (req, res, next) => {
   try {
     if (!ensureDatabase(res)) {
       return
@@ -269,7 +281,8 @@ app.post('/api/readings/manual', async (req, res, next) => {
 })
 
 // 依牌與正逆位重算組合分析，再交給 AI 改寫成口語解讀；不信任前端傳來的分析文字
-app.post('/api/readings/narrate', async (req, res, next) => {
+// AI 解讀會產生費用，所以限 admin 與被管理者開通的會員（未登入者仍可抽牌與看規則分析）
+app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
   try {
     if (!isNarrationAvailable()) {
       res.status(503).json({ message: 'AI 解讀尚未設定（缺少 OPENROUTER_API_KEY）。' })
@@ -417,6 +430,12 @@ async function connectDatabase() {
 }
 
 async function start() {
+  // 沒有密鑰就不要啟動。給預設值等於沒有密鑰，簽出來的 token 誰都能偽造。
+  if (!process.env.JWT_SECRET) {
+    console.error('JWT_SECRET 未設定，伺服器不啟動。請在 .env 加上 JWT_SECRET（見 .env.example）。')
+    process.exit(1)
+  }
+
   await connectDatabase()
 
   app.listen(port, () => {

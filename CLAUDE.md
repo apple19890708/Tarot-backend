@@ -14,7 +14,10 @@
 
 ## 程式結構
 
-- `src/server.js`：所有路由（`/api/health`、`/api/spreads`、`/api/readings/draw`、`/api/readings/narrate`）
+- `src/server.js`：占卜相關路由（`/api/health`、`/api/spreads`、`/api/readings/draw`、`/api/readings/narrate`）
+- `src/routes/auth.js`、`src/routes/admin.js`：會員與管理者路由（`/api/auth/*`、`/api/admin/*`）
+- `src/middleware/auth.js`：`optionalAuth` / `requireAuth` / `requireAdmin`；`src/lib/jwt.js`、`src/lib/password.js`
+- `src/models/User.js`：會員（`passwordHash` 設 `select: false`，不會跟著查出來）
 - `src/data/cardAttributes.js`：靜態牌卡屬性（花色元素、大牌元素、數字主題、宮廷階級）
 - `src/services/combinationRules.js`：規則引擎，**只產生結構化結果，不產生文字**；整合 `src/services/rules/` 底下的規則 7～10
 - `src/data/ruleConfig.js`：規則 7～10 的關鍵詞與門檻，調整門檻改這裡
@@ -29,6 +32,8 @@
 
 - **判斷與文字分離**：規則判斷放 `combinationRules.js` 與 `src/services/rules/`（新規則一條一檔），文字放 `analysisFormatter.js`，AI 寫作原則放 `narrationService.js` 的 `SYSTEM_PROMPT`。
 - **規則有變更就更新計畫書**：調整規則、門檻或決議時，同步修改對應計畫書（規則 1～6 在第一版、規則 7 之後在 v2）的章節、決議紀錄與進度表。
+- **權限**：AI 解讀（`/api/readings/narrate`）限 admin 與 `aiAccess` 被開通的會員；`/api/admin/*` 限管理者。新增需要身分的路由時用 `src/middleware/auth.js` 的三個中介層，不要自己解 token。
+- **密碼與 token**：`passwordHash` 絕不出現在任何回應；`JWT_SECRET` 沒設定時伺服器直接不啟動，不要給預設值。
 - **向下相容**：保留既有回傳欄位（`overview`、`guidance`、`cards`），新增欄位用加的，不改名、不刪除。
 - **不信任前端資料**：需要分析或 AI 解讀時，由後端依牌 id 與正逆位重新計算，不直接使用前端傳來的分析文字。使用者輸入要驗證格式與長度。
 - 新規則要在 `test/combinationRules.test.js` 補上邊界測試；隨機性（例如正逆位）以參數注入，讓測試可固定結果。
