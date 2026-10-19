@@ -88,9 +88,25 @@ mongoose.set('bufferCommands', false)
 
 const app = express()
 const port = Number.parseInt(process.env.PORT || '4000', 10)
-const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173'
+// CLIENT_URL 可以用逗號分隔多個來源（本機 5173、GitHub Pages、Render…）。
+// 只有列在裡面的網域，瀏覽器才打得到這個 API。
+const clientUrls = (process.env.CLIENT_URL || 'http://localhost:5173')
+  .split(',')
+  .map((item) => item.trim().replace(/\/$/, ''))
+  .filter(Boolean)
 
-app.use(cors({ origin: clientUrl }))
+app.use(
+  cors({
+    origin(origin, callback) {
+      // 沒有 Origin 的請求（curl、同源、伺服器對伺服器）一律放行
+      if (!origin || clientUrls.includes(origin)) {
+        callback(null, true)
+        return
+      }
+      callback(new Error(`來源不在 CLIENT_URL 允許清單內：${origin}`))
+    },
+  }),
+)
 app.use(express.json())
 
 // 牌卡圖片（公共領域 RWS 1909），放在 public/cards/
@@ -440,7 +456,7 @@ async function start() {
 
   app.listen(port, () => {
     console.log(`Tarot API running at http://localhost:${port}`)
-    console.log(`CORS origin: ${clientUrl}`)
+    console.log(`CORS origin: ${clientUrls.join(', ')}`)
   })
 }
 
