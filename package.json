@@ -6,7 +6,14 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "seed": "node scripts/seedCards.js"
+    "seed": "node scripts/seedCards.js",
+    "fetch-images": "node scripts/fetchCardImages.js",
+    "pairs:curated": "node scripts/buildCuratedPairs.js",
+    "pairs:generate": "node scripts/generatePairs.js",
+    "pairs:export": "node scripts/exportPairs.js",
+    "pairs:edit": "node scripts/editPair.js",
+    "test": "node --test",
+    "pairs:seed": "node scripts/pairs/seed.js"
   },
   "keywords": [],
   "author": "",

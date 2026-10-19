@@ -13,6 +13,7 @@ const cardSchema = new mongoose.Schema(
     keywords: { type: [String], default: [] },
     summary: { type: String, default: '' },
     sections: { type: Object, default: {} },
+    image: { type: String, default: '' },
   },
   {
     timestamps: true,

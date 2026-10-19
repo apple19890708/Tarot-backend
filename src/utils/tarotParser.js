@@ -7,6 +7,7 @@ const SUIT_MAP = {
   聖杯: { arcanaType: 'minor', suit: 'cups' },
   寶劍: { arcanaType: 'minor', suit: 'swords' },
   星幣: { arcanaType: 'minor', suit: 'pentacles' },
+  錢幣: { arcanaType: 'minor', suit: 'pentacles' },
 }
 
 function collectCardFiles(rootDirectory) {
@@ -14,6 +15,10 @@ function collectCardFiles(rootDirectory) {
 
   return directories.flatMap((directoryName) => {
     const directoryPath = path.join(rootDirectory, directoryName)
+
+    // 同一花色可能有「星幣／錢幣」兩種資料夾名稱，不存在的就跳過
+    if (!fs.existsSync(directoryPath)) return []
+
     const fileNames = fs.readdirSync(directoryPath)
 
     return fileNames

@@ -17,7 +17,7 @@ async function seedCards() {
   const cardFiles = collectCardFiles(workspaceRoot)
   const cards = cardFiles.map((filePath) => parseCardFile(filePath, workspaceRoot))
 
-  await mongoose.connect(mongoUri)
+  await mongoose.connect(mongoUri, { dbName: process.env.MONGO_DB_NAME || 'tarot-divination' })
   await Card.deleteMany({})
   await Card.insertMany(cards)
 
