@@ -381,3 +381,7 @@
 
 ### 待辦
 - 紀錄匯出（Markdown／PDF）尚未開始，見 v13 計畫書階段 5
+
+### 規劃
+- 新增 `doc/v14-reading-history-layout-plan.md`：我的占卜紀錄改兩欄（左側可收合的檢索標籤＋右側內容），只改前端
+- 新增 `doc/v15-tarot-draw-animation-plan.md`：手動抽牌動畫用 GSAP 重寫（游標角度判斷、飛入翻面、洗牌、切牌），只改前端
