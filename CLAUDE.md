@@ -12,6 +12,24 @@
 - `npm test`：Node 內建 `node:test`。改完程式一律跑測試；不要為了測試新增套件。
 - `npm run dev`：`node --watch`，使用者自己用的開發伺服器。
 
+## Claude 規範（`.claude/`）
+
+這個專案的分工規範放在 `.claude/`，前端 `../Tfontend/.claude/` 有對稱的一套。
+
+**agents**（複雜工作交給專責代理）
+
+- `rule-engineer`：新增／調整組合規則（規則檔、`ruleConfig.js`、`analysisFormatter.js`、邊界測試、計畫書）
+- `api-reviewer`：唯讀審查 API／權限／資料安全（改到 `routes/`、`middleware/`、`models/` 後使用）
+
+**skills**（固定流程照著走）
+
+- `verify`：改完程式的驗證流程（`npm test` ＋ 套件、計費路徑檢查）
+- `dev-server`：非開不可時，用 port 4100 啟動並**自行關閉**測試伺服器
+- `worklog`：寫 `doc/worklog.md`
+- `plan-doc`：建立／更新 `doc/vXX-*.md` 計畫書
+
+規範之間若有衝突，以本檔（CLAUDE.md）為準。
+
 ## 程式結構
 
 - `src/server.js`：占卜相關路由（`/api/health`、`/api/spreads`、`/api/readings/draw`、`/api/readings/narrate`）
