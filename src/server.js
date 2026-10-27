@@ -11,78 +11,21 @@ const spreads = require('./data/spreads')
 const { createAuthMiddleware } = require('./middleware/auth')
 const { createAuthRouter } = require('./routes/auth')
 const { createAdminRouter } = require('./routes/admin')
+const { createReadingsRouter } = require('./routes/readings')
+const { loadCardsInOrder } = require('./services/cardLoader')
+const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
 const { isNarrationAvailable, streamNarration, NarrationRefusedError } = require('./services/narrationService')
-const { compareCards, validateManualCards } = require('./services/manualDraw')
-const { SELECTABLE_DOMAINS } = require('./data/ruleConfig')
+const {
+  compareCards,
+  validateManualCards,
+  validateQuestion,
+  resolveDomain,
+  resolveCustomSpread,
+} = require('./services/manualDraw')
+const { getCardProfile } = require('./data/cardAttributes')
 
-const QUESTION_MAX_LENGTH = 500
 const ORIENTATIONS = ['upright', 'reversed']
-
-// 問題類型為選填；未指定時回傳 null，由規則引擎走關鍵詞比對
-function resolveDomain(raw) {
-  if (raw === undefined || raw === null || raw === '') {
-    return { domain: null }
-  }
-  if (typeof raw !== 'string' || !SELECTABLE_DOMAINS.includes(raw)) {
-    return { error: '問題類型不正確。' }
-  }
-  return { domain: raw }
-}
-
-const POSITION_LABEL_MAX = 20
-const POSITION_PROMPT_MAX = 120
-
-// 不指定牌陣時，使用者可以自己為每個位置命名與寫含意。
-// 組成一個臨時牌陣物件，後面的流程（位置權重、敘述、AI 提示）就能照常使用位置資訊。
-// 沒有 relations，牌對會退回相鄰配對。
-function resolveCustomSpread(raw, cardCount) {
-  if (raw === undefined || raw === null) {
-    return { spread: null }
-  }
-  if (!Array.isArray(raw) || raw.length !== cardCount) {
-    return { error: `自訂位置需要 ${cardCount} 筆，與牌數一致。` }
-  }
-
-  const positions = []
-  for (let index = 0; index < raw.length; index += 1) {
-    const item = raw[index] || {}
-    const label = typeof item.label === 'string' ? item.label.trim() : ''
-    const prompt = typeof item.prompt === 'string' ? item.prompt.trim() : ''
-    if (!label) {
-      return { error: `第 ${index + 1} 個位置還沒命名。` }
-    }
-    if (label.length > POSITION_LABEL_MAX) {
-      return { error: `位置名稱不可超過 ${POSITION_LABEL_MAX} 字。` }
-    }
-    if (prompt.length > POSITION_PROMPT_MAX) {
-      return { error: `位置說明不可超過 ${POSITION_PROMPT_MAX} 字。` }
-    }
-    positions.push({ key: `custom-${index + 1}`, label, prompt: prompt || label })
-  }
-
-  return {
-    spread: {
-      key: 'custom',
-      name: '自訂牌陣',
-      description: `由提問者自行定義的 ${cardCount} 個位置。`,
-      cardCount,
-      positions,
-      relations: null,
-    },
-  }
-}
-
-// 依指定順序把 drawn 對應回資料庫的牌，回傳 { error } 或 { cards }
-async function loadCardsInOrder(drawn) {
-  const found = await Card.find({ _id: { $in: drawn.map((item) => item.id) } }).lean()
-  const byId = new Map(found.map((card) => [String(card._id), card]))
-  const cards = drawn.map((item) => byId.get(String(item.id)))
-  if (cards.some((card) => !card)) {
-    return { error: '找不到部分牌卡。' }
-  }
-  return { cards }
-}
 
 mongoose.set('bufferCommands', false)
 
@@ -135,6 +78,8 @@ const { optionalAuth, requireAuth, requireAdmin, requireAiAccess } = createAuthM
 
 app.use('/api/auth', createAuthRouter({ ensureDatabase, requireAuth }))
 app.use('/api/admin', createAdminRouter({ ensureDatabase, requireAdmin }))
+// 只定義 GET／DELETE，與下面公開的 POST /api/readings/draw 等端點不衝突
+app.use('/api/readings', createReadingsRouter({ ensureDatabase, requireAuth }))
 
 app.get('/api/health', async (_req, res) => {
   const cardCount = isDatabaseReady() ? await Card.countDocuments() : 0
@@ -181,7 +126,13 @@ app.post('/api/readings/draw', optionalAuth, async (req, res, next) => {
       return
     }
 
-    const question = typeof req.body.question === 'string' ? req.body.question.trim() : ''
+    // 問題長度在這裡就擋掉，和 manual／narrate 一致（它會被回聲，也可能被存成紀錄）
+    const { question, error: questionError } = validateQuestion(req.body.question)
+    if (questionError) {
+      res.status(400).json({ message: questionError })
+      return
+    }
+
     const { domain, error: domainError } = resolveDomain(req.body.domain)
     if (domainError) {
       res.status(400).json({ message: domainError })
@@ -195,6 +146,7 @@ app.post('/api/readings/draw', optionalAuth, async (req, res, next) => {
       return
     }
 
+    // 紀錄不在這裡存：要不要留存由使用者在結果頁自己決定（POST /api/readings）
     res.json(await buildReadingWithDictionary({ question, spread, cards, domain }))
   } catch (error) {
     next(error)
@@ -211,15 +163,23 @@ app.get('/api/cards', async (_req, res, next) => {
     const cards = await Card.find({}, 'nameZh nameEn suit arcanaType number image').lean()
     const list = cards
       .sort(compareCards)
-      .map((card) => ({
-        id: card._id,
-        nameZh: card.nameZh,
-        nameEn: card.nameEn,
-        suit: card.suit,
-        arcanaType: card.arcanaType,
-        number: card.number,
-        image: card.image || '',
-      }))
+      .map((card) => {
+        // 宮廷牌靠牌名判斷（編號在不同牌組不一致），所以由後端給 kind，
+        // 前端只拿來分組顯示，不自己判斷哪些是宮廷牌
+        const profile = getCardProfile(card)
+
+        return {
+          id: card._id,
+          nameZh: card.nameZh,
+          nameEn: card.nameEn,
+          suit: card.suit,
+          arcanaType: card.arcanaType,
+          number: card.number,
+          image: card.image || '',
+          kind: profile.kind,
+          courtRank: profile.courtRank,
+        }
+      })
 
     res.json(list)
   } catch (error) {
@@ -235,9 +195,9 @@ app.post('/api/readings/manual', optionalAuth, async (req, res, next) => {
       return
     }
 
-    const question = typeof req.body.question === 'string' ? req.body.question.trim() : ''
-    if (question.length > QUESTION_MAX_LENGTH) {
-      res.status(400).json({ message: `問題長度不可超過 ${QUESTION_MAX_LENGTH} 字。` })
+    const { question, error: questionError } = validateQuestion(req.body.question)
+    if (questionError) {
+      res.status(400).json({ message: questionError })
       return
     }
 
@@ -289,12 +249,43 @@ app.post('/api/readings/manual', optionalAuth, async (req, res, next) => {
       drawOrientation: (index) => drawn[index].orientation,
       domain,
     })
-
+    // 紀錄不在這裡存：要不要留存由使用者在結果頁自己決定（POST /api/readings）
     res.json(reading)
   } catch (error) {
     next(error)
   }
 })
+
+// 把完整產生的 AI 解讀存回使用者自己的那筆紀錄。沒帶 readingId（例如舊版前端）就跳過；
+// 存檔失敗不影響已經送出去的解讀，只記 log。
+async function saveNarration({ readingId, userId, text, model, drawn }) {
+  if (!readingId || !userId || !text || !mongoose.isValidObjectId(readingId)) {
+    return
+  }
+
+  try {
+    const record = await Reading.findOne({ _id: readingId, user: userId })
+    if (!record) {
+      return
+    }
+
+    // 確認這段解讀講的就是那筆紀錄的牌，否則紀錄會配上一段和畫面無關的文字
+    const sameCards =
+      record.cards.length === drawn.length &&
+      record.cards.every(
+        (card, index) =>
+          String(card.cardId) === String(drawn[index].id) && card.orientation === drawn[index].orientation,
+      )
+    if (!sameCards) {
+      return
+    }
+
+    record.narration = { text, model: model || '', createdAt: new Date() }
+    await record.save()
+  } catch (error) {
+    console.error('AI 解讀存檔失敗：', error.message)
+  }
+}
 
 // 依牌與正逆位重算組合分析，再交給 AI 改寫成口語解讀；不信任前端傳來的分析文字
 // AI 解讀會產生費用，所以限 admin 與被管理者開通的會員（未登入者仍可抽牌與看規則分析）
@@ -318,9 +309,9 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
       return
     }
 
-    const question = typeof req.body.question === 'string' ? req.body.question.trim() : ''
-    if (question.length > QUESTION_MAX_LENGTH) {
-      res.status(400).json({ message: `問題長度不可超過 ${QUESTION_MAX_LENGTH} 字。` })
+    const { question, error: questionError } = validateQuestion(req.body.question)
+    if (questionError) {
+      res.status(400).json({ message: questionError })
       return
     }
 
@@ -382,6 +373,9 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
     // 回應格式為 NDJSON，每行一個事件：delta（一段文字）、done（完成）、error（串流途中失敗）
     const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
 
+    // 完整產生的解讀要存回紀錄（AI 文字要花錢又無法重現），所以邊送邊收集
+    let narrationText = ''
+
     try {
       const { model } = await streamNarration({
         reading,
@@ -395,7 +389,18 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
           })
           res.flushHeaders()
         },
-        onDelta: (text) => writeEvent({ type: 'delta', text }),
+        onDelta: (text) => {
+          narrationText += text
+          writeEvent({ type: 'delta', text })
+        },
+      })
+      // 只有完整產生才存；中途被停止的半截文字不留
+      await saveNarration({
+        readingId: req.body.readingId,
+        userId: req.auth.userId,
+        text: narrationText,
+        model,
+        drawn,
       })
       writeEvent({ type: 'done', model })
       res.end()

@@ -346,3 +346,38 @@
    權杖五／寶劍五都是衝突，權杖七／錢幣四都是守，三個侍者都是「新人」。
    整段寫完跑全領域稽核才會現形。對策是讓每個花色的同類牌講不同的事：
    錢幣侍者改稱「學徒」（技術），權杖侍者講衝勁，聖杯侍者講想法。
+
+## 2026-10-27
+
+### Claude 規範
+- 新增 `.claude/`：agents（`rule-engineer` 規則引擎、`api-reviewer` 唯讀 API 審查）與 skills（`verify`、`dev-server`、`worklog`、`plan-doc`）
+- `CLAUDE.md` 增列「Claude 規範」段落，衝突時仍以 CLAUDE.md 為準；前端 `../Tfontend/.claude/` 有對稱的一套
+
+### 占卜紀錄（詳見 `doc/v13-reading-history-plan.md`）
+- 新增 `src/models/Reading.js`：只存重算需要的輸入（問題、domain、牌 id ＋正逆位、牌陣 key 或自訂位置），
+  分析不存，讀取時由規則引擎重算；AI 解讀要花錢又無法重現，原樣保存
+- 牌名存一份快照（`nameZh`）只給列表顯示，詳情仍以牌庫為準
+- 每位使用者上限 100 筆，超過從最舊刪；用 `_id` 清單刪除，避免 `skip` 期間有新資料插入造成誤刪
+- 新增 `src/services/readingHistory.js`（建立、修剪、還原成重算參數）與
+  `src/services/cardLoader.js`（`loadCardsInOrder` 從 `server.js` 抽出來共用）
+- 新增 `src/routes/readings.js`：`POST /api/readings`（保存）、`GET /api/readings`（分頁列表，只回摘要）、
+  `GET /api/readings/:id`（重算分析＋存下來的 AI 解讀）、`DELETE /api/readings/:id`
+- **保存由使用者決定**：占卜端點不自動存，結果頁按「保存紀錄」才建立；保存時可一起送上已經產生的
+  AI 解讀（長度上限 20000 字），因為解讀無法重算
+- 查詢與刪除都帶 `user` 條件，別人的紀錄一律回 404（不回 403，避免透露該筆存在）
+- `requireAuth` 掛在個別路由，不用 `router.use`：同前綴下還有公開的 `POST /api/readings/draw`、`/manual`
+- `narrate` 可帶 `readingId`，**完整產生**才把文字存回紀錄；存之前比對那筆紀錄的牌與這次的牌是否相同，
+  中途停止的半截文字不存
+- `draw` 補上問題長度檢查（原本只有 manual／narrate 有）；問題驗證、牌陣位置、domain 驗證集中到
+  `src/services/manualDraw.js`，`server.js` 與紀錄路由共用同一份
+- `GET /api/cards` 新增 `kind` 與 `courtRank`（宮廷牌靠牌名判斷），讓前端分組顯示時不必自己判斷
+
+### 其他
+- 測試：`npm test` 共 116 項。新增 `test/readingHistory.test.js`（摘要欄位不外洩 AI 文字、牌陣與自訂位置還原、
+  牌陣消失或張數不符時退回無位置）與 `test/readingsRoutes.test.js`（跨使用者隔離：看／刪別人的紀錄回 404、
+  保存只寫自己的；保存的輸入驗證；超過上限時刪最舊的）
+- 路由改成可注入 `Reading` 與 `loadCardsInOrder`，測試用假 model 就能跑，不必連資料庫
+- 依審查修掉：`user` 欄位上重複的索引、`createdAt` 同毫秒時排序不穩（補 `_id` 當第二排序鍵）
+
+### 待辦
+- 紀錄匯出（Markdown／PDF）尚未開始，見 v13 計畫書階段 5
