@@ -25,7 +25,7 @@
 
 - `verify`：改完程式的驗證流程（`npm test` ＋ 套件、計費路徑檢查）
 - `dev-server`：非開不可時，用 port 4100 啟動並**自行關閉**測試伺服器
-- `worklog`：寫 `doc/worklog.md`
+- `worklog`：寫 `doc/worklog/` 的週記（一週一檔，檔名是該週週一的日期）
 - `plan-doc`：建立／更新 `doc/vXX-*.md` 計畫書
 
 規範之間若有衝突，以本檔（CLAUDE.md）為準。
@@ -44,7 +44,7 @@
 - `src/services/narrationService.js`：經 OpenRouter 呼叫 AI，把分析改寫成口語解讀
 - `doc/v01-tarot-combination-rules-plan.md`：組合規則第一版（規則 1～6，已完成）
 - `doc/v02-tarot-combination-rules-plan.md`：組合分析擴充（規則 7～10）
-- `doc/worklog.md`：每日工作紀錄
+- `doc/worklog/`：工作週記，一週一檔（`YYYY-MM-DD.md`，日期為該週週一）
 
 ## 編輯規則
 

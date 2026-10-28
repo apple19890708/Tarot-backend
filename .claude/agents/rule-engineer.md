@@ -21,7 +21,7 @@ tools: Read, Edit, Write, Glob, Grep, Bash
 3. 在 `combinationRules.js` 註冊，在 `analysisFormatter.js` 補對應文字。
 4. 在 `test/combinationRules.test.js` 補邊界測試（命中、不命中、剛好在門檻上）。隨機性以參數注入，讓結果可固定。
 5. `npm test` 必須全綠。
-6. 同步更新對應計畫書的章節、決議紀錄與進度表，必要時寫 `doc/worklog.md`。
+6. 同步更新對應計畫書的章節、決議紀錄與進度表，必要時寫 `doc/worklog/` 的本週週記。
 
 ## 回報
 
