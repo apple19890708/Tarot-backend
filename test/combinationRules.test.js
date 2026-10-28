@@ -676,7 +676,7 @@ test('關係對：沒有宣告 relations 時退回相鄰配對', () => {
   )
 })
 
-test('關係對：四個牌陣的權重總和為 1、版面座標不重疊、關係索引有效', () => {
+test('關係對：每個牌陣的權重總和為 1、版面座標不重疊、關係索引有效', () => {
   for (const spread of spreads) {
     const sum = spread.positions.reduce((acc, p) => acc + p.weight, 0)
     assert.ok(Math.abs(sum - 1) < 1e-9, `${spread.name} 權重總和為 ${sum}`)

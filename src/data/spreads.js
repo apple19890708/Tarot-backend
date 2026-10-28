@@ -41,6 +41,27 @@ const spreads = [
     ],
   },
   {
+    key: 'two-choice',
+    name: '二擇一',
+    cardCount: 5,
+    description: '在兩個選項之間猶豫時，對照各自的近況與後續發展。',
+    // 排成 V 字：求問者在最下方，左邊一路往上是甲、右邊是乙
+    grid: { cols: 5, rows: 3 },
+    positions: [
+      { key: 'querent', label: '求問者', prompt: '你目前的狀況與問題的現況', weight: 0.2, layout: { col: 3, row: 3 } },
+      { key: 'option-a-now', label: '甲的現況', prompt: '選擇甲的現況或近未來', weight: 0.15, layout: { col: 2, row: 2 } },
+      { key: 'option-b-now', label: '乙的現況', prompt: '選擇乙的現況或近未來', weight: 0.15, layout: { col: 4, row: 2 } },
+      { key: 'option-a-future', label: '甲的未來', prompt: '選擇甲以後的未來發展', weight: 0.25, layout: { col: 1, row: 1 } },
+      { key: 'option-b-future', label: '乙的未來', prompt: '選擇乙以後的未來發展', weight: 0.25, layout: { col: 5, row: 1 } },
+    ],
+    relations: [
+      { from: 1, to: 3, kind: 'sequence' }, // 甲的現況 → 甲的未來
+      { from: 2, to: 4, kind: 'sequence' }, // 乙的現況 → 乙的未來
+      { from: 1, to: 2, kind: 'contrast' }, // 甲、乙的現況對照
+      { from: 3, to: 4, kind: 'contrast' }, // 甲、乙的未來對照
+    ],
+  },
+  {
     key: 'guiding-star',
     name: '指引之星',
     cardCount: 7,
