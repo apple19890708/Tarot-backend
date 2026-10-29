@@ -6,3 +6,5 @@ yarn-error.log*
 pnpm-debug.log*
 dist/
 coverage/
+# 改寫牌對時的暫存 JSON／腳本（不進版控）
+scratchpad/
