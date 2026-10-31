@@ -149,7 +149,22 @@ money/swords、wands 的**同花色小×小（各 182 組、728 句）**也還�
 - **checkColumn 的直欄一定會超標**（§15.8）：`s % 8` 配 22 段不是整數倍，
   熱門 index 會用到 8～11 次。要為那幾張牌多寫 2～5 種說法
 
-**下一段從 love/swords 的小→大寶劍王牌開始，剩 14 段（1232 句）。**
+**love / swords 全檔完成**（大→小 22 段＋小→大 14 段，2464 句；小→大最短 42 字，
+預設情境 0、句尾重講 0、`checkColumn` 0 項超標、`auditPolarity` 0 筆、`npm test` 116 項通過）。
+組句工具 `scripts/pairtools/loveSwordsHeads.js`，說法表與流程在計畫書 §15.9；
+最後兩段（寶劍皇后、國王）用腳本裡的 `ALT` 另一組大牌開頭。
+
+**還沒入庫**：`node scripts/pairs/seed.js love` 會寫正式資料庫，先問使用者。
+**love / cups 大→小：22 / 22 段完成**（1232 句，平均 49.8 字、最短 42 字，預設情境 0、句尾重講 0、
+大→小 `checkColumn` 0 項超標、`auditPolarity` 0 筆、`npm test` 116 項通過）。
+組句工具 `scripts/pairtools/loveCupsHeads.js`，寫法與坑在計畫書 §15.10。
+
+**love / cups 小→大：7 / 14 段完成**（聖杯王牌～七，616 句，最短 42 字，預設情境 0、句尾重講 0、鏡像 0）。
+同一支 `loveCupsHeads.js`，參數給聖杯名就是小→大；做法與坑在 §15.10 最後一節。
+**寫小→大後半句前，先把開頭和大→小同一組牌那句的後半並排印出來對著寫**（§15.10 坑 3），
+否則 `checkMirror` 會抓到套路重複。
+
+**下一段從 love/cups 的小→大聖杯八開始，剩 7 段（616 句）**；最後兩段（聖杯皇后、國王）要另寫大牌開頭。
 
 **小→大寫完一定要多跑一支** `node scripts/pairtools/checkMirror.js money <花色> <來源牌...>`，
 它抓 A→B 和 B→A 兩列之間換了開頭、中間照抄的句子（四項稽核抓不到）。
