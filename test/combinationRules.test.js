@@ -268,9 +268,41 @@ test('規則 8：時間之流的正逆位走勢與起點結果', () => {
 test('規則 8：直指核心只留單一位置判定，配對型已移交', () => {
   const positionKeys = keysOf('core')
   const result = analyzeCombination({ entries: [up(TOWER), up(WANDS_4), up(CUPS_4), rev(PENTACLES_2)], positionKeys })
-  assert.deepEqual(result.positions.map((f) => f.type), ['resourceBlocked', 'coreMajor'])
+  // 對策位的聖杯四正位是輕微負面 → adviceFaceItMild（v16 起對策／建議位也有單一位置判定）
+  // 依牌陣順序：核心（0）→ 對策（2）→ 資源（3）
+  assert.deepEqual(result.positions.map((f) => f.type), ['coreMajor', 'adviceFaceItMild', 'resourceBlocked'])
   // 障礙×對策改由關係對處理，不應再出現在 positions
   assert.equal(result.positions.some((f) => f.type === 'adviceVsChallenge'), false)
+})
+
+test('規則 8：行動與結果的行動位、建議位依牌的極性換讀法', () => {
+  const positionKeys = keysOf('action-outcome')
+  // present, action, outcome, advice
+  const typesOf = (entries) => analyzeCombination({ entries, positionKeys }).positions.map((f) => f.type)
+
+  assert.deepEqual(typesOf([up(CUPS_4), up(TOWER), up(WANDS_4), up(EMPRESS)]), ['actionCostly', 'adviceDirect'])
+  assert.deepEqual(typesOf([up(CUPS_4), rev(EMPRESS), up(WANDS_4), up(TOWER)]), ['actionHesitant', 'adviceFaceIt'])
+  assert.deepEqual(typesOf([up(CUPS_4), rev(TOWER), up(WANDS_4), rev(TOWER)]), ['actionEasing', 'adviceLetGo'])
+
+  // 每種判定都要有文字，不能落到 default 的空字串
+  const reading = buildReading({
+    question: '要不要換工作',
+    spread: spreads.find((s) => s.key === 'action-outcome'),
+    cards: [CUPS_4, TOWER, WANDS_4, EMPRESS].map((card, i) => ({ ...card, _id: `c${i}`, slug: `c${i}` })),
+    drawOrientation: () => 'upright',
+  })
+  assert.ok(reading.analysis.positions.every((f) => f.text.length > 0))
+})
+
+test('規則 8：馬蹄鐵的隱藏影響與環境位', () => {
+  const positionKeys = keysOf('horseshoe')
+  // past, present, hidden, challenge, environment, advice, outcome
+  const entries = [up(CUPS_4), up(CUPS_5), up(TOWER), up(WANDS_5), up(EMPRESS), rev(SWORDS_6), up(FOOL)]
+  const types = analyzeCombination({ entries, positionKeys }).positions.map((f) => f.type)
+  assert.ok(types.includes('hiddenRisk'))
+  assert.ok(types.includes('environmentSupportive'))
+  // 沒有「未來」位置，過去／現在／未來的正逆位走勢不適用
+  assert.equal(types.includes('orientationTrend'), false)
 })
 
 test('規則 8：指引之星的助力、負面影響與問題終局', () => {

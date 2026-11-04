@@ -41,6 +41,26 @@ const spreads = [
     ],
   },
   {
+    key: 'action-outcome',
+    name: '行動與結果',
+    cardCount: 4,
+    description: '看清楚現在的做法會帶來什麼結果，以及牌建議怎麼調整。',
+    // 上排是「現況 → 行動 → 結果」這條線，建議放在行動正下方，方便對照
+    grid: { cols: 3, rows: 2 },
+    positions: [
+      { key: 'present', label: '現況', prompt: '你目前所處的狀況', weight: 0.25, layout: { col: 1, row: 1 } },
+      { key: 'action', label: '行動', prompt: '你正在做或打算採取的做法', weight: 0.25, layout: { col: 2, row: 1 } },
+      { key: 'outcome', label: '結果', prompt: '照這個做法下去會得到的結果', weight: 0.3, layout: { col: 3, row: 1 } },
+      { key: 'advice', label: '建議', prompt: '牌給你的調整方向', weight: 0.2, layout: { col: 2, row: 2 } },
+    ],
+    relations: [
+      { from: 0, to: 1, kind: 'sequence' }, // 現況 → 行動
+      { from: 1, to: 2, kind: 'sequence' }, // 行動 → 結果
+      { from: 1, to: 3, kind: 'contrast' }, // 你打算做的 vs. 牌建議的，這個牌陣的重點
+      { from: 0, to: 3, kind: 'remedy' }, // 面對現況，建議是可用的方式
+    ],
+  },
+  {
     key: 'two-choice',
     name: '二擇一',
     cardCount: 5,
@@ -81,6 +101,30 @@ const spreads = [
       { from: 3, to: 5, kind: 'sequence' }, // 現在 → 未來
       { from: 2, to: 4, kind: 'contrast' }, // 負面影響 ↔ 正面影響
       { from: 0, to: 6, kind: 'arc' }, // 問題 → 終局
+    ],
+  },
+  {
+    key: 'horseshoe',
+    name: '馬蹄鐵',
+    cardCount: 7,
+    description: '經典的七張牌陣，從過去、隱藏影響到阻礙與外在環境，最後給出建議與結果。',
+    // 排成 U 字：左邊由上往下是過去、現在，底部是隱藏影響、阻礙、環境，右邊由下往上是建議、結果
+    grid: { cols: 5, rows: 3 },
+    positions: [
+      { key: 'past', label: '過去', prompt: '事情是怎麼走到這一步的', weight: 0.1, layout: { col: 1, row: 1 } },
+      { key: 'present', label: '現在', prompt: '你當下面對的處境', weight: 0.15, layout: { col: 1, row: 2 } },
+      { key: 'hidden', label: '隱藏影響', prompt: '你還沒注意到、在檯面下運作的因素', weight: 0.15, layout: { col: 2, row: 3 } },
+      { key: 'challenge', label: '阻礙', prompt: '目前擋在前面的事', weight: 0.15, layout: { col: 3, row: 3 } },
+      { key: 'environment', label: '外在環境', prompt: '身邊的人與外在條件', weight: 0.1, layout: { col: 4, row: 3 } },
+      { key: 'advice', label: '建議', prompt: '最適合採取的態度與做法', weight: 0.15, layout: { col: 5, row: 2 } },
+      { key: 'outcome', label: '結果', prompt: '照目前走向會走到的結果', weight: 0.2, layout: { col: 5, row: 1 } },
+    ],
+    relations: [
+      { from: 0, to: 1, kind: 'sequence' }, // 過去 → 現在
+      { from: 1, to: 2, kind: 'depth' }, // 表面是現在，底下是隱藏影響
+      { from: 1, to: 3, kind: 'crossing' }, // 擋在現在前面的阻礙
+      { from: 3, to: 5, kind: 'remedy' }, // 面對阻礙，建議是可用的方式
+      { from: 1, to: 6, kind: 'arc' }, // 現在 → 結果
     ],
   },
   {

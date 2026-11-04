@@ -558,6 +558,43 @@ function buildPositionText(finding, entries) {
     case 'environmentRecovering':
       return `${a}：外面的阻礙在變小，環境沒有之前那麼難了。`
 
+    // 行動（你現在的做法）
+    case 'actionSound':
+      return `${a}：這個做法方向是對的，可以照著做下去。`
+    case 'actionHesitant':
+      return `${a}：做法本身沒問題，只是你還沒真的動手，或做得不夠到位。`
+    case 'actionCostly':
+      return `${a}：照這個做法走下去會付出代價，值得先停下來想想有沒有別條路。`
+    case 'actionShaky':
+      return `${a}：這個做法有些地方不太穩，邊做邊修正會比一次衝到底好。`
+    case 'actionEasing':
+      return `${a}：這個做法原本有風險，但壞的那面在減弱，代價沒有想像中大。`
+
+    // 建議／對策。位置名稱由 cardLabel 帶出，這裡不寫死「建議」或「對策」
+    case 'adviceDirect':
+      return `${a}：方向很直接，照這張牌說的去做就好。`
+    case 'adviceInner':
+      return `${a}：這張是逆位，重點不在往外多做什麼，而是先把自己心裡卡住的地方鬆開。`
+    // 負面的牌落在建議位，和 resourceAdverse 一樣要跟著位置轉讀法
+    case 'adviceFaceIt':
+      return `${a}：抽到偏負面的牌不是叫你往壞處走，而是要你正面面對這張牌說的那件難事，不要再繞過去。`
+    case 'adviceFaceItMild':
+      return `${a}：牌意有點保留——先承認這張牌點出的不舒服，再做決定，會比硬撐著往前好。`
+    case 'adviceLetGo':
+      return `${a}：這張偏負面的牌是逆位，建議是放下那份不安或舊包袱，它已經沒有那麼大的力量了。`
+
+    // 隱藏的影響
+    case 'hiddenHelp':
+      return `${a}：你沒注意到的地方，其實有一股在幫你的力量。`
+    case 'hiddenDormant':
+      return `${a}：有一份還沒浮上檯面的助力，時機到了才會發揮。`
+    case 'hiddenRisk':
+      return `${a}：檯面下有你沒看到的麻煩，最好主動去查清楚，不要等它自己冒出來。`
+    case 'hiddenDoubt':
+      return `${a}：檯面下有些說不清的顧慮，可能是你或身邊的人沒說出口的事。`
+    case 'hiddenFading':
+      return `${a}：檯面下原本有的麻煩正在消退，影響沒有那麼大了。`
+
     // 核心與根基看的是大小牌，不是極性
     case 'coreMajor':
       return `${a}是大牌：這件事的核心不完全由你決定，有些得看時機和外在情勢。`
@@ -881,6 +918,16 @@ const CONTRADICTIONS = [
     name: '焦點牌被講兩次',
     hit: (texts) => texts.filter((t) => t.includes('焦點牌')).length > 1,
   },
+  {
+    // 例：「火元素最多」又說「這次沒有權杖」。大牌補上的花色要講成「雖然沒有權杖的小牌」（見 splitMissingSuits）
+    name: '元素最多卻說沒有對應的花色',
+    hit: (texts) =>
+      Object.values(SUITS).some(
+        ({ label, element }) =>
+          texts.some((t) => new RegExp(`[火水風土和]*${ELEMENT_LABELS[element]}[火水風土和]*元素最多`).test(t)) &&
+          texts.some((t) => new RegExp(`這次沒有[^，。]*${label}`).test(t)),
+      ),
+  },
 ]
 
 function assertConsistency(analysis) {
@@ -889,6 +936,7 @@ function assertConsistency(analysis) {
   }
   const texts = [
     analysis.theme.text,
+    analysis.theme.elementNumberText,
     analysis.weights.text,
     analysis.quant?.text,
     analysis.question?.text,

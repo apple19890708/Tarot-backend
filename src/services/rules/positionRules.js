@@ -89,6 +89,21 @@ function analyzePositions({ positionKeys, items }) {
       help: 'environmentSupportive', latent: 'environmentUnclear',
       block: 'environmentAdverse', blockMild: 'environmentUnclear', easing: 'environmentRecovering',
     },
+    // 行動（行動與結果）：看的是「你現在的做法」本身穩不穩
+    action: {
+      help: 'actionSound', latent: 'actionHesitant',
+      block: 'actionCostly', blockMild: 'actionShaky', easing: 'actionEasing',
+    },
+    // 建議／對策：負面的牌在這裡不是叫你往壞處走，而是要你正面處理那件難事（同 resourceAdverse 的思路）
+    advice: {
+      help: 'adviceDirect', latent: 'adviceInner',
+      block: 'adviceFaceIt', blockMild: 'adviceFaceItMild', easing: 'adviceLetGo',
+    },
+    // 隱藏的影響（馬蹄鐵）
+    hidden: {
+      help: 'hiddenHelp', latent: 'hiddenDormant',
+      block: 'hiddenRisk', blockMild: 'hiddenDoubt', easing: 'hiddenFading',
+    },
   }
 
   Object.entries(BY_TONE).forEach(([key, byTone]) => {
@@ -112,7 +127,10 @@ function analyzePositions({ positionKeys, items }) {
     })
   }
 
-  return findings.filter(Boolean)
+  // 依牌在牌陣裡的順序排，畫面上才會照著牌陣一格一格讀下去；
+  // 原本照 BY_TONE 的宣告順序，塞爾特十字會先講「希望與恐懼」再講「環境」。
+  // 正逆位走勢的 evidence 從過去開始，自然排在最前面。sort 是穩定排序，同一張牌的判定維持原順序
+  return findings.filter(Boolean).sort((a, b) => a.evidence[0] - b.evidence[0])
 }
 
 module.exports = {
