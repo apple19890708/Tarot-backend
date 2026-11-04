@@ -70,16 +70,55 @@ function heavyText(stats) {
   return `${stats.total} 張裡有 ${stats.majorCount} 張大牌、${heavy} 張份量很重的小牌，比例偏高，有一部分不完全在你手上。`
 }
 
+// 宮廷階級被強調時，要講出這代表什麼，不能只說「此階級被強調」——標籤已經寫了張數，
+// 文字再報一次數字沒有資訊量。
+const COURT_RANK_THEMES = {
+  page: '事情帶著新開始、新消息，或還在摸索學習的味道',
+  knight: '事情正在動，有人在推進或帶來變動',
+  queen: '偏向用照顧和感受來掌握局面',
+  king: '有人得拿主意、扛起責任',
+}
+
+// 花色：一句講完，兩個花色並列時順便講它們之間的關係（沿用牌與牌的元素組合說明）
+function suitText(dominantSuits) {
+  if (dominantSuits.length === 0) return ''
+  const labels = dominantSuits.map(({ suit }) => SUITS[suit].label)
+  const covers = dominantSuits.map(({ suit }) => SUITS[suit].covers)
+  const counts = dominantSuits.map(({ count }) => count)
+  const sameCount = counts.every((count) => count === counts[0])
+
+  if (dominantSuits.length === 1) {
+    return `${labels[0]}最多（${counts[0]} 張），重點在${covers[0]}。`
+  }
+
+  const countText = sameCount
+    ? `${labels.join('和')}各 ${counts[0]} 張`
+    : dominantSuits.map(({ count }, i) => `${labels[i]} ${count} 張`).join('、')
+  const head = `${countText}，重點在${covers.join('、')}`
+
+  if (dominantSuits.length === 2) {
+    const [a, b] = dominantSuits.map(({ suit }) => SUITS[suit].element)
+    const meaning = pairMeaning(a, b)
+    if (meaning) return `${head}；這兩塊${meaning}。`
+  }
+  return `${head}。`
+}
+
+// 焦點牌有位置時寫成「落在『問題』位置的…」：直接接「問題的聖杯侍者」讀起來像牌名的一部分
+function focusText(entry) {
+  const name = entry.orientation === 'reversed' ? `${entry.card.nameZh}逆位` : entry.card.nameZh
+  return entry.label ? `這組牌的焦點牌是落在「${entry.label}」位置的${name}。` : `這組牌的焦點牌是${name}。`
+}
+
 function buildThemeText(result, entries) {
   const { theme, stats } = result
-  const focus = entries[theme.focusIndex]
-  const lines = [`焦點牌是${cardLabel(focus)}。`]
+  const lines = [focusText(entries[theme.focusIndex])]
 
   if (theme.dominance === 'fate') {
     lines.push(
       stats.majorCount > stats.total / 2
-        ? `大牌有 ${stats.majorCount} 張，超過總數 ${stats.total} 張的一半，議題偏向由外在或命運層面主導。`
-        : `大牌有 ${stats.majorCount} 張，數量已經不少，議題偏向由外在或命運層面主導。`,
+        ? `大牌有 ${stats.majorCount} 張，超過一半，這件事有不少部分由外在情勢主導。`
+        : `大牌有 ${stats.majorCount} 張，數量已經不少，這件事有不少部分由外在情勢主導。`,
     )
   } else if (theme.dominance === 'elevated') {
     // 比牌堆本身的比例高，但還沒到主導。這一級的存在是為了和
@@ -87,42 +126,78 @@ function buildThemeText(result, entries) {
     lines.push(heavyText(stats))
   } else if (stats.majorCount === 0) {
     // 一張大牌都沒有時不用特別點名「大牌 0 張」
-    lines.push('整組都是小牌，議題偏向日常，由個人可控。')
+    lines.push('整組都是小牌，這件事多半在你自己處理得來的範圍。')
   } else {
-    lines.push(`大牌只有 ${stats.majorCount} 張，議題偏向日常，由個人可控。`)
+    lines.push(`大牌只有 ${stats.majorCount} 張，這件事多半在你自己處理得來的範圍。`)
   }
 
-  theme.emphasizedCourtRanks.forEach(({ rank, count }) => {
-    lines.push(`${COURT_RANKS[rank].label}出現 ${count} 張，此階級被強調。`)
-  })
+  lines.push(suitText(theme.dominantSuits))
 
-  theme.dominantSuits.forEach(({ suit, count }) => {
-    lines.push(`${SUITS[suit].label}出現 ${count} 張，${SUITS[suit].covers}這一塊是重點。`)
+  theme.emphasizedCourtRanks.forEach(({ rank, count }) => {
+    lines.push(`${COURT_RANKS[rank].label}有 ${count} 張，${COURT_RANK_THEMES[rank]}。`)
   })
 
   return lines.join('')
 }
 
-// 元素與數字的分布。沒有任何可講的就回空字串，前端整區不顯示。
+// 缺少的花色要再分兩種：真的整塊沒出現，和「沒有這組小牌、但大牌帶來的同元素補上了」。
+// 後者不能說「這塊沒出現」，否則會和「火元素最多」這類句子互相矛盾。
+// 「元素」區與結語都用這個判斷，兩邊才不會各說各話。
+function splitMissingSuits(theme) {
+  const coveredByMajor = theme.missingSuits.filter((suit) => theme.dominantElements.includes(SUITS[suit].element))
+  return {
+    coveredByMajor,
+    trulyMissing: theme.missingSuits.filter((suit) => !coveredByMajor.includes(suit)),
+  }
+}
+
+// 元素對應的花色，用來借花色的 covers 講「這個元素管什麼事」，兩邊用詞才一致
+const SUIT_OF_ELEMENT = Object.fromEntries(Object.entries(SUITS).map(([suit, { element }]) => [element, suit]))
+
+// 「元素」區。沒有任何可講的就回空字串，前端整區不顯示。
+// v11：數字重複改由「走到哪個階段」講（那邊連大牌、宮廷牌都算進去），這裡只講元素，
+// 欄位名稱 elementNumberText 保留給舊版前端。
 function buildElementNumberText(result) {
   const { theme } = result
   const lines = []
 
-  theme.emphasizedNumbers.forEach(({ number, count, theme: numberTheme }) => {
-    lines.push(`數字 ${number} 出現 ${count} 張，「${numberTheme}」的主題被強調。`)
-  })
-
   if (theme.dominantElements.length > 0) {
-    const elements = theme.dominantElements.map((element) => ELEMENT_LABELS[element]).join('、')
-    lines.push(`元素以${elements}最多。`)
+    const names = theme.dominantElements.map((element) => ELEMENT_LABELS[element]).join('和')
+    const suits = theme.dominantElements.map((element) => SUIT_OF_ELEMENT[element])
+    // 元素有算大牌、花色只看小牌。兩者剛好一致時，「整體在說什麼」已經講過重點，這裡不再重複
+    const sameAsSuits =
+      suits.length === theme.dominantSuits.length && suits.every((suit) => theme.dominantSuits.some((s) => s.suit === suit))
+    lines.push(
+      sameAsSuits
+        ? `${names}元素最多，和花色看到的重點一致。`
+        : `把大牌的元素也算進來，${names}元素最多，牌面偏重${suits.map((suit) => SUITS[suit].covers).join('、')}。`,
+    )
   }
 
-  if (theme.missingSuits.length > 0) {
-    const missing = theme.missingSuits.map((suit) => `${SUITS[suit].label}（${SUITS[suit].covers}）`).join('、')
-    lines.push(`這次一張${missing}都沒出現，那幾塊沒有被直接點到。`)
+  // 缺少的花色：講出是哪一塊、可能代表什麼，不要只說「沒有被點到」。
+  // 例如沒有權杖但有塔、皇帝這類火元素大牌時，改說大牌補上了這塊（見 splitMissingSuits）
+  const { coveredByMajor, trulyMissing } = splitMissingSuits(theme)
+
+  if (trulyMissing.length > 0) {
+    const labels = joinList(trulyMissing.map((suit) => SUITS[suit].label))
+    const covers = joinList(trulyMissing.map((suit) => SUITS[suit].covers), '、')
+    const these = trulyMissing.length > 1 ? '這幾塊' : '這塊'
+    lines.push(`這次沒有${labels}，${covers}${these}牌面沒有提到：可能不是這件事的重點，也可能是你暫時沒顧到的地方。`)
+  }
+  if (coveredByMajor.length > 0) {
+    const labels = joinList(coveredByMajor.map((suit) => SUITS[suit].label))
+    const elements = joinList(coveredByMajor.map((suit) => ELEMENT_LABELS[SUITS[suit].element]))
+    lines.push(`雖然沒有${labels}的小牌，大牌帶來的${elements}元素補上了這塊。`)
   }
 
   return lines.join('')
+}
+
+// 「A和B」「A、B和C」；指定 separator 時一律用它連接
+function joinList(items, separator = null) {
+  if (separator) return items.join(separator)
+  if (items.length <= 2) return items.join('和')
+  return `${items.slice(0, -1).join('、')}和${items[items.length - 1]}`
 }
 
 // 用「面向」而不是「元素」描述，讀者才知道兩張牌實際上在互相影響什麼
@@ -195,12 +270,29 @@ function buildPairText(pair, entries) {
   return `${head}：${parts.join('；')}。`
 }
 
-// 宮廷階級在這組牌裡的份量（COURT_RANK_INTENSITY：page 0.6／knight 0.9／queen 0.8／king 1.0）
-const COURT_RANK_WEIGHT_TEXT = {
-  page: '侍者是宮廷裡最輕的階級，份量有限',
-  knight: '騎士的衝勁強，份量不輕',
-  queen: '皇后的份量僅次於國王',
-  king: '國王是宮廷裡份量最重的階級',
+// 宮廷牌當成一個人來講：階級是他的作風，花色（covers）是他在意的領域。
+// 以前寫「侍者是宮廷裡最輕的階級，份量有限」，講的是權重表，讀者不知道這代表什麼。
+const COURT_RANK_PERSONA = {
+  page: '像個還在學、在打探消息的新手',
+  knight: '像個急著行動、一路往前衝的人',
+  queen: '像個用感受和照顧來掌握局面的人',
+  king: '像個拿主意、扛責任的人',
+}
+
+// 宮廷牌所在的領域。SUITS.covers（感情和人、錢和實際的東西）接「在…上」讀起來不順，另外寫
+const COURT_ARENA = {
+  wands: '在做事上',
+  cups: '在感情和人際上',
+  swords: '在溝通和判斷上',
+  pentacles: '在錢和現實的事上',
+}
+
+// 逆位時這個作風會變成什麼樣子。要具體，不要寫「作風沒有完全發揮」這種空話
+const COURT_RANK_REVERSED = {
+  page: '逆位時像是還沒準備好，消息不可靠，或學得半調子',
+  knight: '逆位時容易衝過頭、衝錯方向，或急著出手',
+  queen: '逆位時感受容易變成情緒化，照顧變成控制或疏遠',
+  king: '逆位時拿主意容易變成獨斷，或該扛的責任沒扛起來',
 }
 
 // contributions 是依 |share| 排序過的陣列，不能用 index 直接取
@@ -210,10 +302,12 @@ function contributionOf(quant, index) {
 
 // 不輸出百分比。那個數字是三個極小數的比值（本局 v 分別是 0.20／0.03／0.04），
 // 用兩位有效數字呈現會讓人以為有實證基礎，實際上權重表是自訂的。
+// 用詞統一：share 是「把結果往順利／往不順拉了多少」，和畫面上「每張牌往哪邊拉」同一組詞。
+// 「份量」只留給牌本身的輕重（位置、大牌、宮廷階級），不再拿來講 share。
 const SHARE_LEVELS = [
-  { min: 0.4, level: 'lead', text: '在整組裡說話最大聲' },
-  { min: 0.15, level: 'second', text: '在整組裡也有一定的份量' },
-  { min: 0, level: 'support', text: '在整組裡只是輔助的角色' },
+  { min: 0.4, level: 'lead', text: (toward) => `是把結果${toward}拉最多的一張` },
+  { min: 0.15, level: 'second', text: (toward) => `把結果${toward}拉了不少` },
+  { min: 0, level: 'support', text: () => '對結果的影響不大' },
 ]
 
 function shareLevelOf(share) {
@@ -221,53 +315,68 @@ function shareLevelOf(share) {
   return SHARE_LEVELS.find((item) => value >= item.min) || SHARE_LEVELS[SHARE_LEVELS.length - 1]
 }
 
-function shareText(share) {
-  return shareLevelOf(share).text
+function towardOf(share) {
+  return share >= 0 ? '往順利' : '往不順'
 }
 
-// 不論代表誰，都先講它在這組牌裡有多重，再講角色
+function shareText(share) {
+  return shareLevelOf(share).text(towardOf(share))
+}
+
 // 階級的輕重，用來判斷它和帶動幅度是不是在講相反的事
 const RANK_IS_HEAVY = { page: false, knight: true, queen: true, king: true }
 
-function buildCourtText(court, entries, quant) {
+// 宮廷牌的兩種讀法都要留著（v8 E）：「問題沒提到別人」只是預設值，不是判斷 ——
+// 宮廷牌落在過去位很常指具體的人（前主管、前一個團隊的風格），關掉這個可能性等於放棄最有資訊量的入口。
+// 也不要用「問題沒提到別人」當開場，問「我該不該買電腦」的人就是當事人。
+// v11：讀法同一組牌通常都一樣，改在開場講一次，不再每張牌重複同一句。
+function courtRoleText(role, subject) {
+  return role === 'person'
+    ? `${subject}可以看成問題裡的那個人，也反映你面對他的姿態。`
+    : `${subject}可以看成你自己面對這件事的姿態；如果身邊真有這樣的人，也可以照著對。`
+}
+
+// showRole：同一組牌裡讀法不一致時，才在每張牌後面各自補上
+//
+// v11：這一區只講「這張宮廷牌是什麼樣的人，逆位時會變成什麼樣子」。
+// 對結果的拉力只在明顯時才提（拉最多或拉了不少）；影響小就不寫 ——
+// 「每張牌往哪邊拉」那區已經畫出來，這裡再講「這格比較重要，但影響不大」
+// 讀者會覺得矛盾（落在「終局」的牌對結果影響不大？），而解釋原因又得搬出演算法。
+function buildCourtText(court, entries, quant, showRole = false) {
   const entry = entries[court.index]
   const contribution = contributionOf(quant, court.index)
+  const reversed = entry.orientation === 'reversed'
+  const lines = [`${cardLabel(entry)}：${COURT_ARENA[entry.profile.suit]}，${COURT_RANK_PERSONA[court.rank]}。`]
 
-  // 一句只講一件事。階級與位置是「這張牌本來有多重」，
-  // 帶動幅度是「這次它實際帶動了多少」，兩者可以相反，
-  // 塞在同一句裡就會變成「份量最重的階級…只是輔助的角色」（v10 Q2，實測 69.1%）。
-  const standing = [COURT_RANK_WEIGHT_TEXT[court.rank]]
+  const level = contribution ? shareLevelOf(contribution.share).level : 'support'
+  const notable = level !== 'support'
 
-  if (contribution) {
-    // 位置權重已正規化，均分時每張是 1/n，明顯高於均分才值得一提
-    const average = 1 / entries.length
-    if (contribution.weight >= average * 1.2) {
-      standing.push('又落在權重較高的位置')
-    }
+  if (reversed && notable) {
+    // 逆位只打折、不反轉方向（規則 6）：逆位卻仍往順利拉時要用轉折接，否則讀起來像矛盾
+    const impact = shareText(contribution.share)
+    lines.push(
+      contribution.share > 0
+        ? `${COURT_RANK_REVERSED[court.rank]}；但整體來說，這張${level === 'lead' ? '仍' : '還是'}${impact}。`
+        : `${COURT_RANK_REVERSED[court.rank]}，這張${impact}。`,
+    )
+  } else if (reversed) {
+    lines.push(`${COURT_RANK_REVERSED[court.rank]}。`)
+  } else if (notable) {
+    // 階級輕（侍者）卻拉最多時用轉折
+    const turn = !RANK_IS_HEAVY[court.rank] && level === 'lead' ? '不過這次' : '這次'
+    lines.push(`${turn}${shareText(contribution.share)}。`)
   }
 
-  const parts = [standing.join('，')]
-
-  if (contribution) {
-    const level = shareLevelOf(contribution.share).level
-    const heavyRank = RANK_IS_HEAVY[court.rank]
-    // 階級重卻帶不動、或階級輕卻帶得動，都要用轉折詞接，不能平鋪直敘
-    const turn =
-      (heavyRank && level === 'support') || (!heavyRank && level === 'lead') ? '不過這次' : '這次'
-    parts.push(`${turn}${shareText(contribution.share)}`)
+  if (showRole) {
+    lines.push(courtRoleText(court.role, '這張牌'))
   }
 
-  // 兩種讀法都留著。「問題沒提到別人」只是預設值，不是判斷 ——
-  // 宮廷牌落在過去位很常指具體的人（前主管、前一個團隊的風格），
-  // 直接關掉這個可能性等於放棄這組牌最有資訊量的入口。
-  // 不要用「問題沒提到別人」當開場 —— 問「我該不該買電腦」的人就是當事人，
-  // 說「沒提到別人」會讓人覺得系統沒看懂問題。直接講這張牌代表誰。
-  const role =
-    court.role === 'person'
-      ? '這張牌講的是問題裡那個人；同時也反映你面對他的姿態'
-      : '這張牌講的是你自己處理這件事的方式；如果背後其實有個具體的人，也可以照著對'
+  return lines.join('')
+}
 
-  return `${cardLabel(entry)}：${parts.join('。')}。${role}。`
+// 讀法是否整組一致；一致時在開場講一次
+function courtRolesUniform(courts) {
+  return new Set(courts.map((court) => court.role)).size === 1
 }
 
 // 整區的開場。沒有宮廷牌時也要有一句，不能整區空白
@@ -276,19 +385,24 @@ function buildCourtSummary(courts, entries, quant) {
     return '這組牌沒有宮廷牌，人的因素不是重點，關鍵在事情本身怎麼走。'
   }
 
-  // 只有一張時，下面那張牌自己的句子就說完了，不再加一句廢話
+  const roleLine = courtRolesUniform(courts)
+    ? courtRoleText(courts[0].role, courts.length === 1 ? '這張宮廷牌' : '這些宮廷牌')
+    : '這些宮廷牌有的講人、有的講你自己的姿態，各張下面分別註明。'
+
+  // 只有一張時不必比較誰影響最大
   if (courts.length === 1) {
-    return ''
+    return roleLine
   }
 
-  // 多張時先講誰最重，後面各自的句子才有比較基準
+  // 多張時先講誰影響最大，後面各自的句子才有比較基準
   const sorted = [...courts].sort((a, b) => {
     const sa = Math.abs(contributionOf(quant, a.index)?.share ?? 0)
     const sb = Math.abs(contributionOf(quant, b.index)?.share ?? 0)
     return sb - sa
   })
 
-  return `這組牌有 ${courts.length} 張宮廷牌，其中${cardNameOnly(entries[sorted[0].index])}份量最重。`
+  // 排序依據是 share（影響結果的幅度），不是牌本身的份量，用詞要對上
+  return `這組牌有 ${courts.length} 張宮廷牌，其中${cardNameOnly(entries[sorted[0].index])}對結果的影響最大。${roleLine}`
 }
 
 // 同型矛盾可能一次出現好幾組，句型輪替，不要整段都是同一句話
@@ -373,144 +487,198 @@ function buildQuestionText(question) {
   return `${head}牌面沒有出現對應的花色，而是分散在${listSuits(question.topSuits)}，這次的訊息不集中在你問的領域上。`
 }
 
+// 用講話的口吻寫，不用「往外使」「外顯」「力道」這類抽象詞。
+// 正逆位在這裡的意思是：事情有沒有攤在檯面上、有沒有真的發生，不是好壞。
 function buildPositionText(finding, entries) {
-  const [a, b, c] = finding.evidence.map((index) => cardLabel(entries[index]))
-  const elementOf = (index) => elementName(entries[index].profile.element)
+  const [a] = finding.evidence.map((index) => cardLabel(entries[index]))
 
   switch (finding.type) {
     case 'orientationTrend': {
       // 這一句的主詞就是正逆位，牌名不要再帶正逆位後綴，否則會寫出
       //「…未來的錢幣五正逆位交錯」這種黏在一起的句子
       const plain = finding.evidence.map((index) => cardNameOnly(entries[index]))
+      const [, nb, nc] = plain
       const reversedNames = finding.evidence
         .filter((index) => entries[index].orientation === 'reversed')
         .map((index) => cardNameOnly(entries[index]))
 
       return {
-        smooth: `${plain.join('、')}三格都是正位，這些力量都是往外使的。`,
-        stuck: `${plain.join('、')}三格都是逆位，這些力量目前都往內走，沒有外顯。`,
-        unblock: `${b}之後是${c}，由逆轉正，原本收著的開始往外走。`,
-        blockAhead: `${b}之後是${c}，由正轉逆，力道由外顯轉為收在內部。`,
-        mixed: `這三格裡${reversedNames.join('、')}是逆位，其餘往外使得出來。`,
+        smooth: `${plain.join('、')}都是正位：從過去到未來，牌上說的事都會實際表現出來，不是悶在心裡。`,
+        stuck: `${plain.join('、')}都是逆位：這些事大多還悶著、卡著，從外面不太看得出來。`,
+        unblock: `${nb}還是逆位，到了${nc}轉成正位：之前悶著、卡住的事，接下來會開始動起來。`,
+        blockAhead: `${nb}還是正位，到了${nc}變成逆位：現在看得到的動作，接下來可能慢下來或收回去。`,
+        mixed: `${reversedNames.join('、')}是逆位，那裡的事還悶著、沒完全表現出來；其他格都是攤在檯面上的。`,
       }[finding.value]
     }
     // 助力位（資源／正面影響）
     case 'resourceReady':
-      return `${a}：這份優勢現在使得出來，可以直接拿來用。`
+      return `${a}：這是你手上現成的優勢，可以直接拿來用。`
     case 'resourceBlocked':
-      return `${a}：這份優勢是有的，只是現在沒有往外使出來。`
+      return `${a}：你其實有這份優勢，只是現在還沒拿出來用。`
+    // 負面的牌落在正向位置，讀法要跟著位置轉：不是「這格沒用」，而是幫助以不舒服的形式出現（v11）
     case 'resourceAdverse':
-      return `${a}：這一格本來該是你的本錢，但這張牌本身就偏滯，先別指望它。`
+      return `${a}：這格是你的本錢，抽到的卻是偏負面的牌——你手上的優勢不是舒服的東西，而是吃過的虧、看清的事實，這些反而能拿來用。`
     case 'resourceAdverseMild':
-      return `${a}：這一格算是本錢，不過這張牌有所保留，能用的程度有限。`
+      return `${a}：這格是你的本錢，牌意有點保留——能用的優勢藏在你不太想面對的那一面，先接受它才用得上。`
     case 'resourceRecovering':
-      return `${a}：這一格原本是拖累，不過力道在減弱，慢慢能當本錢用。`
+      return `${a}：這張牌本來是扯後腿的，但壞的那面在減弱，慢慢能變成可以用的條件。`
     case 'supportActive':
-      return `${a}：這份助力是實際在發揮的，不是只存在於想像。`
+      return `${a}：這份幫助是真的，現在就在幫你。`
     case 'supportBlocked':
-      return `${a}：這份助力是有的，只是現在沒有往外使出來。`
+      return `${a}：幫得上你的力量是有的，只是現在還沒真的出手。`
     case 'supportHollow':
-      return `${a}：這一格該是助力，牌本身卻偏負面，指望它不如自己想辦法。`
+      return `${a}：這格是助力，抽到的卻是偏負面的牌——幫你的不會是順順的支持，而是一次打擊或被迫面對的事，熬過去才會發現它推了你一把。`
     case 'supportHollowMild':
-      return `${a}：這一格該是助力，但這張牌本身有點猶豫，幫得有限。`
+      return `${a}：這格是助力，牌意有點猶豫——幫助會來，但要你先把卡住的那一點想清楚，它才幫得上。`
 
     // 阻力位（負面影響）
     case 'negativeActive':
-      return `${a}：這股阻力現在是明顯在起作用的，閃不掉。`
+      return `${a}：這個麻煩現在正在發生，躲不掉，得正面處理。`
     case 'negativeEasing':
-      return `${a}：阻力的力道沒有全開，影響比看起來輕。`
+      return `${a}：這個麻煩是逆位，殺傷力打了折，沒有看起來那麼嚴重。`
+    // 好牌落在負面位置也一樣要轉：麻煩出在好事本身，不是「沒什麼麻煩」
     case 'negativeMild':
-      return `${a}：這一格雖然標著負面影響，牌本身其實不壞，沒那麼難處理。`
+      return `${a}：這格是負面影響，抽到的卻是偏正面的牌——麻煩出在好事本身，例如太順而鬆懈、太滿意而不想改變，要防的是自己放鬆。`
 
     // 希望與恐懼
     case 'hopesFearsClear':
-      return `${a}：你清楚自己在期待什麼，也清楚在怕什麼，兩者沒有混在一起。`
+      return `${a}：你很清楚自己想要什麼、怕什麼，兩件事沒有攪在一起。`
     case 'hopesFearsTangled':
-      return `${a}：期待與恐懼糾纏在一起，你可能也分不清自己真正想要什麼。`
+      return `${a}：想要的和害怕的攪在一起，你可能自己也說不清楚到底想怎樣。`
     case 'hopesFearsHeavy':
-      return `${a}：這一格偏向恐懼那一邊，你擔心的成分多過期待的。`
+      return `${a}：這格偏向害怕那一邊，擔心的比期待的多。`
 
     // 環境
     case 'environmentSupportive':
-      return `${a}：外在條件與他人的態度是站在你這邊的。`
+      return `${a}：身邊的人和外在條件是挺你的。`
     case 'environmentUnclear':
-      return `${a}：外在支持是有的，只是還沒明朗化。`
+      return `${a}：外面是有人挺你的，只是還沒表態。`
     case 'environmentAdverse':
-      return `${a}：外在條件並不友善，這一塊得自己扛。`
+      return `${a}：外在條件不太友善，這部分得靠自己撐。`
     case 'environmentRecovering':
-      return `${a}：外在的阻力在減弱，環境沒有先前那麼難。`
+      return `${a}：外面的阻礙在變小，環境沒有之前那麼難了。`
 
     // 核心與根基看的是大小牌，不是極性
     case 'coreMajor':
-      return `${a}是大牌，核心議題超出個人能完全掌控的範圍。`
+      return `${a}是大牌：這件事的核心不完全由你決定，有些得看時機和外在情勢。`
     case 'coreMinor':
-      return `${a}是小牌，核心議題落在具體、可以著手處理的層面。`
+      return `${a}是小牌：這件事的核心是具體的事情，你可以自己動手處理。`
     case 'foundationMajor':
-      return `${a}是大牌，真正的動力來自你自己也未必完全察覺的層面。`
+      return `${a}是大牌：推著你的動機比你以為的深，可能連你自己都沒完全察覺。`
     case 'foundationMinor':
-      return `${a}是小牌，底下的動機相對單純，你自己說得出來。`
+      return `${a}是小牌：背後的動機很單純，你自己說得出來。`
 
     default:
       return ''
   }
 }
 
-// 走向的說法。peak／dip 會多收到一個中間極值的階段名稱。
+// 階段的口語說法。NUMBER_STAGES.label（起步期、考驗與臨界期…）像術語，讀者要自己翻譯
+const STAGE_PLAIN = {
+  pre: '還沒開始',
+  start: '剛起步',
+  develop: '穩住、發展',
+  trial: '面對考驗',
+  end: '收尾或過載',
+}
+const stagePlain = (step) => `${STAGE_PLAIN[step.stage]}的階段`
+
+// 依 numberStage.timeline（index 清單）取回時間線上的步驟；舊資料沒有 timeline 時整條 sequence 都算
+function timelineSteps(numberStage) {
+  const byIndex = new Map(numberStage.sequence.map((step) => [step.index, step]))
+  return (numberStage.timeline ?? numberStage.sequence.map((step) => step.index)).map((index) => byIndex.get(index))
+}
+
+// 終點落在起點之前／起步期：一輪走完、重新開始。
+// 用階段判斷而不是數字：宮廷牌沒有數字（侍者對到起步期）。
+function endsAtRestart(steps) {
+  const end = steps[steps.length - 1]
+  return end.stage === 'pre' || end.stage === 'start'
+}
+
+// 走向的說法。只有兩格時不說「一路」，兩點之間談不上一路推進。
 const SHAPE_TEXT = {
   // 同階段不等於停滯。數字相同是「同一個主題被重複強調」，
   // 這也是 NEUTRAL_CLUES 的 numberRepeat 一直在用的說法。
-  flat: (first) => `都落在${first}，同一個主題被重複強調。`,
-  rising: (first, last) => `從${first}一路推到${last}。`,
-  falling: (first, last, extreme, endNumber) =>
-    endNumber !== null && endNumber <= 3
-      ? `從${first}一路退回${last}，一輪走完了，接下來是重新起步。`
-      : `從${first}一路退回${last}，像是要回頭重新整理。`,
-  // 下降到 1～3 是「重新開始」，不是「收尾」。終點數字由 buildNumberStageText 帶進來。
-  peak: (first, last, extreme, endNumber) =>
-    endNumber !== null && endNumber <= 3
-      ? `中段衝到${extreme}，最後回到${last}，像是一輪走完要重新起步。`
-      : `中段衝到${extreme}，最後收在${last}。`,
-  dip: (first, last, extreme) => `中間掉到${extreme}，後面又拉回來，收在${last}。`,
-  zigzag: () => '階段起伏不定，節奏不穩。',
+  flat: ({ first }) => `時間線上都在${first}，同一個主題被重複強調。`,
+  rising: ({ first, last, count }) => (count > 2 ? `從${first}一路往前，走到${last}。` : `從${first}走到${last}。`),
+  falling: ({ first, last, restart }) =>
+    restart ? `從${first}退回${last}，像是一輪走完、要重新起步。` : `從${first}退回${last}，像是要回頭重新整理。`,
+  peak: ({ last, extreme, restart }) =>
+    restart ? `中間走到${extreme}，最後回到${last}，像是一輪走完、要重新起步。` : `中間走到${extreme}，最後收在${last}。`,
+  dip: ({ last, extreme }) => `中間退回${extreme}，後面又拉回來，收在${last}。`,
+  zigzag: () => '時間線上一下前進、一下後退，節奏不太穩。',
 }
 
-// v7：講「走到哪個階段」，依牌陣順序走一遍。
-// 不再輸出分布（「○○ 2 張」）與主軸（「以○○為主」），那兩句看不出推進。
-function buildNumberStageText(numberStage, entries, quant) {
-  const { sequence, shape, skipped } = numberStage
-  const stageLabel = (step) => NUMBER_STAGES[step.stage].label
-  const ordered = entries.some((entry) => entry.hasPosition) ? '依牌陣順序' : '依抽牌順序'
+// 每張牌在階段裡的記號：大牌寫出化簡過程（13→4），宮廷牌寫階級，讀者才知道數字從哪來
+function stepMark(step, entry) {
+  if (step.kind === 'court') {
+    return COURT_RANKS[entry.profile.courtRank].label
+  }
+  return step.kind === 'major' && step.majorNumber !== step.number ? `${step.majorNumber}→${step.number}` : `${step.number}`
+}
 
-  // 每一站帶上數字主題。只分期會把「抉擇、平衡」這種語意壓成「起步期」，
-  // 錢幣二因此被說成原地踏步。
-  const path = sequence
-    .map((step) => {
-      const theme = entries[step.index].profile.numberTheme
-      const number = theme ? `${step.number}．${theme}` : `${step.number}`
-      return `${entries[step.index].label} ${entries[step.index].card.nameZh}（${number}）`
-    })
-    .join(' → ')
+function stepText(step, entries) {
+  const entry = entries[step.index]
+  const label = entry.label ? `${entry.label} ` : ''
+  const theme = step.themeLabel ? `．${step.themeLabel}` : ''
+  return `${label}${entry.card.nameZh}（${stepMark(step, entry)}${theme}）`
+}
 
-  const lines = [`${ordered}：${path}。`]
+// v11：走向只看時間線（過去／現在／未來／結果這類位置），其他格只列出階段、不畫箭頭。
+// 回傳三樣：
+//   text    完整文字（含路徑列舉），給 AI 解讀與舊版前端
+//   summary 只有結論，前端畫了時間軸時用它，避免路徑講兩次
+//   steps   每張牌的記號與階段，給前端畫時間軸
+function buildNumberStage(numberStage, entries, quant) {
+  const { sequence } = numberStage
+  const timeline = timelineSteps(numberStage)
+  const inTimeline = new Set(timeline.map((step) => step.index))
+  const others = sequence.filter((step) => !inTimeline.has(step.index))
+  const hasPositions = entries.some((entry) => entry.hasPosition)
 
-  if (sequence.length >= 2) {
-    const orders = sequence.map((step) => NUMBER_STAGES[step.stage].order)
-    const extremeOrder = shape === 'dip' ? Math.min(...orders) : Math.max(...orders)
-    const extreme = stageLabel(sequence[orders.indexOf(extremeOrder)])
+  const pathLines = []
+  const summary = []
 
-    const endNumber = sequence[sequence.length - 1].number
-    lines.push(
-      SHAPE_TEXT[shape](stageLabel(sequence[0]), stageLabel(sequence[sequence.length - 1]), extreme, endNumber),
+  if (timeline.length >= 2) {
+    pathLines.push(
+      `${hasPositions ? '時間線' : '依抽牌順序'}：${timeline.map((step) => stepText(step, entries)).join(' → ')}。`,
     )
+
+    const orders = timeline.map((step) => NUMBER_STAGES[step.stage].order)
+    const extremeOrder = numberStage.shape === 'dip' ? Math.min(...orders) : Math.max(...orders)
+    summary.push(
+      SHAPE_TEXT[numberStage.shape]({
+        first: stagePlain(timeline[0]),
+        last: stagePlain(timeline[timeline.length - 1]),
+        extreme: stagePlain(timeline[orders.indexOf(extremeOrder)]),
+        restart: endsAtRestart(timeline),
+        count: timeline.length,
+      }),
+    )
+    // 兩點之間只看得出方向，看不出過程
+    if (timeline.length === 2) {
+      summary.push('只有兩格能比較，走向參考就好。')
+    }
+  } else if (hasPositions) {
+    summary.push('這個牌陣沒有能排出先後的時間位置，只看各格落在哪個階段，不談走向。')
   } else {
-    lines.push('只有一張有數字的小牌，看不出階段走向。')
+    summary.push('只有一張牌能看階段，看不出走向。')
+  }
+
+  if (others.length > 0) {
+    const head = timeline.length >= 2 ? '其他格不是時間點，不算進走向' : '各格'
+    pathLines.push(`${head}：${others.map((step) => stepText(step, entries)).join('、')}。`)
   }
 
   // 同一個數字出現多次時，在這裡就講，不要丟給「元素與數字」那段各說各話（v10 Q7）
+  // 宮廷牌沒有數字，不參與「同一個數字重複」的判斷
   const numberCounts = {}
-  sequence.forEach((step) => {
-    numberCounts[step.number] = (numberCounts[step.number] || 0) + 1
-  })
+  sequence
+    .filter((step) => step.number !== null)
+    .forEach((step) => {
+      numberCounts[step.number] = (numberCounts[step.number] || 0) + 1
+    })
   const repeated = Object.entries(numberCounts).filter(([, count]) => count >= 2)
   if (repeated.length > 0) {
     const text = repeated
@@ -519,21 +687,27 @@ function buildNumberStageText(numberStage, entries, quant) {
         return `${number}（${theme?.themeLabel || ''}）出現 ${count} 次`
       })
       .join('、')
-    lines.push(`其中數字 ${text}，同一個主題被重複強調。`)
+    summary.push(`數字 ${text}，同一個主題被重複強調。`)
   }
 
-  if (skipped.length > 0) {
-    lines.push(`${skipped.map((index) => cardNameOnly(entries[index])).join('、')}不走小牌的數字階段。`)
-
-    // 被剔除的若正好是帶動最大的那張，一定要講出來，
-    // 否則「看不出走向」會變成剔除規則的產物，而不是牌面的訊息。
-    const lead = quant?.contributions?.[0]
-    if (lead && skipped.includes(lead.index)) {
-      lines.push(`但${cardNameOnly(entries[lead.index])}是這組牌裡說話最大聲的一張，看階段時要記得它不在這條線上。`)
+  const steps = sequence.map((step) => {
+    const entry = entries[step.index]
+    return {
+      index: step.index,
+      label: entry.label ?? null,
+      name: entry.card.nameZh,
+      mark: stepMark(step, entry),
+      theme: step.themeLabel ?? null,
+      stage: step.stage,
+      stageLabel: STAGE_PLAIN[step.stage],
     }
-  }
+  })
 
-  return lines.join('')
+  return {
+    text: [...pathLines, ...summary].join(''),
+    summary: summary.join(''),
+    steps,
+  }
 }
 
 // 焦點牌由 buildThemeText 獨佔，這裡不再重講一次（v8 A8）
@@ -579,7 +753,7 @@ function buildWeightText(weights, entries, dominance) {
 const NEGATIVE_DIRECTIONS = new Set(['strongNegative', 'negative'])
 
 // 規則 11：文字只講分級與傾向，不寫出 DI 數字（避免假精確感）
-function buildQuantText(quant, entries, focusIndex) {
+function buildQuantText(quant, entries) {
   const lines = []
   const axes = Object.entries(quant.energy).sort((a, b) => b[1] - a[1])
   const [topAxis, secondAxis] = axes
@@ -605,33 +779,25 @@ function buildQuantText(quant, entries, focusIndex) {
   const soleReversedIsTop =
     heavyResistance && reversed.length === 1 && top && entries[top.index] === reversed[0]
 
+  // 用詞和畫面上的「每張牌往哪邊拉」對齊：往順利／往不順。
+  // 以前寫「帶動整體走向」「這和份量最重的那張是兩回事」，但畫面上沒有任何東西叫「份量最重」，
+  // 讀者對不起來。改成直接點名，不再拿另一張牌比較：
+  // 「焦點牌」已在 theme.text 講過，這裡再提會觸發 assertConsistency 的「焦點牌被講兩次」。
   if (top && top.share !== 0) {
+    const toward = top.share > 0 ? '往順利' : '往不順'
     if (soleReversedIsTop) {
       const name = cardNameOnly(entries[top.index])
       lines.push(
         top.share > 0
-          ? `其中${name}說話最大聲，但它是逆位，力道出不來，推進時會卡。`
-          : `其中${name}說話最大聲，又是逆位，推進時會卡。`,
+          ? `${toward}拉最多的是${name}，但它是逆位，力道出不來，推進時會卡。`
+          : `${toward}拉最多的是${name}，又是逆位，推進時會卡。`,
       )
     } else {
       const card = cardLabel(entries[top.index])
-      if (top.share > 0) {
-        // 和焦點牌不同張時要說清楚這是另一個角度，否則讀者不知道該看哪張（v10 Q1）
-        lines.push(
-          top.index === focusIndex
-            ? `其中${card}最能推一把。`
-            : `就帶動整體走向來說，${card}推得最用力 —— 這和份量最重的那張是兩回事。`,
-        )
-      } else {
-        // 正位的牌卻在拖，光看「正位…拖」像是前後矛盾，補一句說明拖的來源是牌義本身
-        const fromMeaning = entries[top.index].orientation === 'upright' ? '（牌義本身就偏滯）' : ''
-        // 和「推得動」那個分支一樣，不是焦點牌時要說清楚這是另一個角度（v10 Q1）
-        lines.push(
-          top.index === focusIndex
-            ? `其中${card}拖得最明顯${fromMeaning}。`
-            : `就帶動整體走向來說，${card}拖得最明顯${fromMeaning} —— 這和份量最重的那張是兩回事。`,
-        )
-      }
+      // 正位的牌卻往不順拉，光看「正位」像是前後矛盾，補一句原因在牌義本身
+      const fromMeaning =
+        top.share < 0 && entries[top.index].orientation === 'upright' ? '這張是正位，往不順拉是因為牌義本身就偏消極。' : ''
+      lines.push(`${toward}拉最多的是${card}。${fromMeaning}`)
     }
   }
 
@@ -658,10 +824,14 @@ function buildQuantText(quant, entries, focusIndex) {
     } else {
       lines.push('一邊是牌本身就偏滯，一邊是逆位讓力道出不來，兩種都有。')
     }
-  } else if (!heavyResistance && quant.momentum >= 0.5) {
+  } else if (quant.levels.momentum === 3 && quant.levels.resistance < 3) {
     // momentum 現在算的是「正向極性且使得出來」的佔比，與牌義一致，
     // 所以這裡可以直接說推得動，不必再替算錯的數字圓場。
+    // 用分級而不是固定 0.5：要和畫面上「推力：相當充足」那格對得起來。
     lines.push('牌本身是正向的，力道也使得出來，推得動。')
+  } else if (quant.levels.momentum === 1 && quant.levels.resistance === 1) {
+    // 推力、阻力兩格都在最低一格時，畫面上看起來像「什麼都沒有」，要講明這代表平靜
+    lines.push('推的力量和卡的力量都不大，局面目前偏平靜，不太會自己大起大落。')
   }
 
   if (quant.confidenceLow) {
@@ -699,7 +869,9 @@ function buildVerdict(result) {
 const CONTRADICTIONS = [
   {
     name: '可控與不可控同時成立',
-    hit: (texts) => texts.some((t) => t.includes('由個人可控')) && texts.some((t) => t.includes('不是你能完全掌控')),
+    hit: (texts) =>
+      texts.some((t) => t.includes('由個人可控') || t.includes('自己處理得來的範圍')) &&
+      texts.some((t) => t.includes('不是你能完全掌控')),
   },
   {
     name: '同時宣告單一重心又說份量相當',
@@ -758,7 +930,7 @@ function formatAnalysis(result, rawEntries, pairTexts = null) {
     }),
     courts: result.courts.map((court) => ({
       ...court,
-      text: buildCourtText(court, entries, result.quant),
+      text: buildCourtText(court, entries, result.quant, !courtRolesUniform(result.courts)),
     })),
     // 新增欄位：沒有宮廷牌時也要有一句，前端不要整區隱藏
     courtSummary: buildCourtSummary(result.courts, entries, result.quant),
@@ -774,13 +946,13 @@ function formatAnalysis(result, rawEntries, pairTexts = null) {
       ? {
           ...result.quant,
           directionLabel: DIRECTION_LABELS[result.quant.direction],
-          text: buildQuantText(result.quant, entries, result.theme.focusIndex),
+          text: buildQuantText(result.quant, entries),
         }
       : null,
     question: result.question ? { ...result.question, text: buildQuestionText(result.question) } : null,
     positions: result.positions.map((finding) => ({ ...finding, text: buildPositionText(finding, entries) })),
     numberStage: result.numberStage
-      ? { ...result.numberStage, text: buildNumberStageText(result.numberStage, entries, result.quant) }
+      ? { ...result.numberStage, ...buildNumberStage(result.numberStage, entries, result.quant) }
       : null,
     weights: {
       ...result.weights,
@@ -800,14 +972,15 @@ function formatAnalysis(result, rawEntries, pairTexts = null) {
 // 和 SHAPE_TEXT 一樣，下降到 1～3 是「重新起步」不是「收尾」。
 // 之前只改了階段區塊，結語這份漏掉，是同一個 bug 的兩個出口。
 const SHAPE_SUMMARY = {
-  flat: () => '數字都落在同一階段，同一個主題被重複強調。',
-  rising: () => '階段一路往前推，方向是對的。',
-  falling: (endNumber) =>
-    endNumber <= 3 ? '階段走回起點，一輪結束，接下來是重新開始。' : '階段在往回走，像是要回頭重整。',
-  peak: (endNumber) =>
-    endNumber <= 3 ? '中段衝得最高，最後回到起點，一輪走完了。' : '中段衝得最高，後面要收尾。',
-  dip: () => '中間掉下去過，現在正在拉回來。',
-  zigzag: () => '階段起伏不定，節奏不穩。',
+  flat: () => '時間線上都落在同一個階段，同一個主題被重複強調。',
+  // 不說「方向是對的」：往前推進不等於好事，好壞看的是上面的走向
+  rising: () => '時間線上一路往前推進。',
+  falling: (restart) =>
+    restart ? '時間線上走回起點，像是一輪走完、要重新開始。' : '時間線上在往回走，像是要回頭重新整理。',
+  peak: (restart) =>
+    restart ? '時間線上中間衝到最高，最後回到起點，像是一輪走完了。' : '時間線上中間衝到最高，後面要收尾。',
+  dip: () => '時間線上中間掉下去過，後來又拉回來。',
+  zigzag: () => '時間線上一下前進、一下後退，節奏不太穩。',
 }
 
 // 規則版的提問。依序比對，最多取兩題 —— 問題一多就失焦，反而沒人回答。
@@ -821,7 +994,7 @@ const GUIDANCE_QUESTIONS = [
       `${cardNameOnly(ctx.entries[ctx.blockedConflict.from])}那份使不出來的助力，是你還沒決定，還是在等別人表態？`,
   },
   {
-    // 最有份量的那張是逆位：力道出不來的原因在內還是在外
+    // 影響結果最多的那張是逆位：力道出不來的原因在內還是在外
     fact: 'lead',
     when: (ctx) => ctx.lead && ctx.entries[ctx.lead.index].orientation === 'reversed',
     ask: (ctx) =>
@@ -843,8 +1016,8 @@ const GUIDANCE_QUESTIONS = [
     // 最後一格：問你希望它是哪一種，而不是宣告它會是什麼
     fact: 'last',
     when: (ctx) => ctx.last.hasPosition,
-    ask: (ctx) =>
-      `${ctx.last.label}的${ctx.last.card.nameZh}，你希望它往哪個方向走？為此你這週能做的第一件事是什麼？`,
+    // 問的是事情，不是牌：「你希望寶劍騎士往哪走」讀起來像在問一張牌
+    ask: (ctx) => `想讓${ctx.last.label}往你要的方向走，這週能做的第一件事是什麼？`,
   },
 ]
 
@@ -857,7 +1030,7 @@ function buildGuidanceQuestions(result, entries, last, mentioned) {
     lead: result.quant?.contributions?.[0] || null,
     dominance: result.theme.dominance,
     blockedConflict: result.conflicts.find((item) => item.type === 'enhanceWithBlocked') || null,
-    missingCovers: result.theme.missingSuits.map((suit) => SUITS[suit].covers),
+    missingCovers: splitMissingSuits(result.theme).trulyMissing.map((suit) => SUITS[suit].covers),
   }
 
   const usable = GUIDANCE_QUESTIONS.filter((rule) => rule.when(ctx) && !mentioned.has(rule.fact))
@@ -867,8 +1040,32 @@ function buildGuidanceQuestions(result, entries, last, mentioned) {
   return chosen.slice(0, 2).map((rule) => rule.ask(ctx))
 }
 
-// 結語：份量與張力、議題性質、主導領域、階段走向、最該留意的卡點、落點、提問。
-// 不逐張列舉（每張牌下面本來就有完整牌義），也不重複位置名稱。
+// 結語。v11 改成先下總結再展開，不再一條一條列事實：
+//   一、整體：走向＋這件事有多少在你手上
+//   二、關鍵牌：往順利／往不順拉最多的牌
+//   三、重點與盲點：主要花色（並列時全部講）、真的沒出現的那塊
+//   四、要留意的卡點：矛盾點只取第一個
+//   五、時間線上的走向
+//   六、終局（落點）代表什麼：只報牌名沒有資訊量，宮廷牌講出人物樣貌
+//   七、留問題給自己
+// 不逐張列舉（每張牌下面本來就有完整牌義）。
+const CONTROL_TEXT = {
+  personal: '多半還在你自己處理得來的範圍',
+  elevated: '有一部分不完全在你手上',
+  fate: '有不少部分不是你能完全掌控的',
+}
+
+function lastCardText(last) {
+  const name = `${last.label}落在${last.card.nameZh}${last.orientation === 'reversed' ? '逆位' : ''}`
+  if (last.profile.kind === 'court') {
+    const rank = last.profile.courtRank
+    const look = last.orientation === 'reversed' ? COURT_RANK_REVERSED[rank] : COURT_RANK_PERSONA[rank]
+    return `${name}：${COURT_ARENA[last.profile.suit]}，${look}。`
+  }
+  // 其他牌的牌義在牌卡上，這裡只指出要回頭看哪一張
+  return `${name}，這張的牌義值得多看一眼。`
+}
+
 function buildGuidance(result, rawEntries) {
   const entries = rawEntries.map((entry, index) => ({ ...entry, profile: result.profiles[index] }))
 
@@ -878,91 +1075,63 @@ function buildGuidance(result, rawEntries) {
 
   const contributions = result.quant?.contributions || []
   const lines = []
-
-  // 一、份量與二、張力合併成一句：contributions 依 |share| 排序，
-  // 所以第一名必定是推力或阻力其中一方，分開寫會把同一張牌講兩次。
-  const top = contributions[0]
-  const pusher = contributions.find((item) => item.share > 0)
-  const blocker = contributions.find((item) => item.share < 0)
-
-  const named = new Set()
   // 記下結語已經陳述過的事實，最後的提問不要再問一次同一件事
   const mentioned = new Set()
 
+  // 一、整體
+  const direction = result.quant ? DIRECTION_LABELS[result.quant.direction] : null
+  const control = CONTROL_TEXT[result.theme.dominance] ?? CONTROL_TEXT.personal
+  if (result.theme.dominance !== 'personal') mentioned.add('dominance')
+  lines.push(direction ? `整體來看${direction}，這件事${control}。` : `這件事${control}。`)
+
+  // 二、關鍵牌。contributions 依 |share| 排序，第一名必定是往順利或往不順其中一方，
+  // 和反方向拉最多的那張合成一句，不要把同一張牌講兩次
+  const top = contributions[0]
   if (top && top.share !== 0) {
-    const head = `這組牌的份量集中在${cardLabel(entries[top.index])}`
-    named.add(top.index)
-
-    if (top.share > 0) {
-      if (blocker) {
-        named.add(blocker.index)
-        lines.push(`${head}，推得動；但${cardNameOnly(entries[blocker.index])}拖住。`)
-      } else {
-        lines.push(`${head}，推得動，沒有明顯擋路的。`)
-      }
-    } else if (pusher) {
-      named.add(pusher.index)
-      lines.push(`${head}，它在拖；${cardNameOnly(entries[pusher.index])}是推得動的那張。`)
-    } else {
-      lines.push(`${head}，它在拖，推力還沒出現。`)
-    }
+    const other = contributions.find((item) => Math.sign(item.share) === -Math.sign(top.share))
+    const head = `關鍵在${cardLabel(entries[top.index])}，它把結果${towardOf(top.share)}拉得最多`
+    lines.push(other ? `${head}；${cardNameOnly(entries[other.index])}則${towardOf(other.share)}拉。` : `${head}。`)
   }
 
-  // 三、議題性質：大牌份量決定這件事有多少在自己手上
-  if (result.theme.dominance === 'fate') {
-    mentioned.add('dominance')
-    lines.push(`大牌有 ${result.stats.majorCount} 張，這件事有不少部分不是你能完全掌控的。`)
-  } else if (result.theme.dominance === 'elevated') {
-    mentioned.add('dominance')
-    lines.push(heavyText(result.stats))
-  } else if (result.weights?.majorWeightShare >= 0.5) {
-    lines.push('大牌張數不多，份量卻重，別只看表面的張數。')
-  } else {
-    lines.push('整體偏向日常範圍，多半還在你自己處理得來的程度。')
+  // 三、重點與盲點。花色並列時全部講，只挑第一個會漏掉一半
+  const focusCovers = result.theme.dominantSuits.map(({ suit }) => SUITS[suit].covers)
+  const { trulyMissing } = splitMissingSuits(result.theme)
+  const missingCovers = trulyMissing.map((suit) => SUITS[suit].covers)
+  if (missingCovers.length > 0) mentioned.add('missing')
+  if (focusCovers.length > 0 && missingCovers.length > 0) {
+    lines.push(`牌面的焦點在${focusCovers.join('、')}；${missingCovers.join('、')}這塊沒出現，可能是容易被忽略的地方。`)
+  } else if (focusCovers.length > 0) {
+    lines.push(`牌面的焦點在${focusCovers.join('、')}。`)
+  } else if (missingCovers.length > 0) {
+    lines.push(`${missingCovers.join('、')}這塊沒出現，可能是容易被忽略的地方。`)
   }
 
-  // 四、主導領域：缺什麼往往比有什麼更值得講
-  const dominantSuit = result.theme.dominantSuits[0]
-  if (dominantSuit) {
-    lines.push(`檯面上的重點是${SUITS[dominantSuit.suit].label}，也就是${SUITS[dominantSuit.suit].covers}。`)
-  }
-  if (result.theme.missingSuits.length > 0) {
-    mentioned.add('missing')
-    const missing = result.theme.missingSuits.map((suit) => SUITS[suit].covers).join('、')
-    lines.push(`${missing}這幾塊這次沒出現，是容易被忽略的地方。`)
-  }
-
-  // 五、階段走向
-  // 只有一張有數字的小牌時沒有「走向」可言，整句略過
-  const stage = result.numberStage
-  if (stage && stage.sequence.length >= 2 && SHAPE_SUMMARY[stage.shape]) {
-    lines.push(SHAPE_SUMMARY[stage.shape](stage.sequence[stage.sequence.length - 1].number))
-  }
-
-  // 六、最需要留意的卡點：矛盾點只取第一個，講完整反而失焦
+  // 四、要留意的卡點
   const conflict = result.conflicts[0]
   if (conflict) {
     mentioned.add('conflict')
     lines.push(`要留意的是，${buildConflictText(conflict, entries)}`)
   }
 
-  // 七、落點：描述走向，但不下宣判。
-  // 「會停在○○」聽起來像預告結果，塔羅的價值在把選項攤開，不在宣判。
+  // 五、時間線上的走向（少於兩格時 shape 是 null，不談走向）
+  const stage = result.numberStage
+  if (stage && stage.shape && SHAPE_SUMMARY[stage.shape]) {
+    lines.push(SHAPE_SUMMARY[stage.shape](endsAtRestart(timelineSteps(stage))))
+  }
+
+  // 六、終局（落點）：描述它代表什麼，但不下宣判
+  // 終局剛好就是關鍵牌時，第二點已經點名過，不再講一次
   const lastIndex = entries.length - 1
   const last = entries[lastIndex]
-
-  if (last.hasPosition && !named.has(lastIndex)) {
-    mentioned.add('last')
-    // 前面已經講過位置，這裡只要牌名；逆位才標註，正位是常態
-    lines.push(`${last.label}這格是${last.card.nameZh}${last.orientation === 'reversed' ? '逆位' : ''}。`)
+  if (last.hasPosition && lastIndex !== top?.index) {
+    lines.push(lastCardText(last))
   }
 
   if (result.quant?.confidenceLow) {
     lines.push('這組牌的訊息比較雜，當參考就好。')
   }
 
-  // 八、留兩個問題給自己回答。
-  // 這是規則版的保底，AI 解讀那段會依這次的牌寫得更貼身（見 narrationService 的 SYSTEM_PROMPT）。
+  // 七、留問題給自己。規則版的保底，AI 解讀會依這次的牌寫得更貼身（見 narrationService 的 SYSTEM_PROMPT）
   const questions = buildGuidanceQuestions(result, entries, last, mentioned)
   if (questions.length > 0) {
     lines.push(`接下來值得自己回答：${questions.join('')}`)

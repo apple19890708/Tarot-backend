@@ -114,7 +114,8 @@ const ZERO_THEME = '起點、未知'
 const COURT_RANKS = {
   page: { label: '侍者', pattern: /\bpage\b|侍者|侍從|隨從/i },
   knight: { label: '騎士', pattern: /\bknight\b|騎士/i },
-  queen: { label: '王后', pattern: /\bqueen\b|王后|皇后/i },
+  // label 與牌名一致用「皇后」（聖杯皇后），否則同一句會出現王后／皇后兩種寫法
+  queen: { label: '皇后', pattern: /\bqueen\b|王后|皇后/i },
   king: { label: '國王', pattern: /\bking\b|國王/i },
 }
 

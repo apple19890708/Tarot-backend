@@ -254,7 +254,7 @@ function analyzeCombination({
     }),
     question: questionResult,
     positions: analyzePositions({ positionKeys, items }),
-    numberStage: analyzeNumberStage(items),
+    numberStage: analyzeNumberStage(items, positionKeys),
     weights: analyzeWeights({
       items,
       focusIndex: focus.index,

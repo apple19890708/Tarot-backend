@@ -123,7 +123,7 @@ test('buildReading 保留舊欄位並加上 analysis', () => {
     drawOrientation: () => 'upright',
   })
   assert.ok(reading.overview && reading.guidance && reading.cards.length === 3)
-  assert.match(reading.analysis.theme.text, /焦點牌是過去的愚者(?!正位)/)
+  assert.match(reading.analysis.theme.text, /焦點牌是落在「過去」位置的愚者(?!正位)/)
   assert.equal(reading.analysis.pairs.length, 2)
   assert.deepEqual(
     reading.cards.map((entry) => [entry.card.element, entry.card.kind]),
@@ -291,7 +291,7 @@ test('規則 8：沒有位置資訊時不判定', () => {
 })
 
 test('規則 9：數字階段的主要階段與走向', () => {
-  // 2 起步、7 考驗、9 考驗。大牌不計入數字階段（v8），所以一律用小牌
+  // 2 起步、7 考驗、9 考驗
   const forward = analyzeCombination({ entries: [up(PENTACLES_2), up(SWORDS_7), up(PENTACLES_9)] }).numberStage
   assert.deepEqual(forward.stages, { start: 1, trial: 2 })
   assert.equal(forward.dominant, 'trial')
@@ -301,9 +301,11 @@ test('規則 9：數字階段的主要階段與走向', () => {
   assert.equal(tie.dominant, null)
   assert.equal(tie.trend, 'backward')
 
-  const single = analyzeCombination({ entries: [up(CUPS_4), up(WANDS_KNIGHT)] }).numberStage
-  assert.equal(single.trend, null)
-  assert.equal(analyzeCombination({ entries: [up(WANDS_KNIGHT)] }).numberStage, null)
+  // 騎士對到發展期，和 4 同一階段
+  const withCourt = analyzeCombination({ entries: [up(CUPS_4), up(WANDS_KNIGHT)] }).numberStage
+  assert.equal(withCourt.trend, 'same')
+  // 只有一張牌時沒有走向
+  assert.equal(analyzeCombination({ entries: [up(WANDS_KNIGHT)] }).numberStage.trend, null)
 })
 
 test('規則 10：議題份量門檻 2.2／1.6 的邊界', () => {
@@ -788,20 +790,21 @@ test('v9：阻力來自牌義時不得拿張數說話', () => {
 
 test('v7 需求 3：正位的牌在拖要註明來自牌義', () => {
   const upright = [labelled(up(TOWER), '過去'), labelled(up(WANDS_4), '現在')]
-  assert.match(formatAnalysis(analyzeCombination({ entries: upright }), upright).quant.text, /牌義本身就偏滯/)
+  assert.match(formatAnalysis(analyzeCombination({ entries: upright }), upright).quant.text, /牌義本身就偏消極/)
 
   // 逆位本身已經解釋了原因，不必補註
   const reversed = [labelled(rev(TOWER), '過去'), labelled(up(WANDS_4), '現在')]
-  assert.ok(!formatAnalysis(analyzeCombination({ entries: reversed }), reversed).quant.text.includes('牌義本身就偏滯'))
+  assert.ok(!formatAnalysis(analyzeCombination({ entries: reversed }), reversed).quant.text.includes('牌義本身就偏消極'))
 })
 
-test('v7 需求 4：sequence 依牌陣順序，略過沒有數字的牌', () => {
+test('v7 需求 4：sequence 依牌陣順序，宮廷牌依階級納入', () => {
   const entries = [up(PENTACLES_2), up(PENTACLES_KING), up(SWORDS_7)]
   const stage = analyzeCombination({ entries }).numberStage
 
-  assert.deepEqual(stage.sequence.map((step) => step.index), [0, 2])
-  assert.deepEqual(stage.sequence.map((step) => step.number), [2, 7])
-  assert.deepEqual(stage.skipped, [1])
+  assert.deepEqual(stage.sequence.map((step) => step.index), [0, 1, 2])
+  assert.deepEqual(stage.sequence.map((step) => step.number), [2, null, 7])
+  assert.deepEqual(stage.sequence.map((step) => step.stage), ['start', 'end', 'trial'])
+  assert.deepEqual(stage.skipped, [])
 })
 
 test('v7 需求 4：六種走向形狀', () => {
@@ -813,8 +816,8 @@ test('v7 需求 4：六種走向形狀', () => {
   assert.equal(shapeOf([PENTACLES_2, SWORDS_7, CUPS_5]), 'peak')
   assert.equal(shapeOf([SWORDS_7, PENTACLES_2, PENTACLES_9]), 'dip')
   assert.equal(shapeOf([PENTACLES_2, SWORDS_7, CUPS_5, PENTACLES_9]), 'zigzag')
-  // 全是宮廷牌時維持原本的 null
-  assert.equal(analyzeCombination({ entries: [up(WANDS_KNIGHT)] }).numberStage, null)
+  // 只有一張牌時沒有走向
+  assert.equal(shapeOf([WANDS_KNIGHT]), null)
 })
 
 test('v7 需求 4：數字階段不再輸出分布與主軸', () => {
@@ -823,20 +826,62 @@ test('v7 需求 4：數字階段不再輸出分布與主軸', () => {
 
   assert.ok(!text.includes('分布在'), '分布句已廢除')
   assert.ok(!text.includes('為主'), '主軸句已廢除')
-  assert.match(text, /依牌陣順序/)
+  assert.match(text, /時間線/)
   assert.match(text, /過去 錢幣二（2．抉擇、平衡）/)
+})
+
+test('v11：走向只看時間位置，負面影響這類格子不串進箭頭', () => {
+  const spread = spreads.find((s) => s.key === 'guiding-star')
+  const cards = [CUPS_4, CUPS_5, SWORDS_7, PENTACLES_2, WANDS_4, PENTACLES_9, SWORDS_6]
+  const reading = buildReading({ cards, spread, drawOrientation: () => 'upright' })
+  const stage = reading.analysis.numberStage
+  const keys = spread.positions.map((p) => p.key)
+
+  // 時間線依時間先後：過去影響 → 現在 → 未來 → 終局
+  assert.deepEqual(
+    stage.timeline.map((index) => keys[index]),
+    ['past', 'present', 'future', 'outcome'],
+  )
+  // 問題、負面影響、正面影響只列出，不進箭頭
+  assert.match(stage.text, /其他格不是時間點，不算進走向：.*負面影響/)
+  const arrowPart = stage.text.split('。')[0]
+  assert.ok(!arrowPart.includes('負面影響'), arrowPart)
+
+  // summary 只有結論，不含路徑；steps 給前端畫時間軸
+  assert.ok(!stage.summary.includes('→'))
+  assert.equal(stage.steps.length, 7)
+  assert.ok(stage.steps.every((step) => step.stageLabel && step.mark))
+})
+
+test('v11：沒有時間位置的牌陣不談走向', () => {
+  const spread = spreads.find((s) => s.key === 'core')
+  const cards = [CUPS_4, SWORDS_7, PENTACLES_2, WANDS_4]
+  const reading = buildReading({ cards, spread, drawOrientation: () => 'upright' })
+  const stage = reading.analysis.numberStage
+
+  assert.equal(stage.shape, null)
+  assert.match(stage.text, /不談走向/)
+  assert.ok(!stage.text.includes('→'))
+})
+
+test('v11：時間線只有兩格時要提醒參考就好，也不說「一路」', () => {
+  const entries = [up(PENTACLES_2), up(SWORDS_7)]
+  const text = formatAnalysis(analyzeCombination({ entries }), entries).numberStage.text
+  assert.match(text, /只有兩格能比較/)
+  assert.ok(!text.includes('一路'))
 })
 
 test('v7 需求 5：宮廷牌一律說明影響力', () => {
   const entries = [labelled(up(PENTACLES_KING), '過去'), labelled(up(WANDS_4), '現在')]
   const analysis = formatAnalysis(analyzeCombination({ entries }), entries)
 
-  assert.match(analysis.courts[0].text, /國王是宮廷裡份量最重的階級/)
+  assert.match(analysis.courts[0].text, /在錢和現實的事上，像個拿主意、扛責任的人/)
   // v8：不再輸出百分比，改成主導／次要／輔助三級的說法
-  assert.match(analysis.courts[0].text, /說話最大聲|也有一定的份量|只是輔助的角色/)
+  // v11：影響小時不寫，影響明顯時才講往哪邊拉
   assert.ok(!/\d+ ?%/.test(analysis.courts[0].text), '不該再出現百分比')
-  // 只有一張時不再多一句廢話
-  assert.equal(analysis.courtSummary, '')
+  // 只有一張時不比較誰影響最大，只講讀法
+  assert.ok(!analysis.courtSummary.includes('影響最大'))
+  assert.match(analysis.courtSummary, /這張宮廷牌可以看成/)
 })
 
 test('v7 需求 5：沒有宮廷牌也要有一句', () => {
@@ -928,7 +973,9 @@ test('v7 需求 3：全正位但走向不順時，不可說「推得動」', () 
   const { quant } = formatAnalysis(analyzeCombination({ entries }), entries)
 
   assert.equal(quant.direction, 'negative')
-  assert.match(quant.text, /拖得最明顯/)
+  assert.match(quant.text, /往不順拉最多的是/)
+  assert.match(quant.text, /牌義本身就偏消極/, '正位卻往不順拉，要說明原因在牌義')
+  assert.ok(!quant.text.includes('份量最重'), '畫面上沒有「份量最重」這個名稱，要叫焦點牌')
   assert.ok(!quant.text.includes('推得動'), '同一段既說「拖」又說「推得動」會自相矛盾')
   // v9：改算法之後，這種情況的阻力直接來自牌義，措辭也跟著改
   assert.match(quant.text, /卡住的不是逆位，是這些牌本身就偏滯/)
@@ -977,7 +1024,7 @@ test('v7 修正：guidance 要涵蓋議題性質、走向與卡點', () => {
   // 原本只有兩句，細節漏太多
   const sentences = guidance.split('。').filter(Boolean)
   assert.ok(sentences.length >= 3, `結語只有 ${sentences.length} 句，太精簡`)
-  assert.match(guidance, /份量集中在/)
+  assert.match(guidance, /拉得最多/)
 })
 
 test('v7 修正：一張大牌都沒有時不說「大牌 0 張」', () => {
@@ -1020,25 +1067,40 @@ test('v8 A10：不再輸出影響力百分比', () => {
   texts.forEach((text) => assert.ok(!/\d+ ?%/.test(text), `仍有百分比：${text}`))
 })
 
-test('v8 A16：大牌與宮廷牌不進數字階段', () => {
+test('v11：大牌用化簡數字、宮廷牌依階級納入數字階段', () => {
   const entries = [up(PENTACLES_KING), up(TOWER), up(PENTACLES_2)]
   const stage = analyzeCombination({ entries }).numberStage
 
-  assert.deepEqual(stage.sequence.map((s) => s.index), [2], '只剩小牌')
-  assert.deepEqual(stage.skipped, [0, 1], '宮廷牌與大牌都要列入 skipped')
-  // 整組沒有小牌時回 null
-  assert.equal(analyzeCombination({ entries: [up(PENTACLES_KING), up(TOWER)] }).numberStage, null)
+  // 國王 → 完成主導；塔 16 → 7 考驗；錢幣二 → 起步
+  assert.deepEqual(stage.sequence.map((s) => s.index), [0, 1, 2])
+  assert.deepEqual(stage.sequence.map((s) => s.stage), ['end', 'trial', 'start'])
+  assert.equal(stage.sequence[1].number, 7)
+  assert.equal(stage.sequence[1].majorNumber, 16)
+  assert.deepEqual(stage.skipped, [])
+
+  // 文字要寫出大牌的化簡過程與宮廷牌的階級
+  const text = formatAnalysis(analyzeCombination({ entries }), entries).numberStage.text
+  assert.match(text, /16→7/)
+  assert.match(text, /國王．完成、主導/)
+  assert.ok(!text.includes('不走小牌的數字階段'))
+
+  // 沒有小牌也有階段
+  assert.ok(analyzeCombination({ entries: [up(PENTACLES_KING), up(TOWER)] }).numberStage)
 })
 
-test('v8 A17：被剔除的若是最重的那張，必須點名', () => {
-  // 錢幣國王（宮廷）帶動最大，但不進數字階段
-  const entries = [labelled(up(PENTACLES_KING), '過去'), labelled(up(PENTACLES_2), '現在')]
-  const analysis = formatAnalysis(analyzeCombination({ entries }), entries)
-  const lead = analysis.quant.contributions[0]
+test('v11：終點是侍者（起步期）時算重新起步，不因為沒有數字而誤判', () => {
+  const entries = [labelled(up(SWORDS_7), '過去'), labelled(up(minor('cups', 11, 'Page of Cups', '聖杯侍者')), '現在')]
+  const text = formatAnalysis(analyzeCombination({ entries }), entries).numberStage.text
+  assert.match(text, /重新起步/)
+})
 
-  if (analysis.numberStage && analysis.numberStage.skipped.includes(lead.index)) {
-    assert.match(analysis.numberStage.text, /說話最大聲的一張/)
-  }
+test('v11：每張牌都納入數字階段，沒有被排除的牌', () => {
+  const entries = [labelled(up(PENTACLES_KING), '過去'), labelled(up(TOWER), '現在'), labelled(up(PENTACLES_2), '未來')]
+  const analysis = formatAnalysis(analyzeCombination({ entries }), entries)
+
+  assert.deepEqual(analysis.numberStage.skipped, [])
+  assert.equal(analysis.numberStage.steps.length, entries.length)
+  assert.ok(!analysis.numberStage.text.includes('不列入階段'))
 })
 
 test('v8 A15：階段文字要帶數字主題', () => {
@@ -1133,11 +1195,25 @@ test('v8 E：結語改成提問，不再宣判結果', () => {
 
 test('v8 E：宮廷牌兩種讀法都要留著', () => {
   const entries = [labelled(up(PENTACLES_KING), '過去'), labelled(up(WANDS_4), '現在')]
-  const text = formatAnalysis(analyzeCombination({ entries }), entries).courts[0].text
+  const analysis = formatAnalysis(analyzeCombination({ entries }), entries)
+  // v11：讀法整組一致時改在開場講一次，不再每張重複
+  const text = analysis.courtSummary + analysis.courts[0].text
 
   // v10：改掉「問題沒提到別人」的否定式開場，但兩種讀法仍要都留著
-  assert.match(text, /如果背後其實有個具體的人|也反映你面對他的姿態/)
+  assert.match(text, /如果身邊真有這樣的人|也反映你面對他的姿態/)
   assert.ok(!text.includes('問題沒提到別人'), '不要用否定式開場')
+})
+
+test('v11：多張宮廷牌讀法一致時，讀法只在開場講一次', () => {
+  const spread = spreads.find((s) => s.key === 'guiding-star')
+  const cards = [CUPS_QUEEN, WANDS_KNIGHT, PENTACLES_KING, CUPS_4, CUPS_5, SWORDS_7, PENTACLES_2]
+  const { analysis } = buildReading({ cards, spread, drawOrientation: () => 'upright' })
+
+  assert.match(analysis.courtSummary, /這些宮廷牌可以看成/)
+  analysis.courts.forEach((court) => {
+    assert.ok(!court.text.includes('可以看成'), `每張不再重複讀法：${court.text}`)
+    assert.ok(!court.text.includes('份量'), `不再講權重表：${court.text}`)
+  })
 })
 
 test('v8 E：AI 提示要求提問節，且用詞與規則引擎一致', () => {
@@ -1167,4 +1243,134 @@ test('v9 P3：兩張都負面的牌，逆逆不得寫成最慘', () => {
       `${from}→${to} 的逆逆仍是「既…也…」的最慘句型：${worst}`,
     )
   })
+})
+
+test('推力與阻力都在最低一格時，要講明局面偏平靜', () => {
+  // 權杖二 + 權杖九（皆正位）：momentum ≈ 0.03、resistance ≈ 0.03
+  const WANDS_2 = minor('wands', 2, 'Two of Wands', '權杖二')
+  const WANDS_9 = minor('wands', 9, 'Nine of Wands', '權杖九')
+  const entries = [labelled(up(WANDS_2), '過去'), labelled(up(WANDS_9), '現在')]
+  const { quant } = formatAnalysis(analyzeCombination({ entries }), entries)
+
+  assert.equal(quant.levels.momentum, 1, '前提：推力在最低一格')
+  assert.equal(quant.levels.resistance, 1, '前提：阻力在最低一格')
+  assert.match(quant.text, /偏平靜/)
+  assert.ok(!quant.text.includes('推得動'))
+})
+
+test('傾向條分級：依 QUANT.levels 切三格，邊界值歸到較高的一格', () => {
+  const { levelOf } = require('../src/services/rules/quantRules')
+  assert.equal(levelOf(0.09, [0.1, 0.2]), 1)
+  assert.equal(levelOf(0.1, [0.1, 0.2]), 2)
+  assert.equal(levelOf(0.19, [0.1, 0.2]), 2)
+  assert.equal(levelOf(0.2, [0.1, 0.2]), 3)
+})
+
+test('推得動與「推力：相當充足」一致：推力最高格且阻力不在最高格才說', () => {
+  const { quant } = formatAnalysis(
+    analyzeCombination({ entries: [up(EMPRESS), up(WANDS_4)] }),
+    [up(EMPRESS), up(WANDS_4)],
+  )
+  // 皇后 + 權杖四（皆正位）：momentum ≈ 0.69、resistance 0
+  assert.equal(quant.levels.momentum, 3)
+  assert.equal(quant.levels.resistance, 1)
+  assert.match(quant.text, /推得動/)
+})
+
+test('v11：元素區不再講數字，缺少的花色被大牌同元素補上時不說「沒提到」', () => {
+  // 塔、皇帝都是火元素大牌，小牌只有聖杯三：沒有權杖，但火元素最多
+  const EMPEROR_ = major(4, 'The Emperor', '皇帝')
+  const entries = [up(TOWER), up(EMPEROR_), up(minor('cups', 3, 'Three of Cups', '聖杯三'))]
+  const analysis = formatAnalysis(analyzeCombination({ entries }), entries)
+  const text = analysis.theme.elementNumberText
+
+  assert.match(text, /火元素最多/)
+  assert.match(text, /大牌帶來的火元素補上了這塊/)
+  assert.ok(!/沒有權杖，/.test(text), text)
+  assert.ok(!text.includes('數字'), '數字重複改由階段區講')
+  const { guidance } = buildReading({
+    cards: [TOWER, EMPEROR_, minor('cups', 3, 'Three of Cups', '聖杯三')],
+    drawOrientation: () => 'upright',
+  })
+  assert.ok(!guidance.includes('做事和衝勁這'), `結語也不能說做事和衝勁沒出現：${guidance}`)
+})
+
+test('v11：逆位宮廷牌不得同時說「用得不順」又說「往順利拉」', () => {
+  // 隨機抽大量牌陣，檢查每張逆位宮廷牌的句子
+  const spread = spreads.find((s) => s.key === 'guiding-star')
+  const deck = []
+  for (const suit of ['wands', 'cups', 'swords', 'pentacles']) {
+    for (let n = 1; n <= 14; n += 1) deck.push(minor(suit, n, `${n} of ${suit}`, `${suit}${n}`))
+  }
+  const names = { 11: 'Page', 12: 'Knight', 13: 'Queen', 14: 'King' }
+  deck.forEach((card) => {
+    if (names[card.number]) card.nameEn = `${names[card.number]} of ${card.suit}`
+  })
+
+  for (let i = 0; i < 300; i += 1) {
+    const cards = [...deck].sort(() => Math.random() - 0.5).slice(0, 7)
+    const { analysis } = buildReading({ cards, spread, drawOrientation: () => (Math.random() < 0.5 ? 'upright' : 'reversed') })
+    analysis.courts.forEach((court) => {
+      assert.ok(!court.text.includes('用得不順'), court.text)
+      if (court.text.includes('逆位時') && court.text.includes('往順利')) {
+        assert.match(court.text, /但整體來說，這張(還是|仍)/, `逆位卻往順利拉要用轉折：${court.text}`)
+      }
+    })
+  }
+})
+
+test('v11：宮廷牌只講人物與逆位樣貌，影響小時不寫、不解釋演算法', () => {
+  const spread = spreads.find((s) => s.key === 'guiding-star')
+  const deck = []
+  const names = { 11: 'Page', 12: 'Knight', 13: 'Queen', 14: 'King' }
+  for (const suit of ['wands', 'cups', 'swords', 'pentacles']) {
+    for (let n = 1; n <= 14; n += 1) deck.push(minor(suit, n, names[n] ? `${names[n]} of ${suit}` : `${n} of ${suit}`, `${suit}${n}`))
+  }
+  for (let i = 0; i < 300; i += 1) {
+    const cards = [...deck].sort(() => Math.random() - 0.5).slice(0, 7)
+    const { analysis } = buildReading({ cards, spread, drawOrientation: () => (Math.random() < 0.5 ? 'upright' : 'reversed') })
+    analysis.courts.forEach((court) => {
+      // 不再講位置重要性與「影響不大」，也不搬出演算法解釋
+      assert.ok(!court.text.includes('比較重要'), court.text)
+      assert.ok(!court.text.includes('影響不大'), court.text)
+      assert.ok(!court.text.includes('好壞傾向'), court.text)
+      assert.ok(!court.text.includes('沒有完全發揮'), court.text)
+    })
+  }
+})
+
+test('v11：結語先下總結、花色並列全講、終局要講出意思、提問不問牌', () => {
+  const spread = spreads.find((s) => s.key === 'guiding-star')
+  const SWORDS_KNIGHT = minor('swords', 12, 'Knight of Swords', '寶劍騎士')
+  const cards = [
+    minor('cups', 11, 'Page of Cups', '聖杯侍者'),
+    CUPS_QUEEN,
+    CUPS_4,
+    minor('swords', 11, 'Page of Swords', '寶劍侍者'),
+    PENTACLES_KING,
+    SWORDS_7,
+    SWORDS_KNIGHT,
+  ]
+  const reversedAt = new Set([2, 4, 6])
+  const { guidance } = buildReading({ cards, spread, drawOrientation: (i) => (reversedAt.has(i) ? 'reversed' : 'upright') })
+
+  assert.match(guidance, /^整體來看/, guidance)
+  assert.match(guidance, /感情和人、溝通和判斷/, '聖杯和寶劍並列時兩個都要講')
+  assert.match(guidance, /終局落在寶劍騎士逆位：在溝通和判斷上/, '終局要講出意思，不只報牌名')
+  assert.ok(!guidance.includes('你希望它往哪個方向走'), '不要問一張牌往哪走')
+})
+
+test('v11：AI 解讀不重講畫面上已有的內容', () => {
+  const prompt = require('../src/services/narrationService').SYSTEM_PROMPT
+
+  assert.match(prompt, /畫面上已經有的內容（不要重講）/)
+  assert.match(prompt, /## 事情會怎麼走/)
+  // 元素、數字已有獨立區塊，AI 不再各寫一節
+  assert.ok(!prompt.includes('## 元素'), '不再要求元素一節')
+  assert.ok(!prompt.includes('## 數字'), '不再要求數字一節')
+  // 每個位置一節，而且要依位置轉換讀法（負面牌在助力位、好牌在障礙位）
+  assert.match(prompt, /每個位置一節/)
+  assert.match(prompt, /位置會改變牌的讀法/)
+  // 範例也要遵守「不要用第一人稱」
+  assert.ok(!prompt.includes('我最擔心'))
 })

@@ -20,6 +20,13 @@ function spreadEntropy(energy) {
   return entropy / Math.log(DIMENSION_KEYS.length)
 }
 
+// 三格分級（1～3），門檻見 QUANT.levels
+function levelOf(value, [mid, high]) {
+  if (value >= high) return 3
+  if (value >= mid) return 2
+  return 1
+}
+
 function getDirection(di) {
   if (di >= QUANT.directionStrong) return 'strongPositive'
   if (di >= QUANT.directionMild) return 'positive'
@@ -153,13 +160,22 @@ function analyzeQuant({ items, domain, positionWeights, conflictCount = 0, domai
     resistanceFromMeaning: round2(resistanceFromMeaning),
     resistanceFromReversal: round2(resistanceFromReversal),
     confidence: round2(confidence),
-    confidenceLow: confidence < QUANT.confidenceLowThreshold,
+    // 與畫面上「可信度：偏低」同一條線，提醒句和格子才不會各說各話
+    confidenceLow: levelOf(round2(confidence), QUANT.levels.confidence) === 1,
+    // 用 round2 之後的值分級，與畫面上可能顯示的數字一致
+    levels: {
+      momentum: levelOf(round2(momentum), QUANT.levels.momentum),
+      resistance: levelOf(round2(resistance), QUANT.levels.resistance),
+      confidence: levelOf(round2(confidence), QUANT.levels.confidence),
+      focus: levelOf(round2(focus), QUANT.levels.focus),
+    },
     contributions,
   }
 }
 
 module.exports = {
   analyzeQuant,
+  levelOf,
   spreadEntropy,
   getDirection,
 }

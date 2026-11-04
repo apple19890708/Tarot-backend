@@ -4,7 +4,7 @@ const path = require('path')
 const mongoose = require('mongoose')
 
 const Card = require('../src/models/Card')
-const { collectCardFiles, parseCardFile } = require('../src/utils/tarotParser')
+const { collectCardFiles, parseCardFile, validateDeck } = require('../src/utils/tarotParser')
 
 async function seedCards() {
   const mongoUri = process.env.MONGO_URI
@@ -16,6 +16,8 @@ async function seedCards() {
   const workspaceRoot = path.resolve(__dirname, '..', '..')
   const cardFiles = collectCardFiles(workspaceRoot)
   const cards = cardFiles.map((filePath) => parseCardFile(filePath, workspaceRoot))
+  // 解析與檢查都在連資料庫之前，有錯就不會走到下面的 deleteMany
+  validateDeck(cards)
 
   await mongoose.connect(mongoUri, { dbName: process.env.MONGO_DB_NAME || 'tarot-divination' })
   await Card.deleteMany({})

@@ -27,6 +27,28 @@ function collectCardFiles(rootDirectory) {
   })
 }
 
+// 每張牌都有自己的號碼：大牌 0～21（0 是愚者），小牌 1～14（11～14 是宮廷牌）。
+// 號碼取自牌檔檔名開頭，解析不到或超出範圍一律報錯，不能給預設值 ——
+// 預設成 0 等於把這張牌悄悄當成愚者，數字階段、牌意對照全部跟著錯，而且沒有任何警告。
+const NUMBER_RANGE = {
+  major: [0, 21],
+  minor: [1, 14],
+}
+
+function parseCardNumber(fileName, arcanaType, relativePath) {
+  const match = fileName.match(/^(\d+)/)
+  if (!match) {
+    throw new Error(`牌檔檔名開頭沒有號碼：${relativePath}。每張牌都有自己的號碼，請把號碼加在檔名最前面。`)
+  }
+
+  const number = Number.parseInt(match[1], 10)
+  const [min, max] = NUMBER_RANGE[arcanaType]
+  if (number < min || number > max) {
+    throw new Error(`牌檔號碼超出範圍：${relativePath} 是 ${number}，${arcanaType === 'major' ? '大牌' : '小牌'}應在 ${min}～${max}。`)
+  }
+  return number
+}
+
 function cleanLine(line) {
   return line.trim().replace(/^[-*•]\s*/, '').replace(/^\d+\)\s*/, '')
 }
@@ -101,6 +123,9 @@ function parseCardFile(filePath, workspaceRoot) {
   const relativePath = path.relative(workspaceRoot, filePath)
   const folderName = relativePath.split(path.sep)[0]
   const suitConfig = SUIT_MAP[folderName]
+  if (!suitConfig) {
+    throw new Error(`無法判斷牌組：${relativePath}（資料夾要是 ${Object.keys(SUIT_MAP).join('／')} 其中之一）`)
+  }
   const content = fs.readFileSync(filePath, 'utf8')
   const lines = content.split(/\r?\n/)
   const titleLine = lines[0] || path.basename(filePath, '.txt')
@@ -108,8 +133,7 @@ function parseCardFile(filePath, workspaceRoot) {
   const sections = extractSections(lines.slice(3))
   const { nameZh, nameEn } = splitTitle(titleLine)
   const fileName = path.basename(filePath)
-  const numberMatch = fileName.match(/^(\d+)/)
-  const number = numberMatch ? Number.parseInt(numberMatch[1], 10) : 0
+  const number = parseCardNumber(fileName, suitConfig.arcanaType, relativePath)
   const keywords = parseKeywords(sections)
   const summary = (sections['正位牌義'] || [])[0] || ''
   const slugBase = nameEn || `${folderName}-${number}`
@@ -129,7 +153,26 @@ function parseCardFile(filePath, workspaceRoot) {
   }
 }
 
+// 整副牌的檢查：同一牌組不能有重複號碼（例如「星幣」「錢幣」兩個資料夾都放了同一張），
+// 總數要是 78 張。匯入前就擋下來，免得資料庫被清空後才發現少牌。
+function validateDeck(cards) {
+  const seen = new Map()
+  cards.forEach((card) => {
+    const key = `${card.arcanaType}:${card.suit ?? 'major'}:${card.number}`
+    if (seen.has(key)) {
+      throw new Error(`號碼重複：${seen.get(key)} 和 ${card.filePath} 都是 ${card.number} 號`)
+    }
+    seen.set(key, card.filePath)
+  })
+
+  if (cards.length !== 78) {
+    throw new Error(`牌數不對：讀到 ${cards.length} 張，一副塔羅牌應該是 78 張。`)
+  }
+}
+
 module.exports = {
   collectCardFiles,
   parseCardFile,
+  parseCardNumber,
+  validateDeck,
 }

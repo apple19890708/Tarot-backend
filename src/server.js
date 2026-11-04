@@ -164,8 +164,9 @@ app.get('/api/cards', async (_req, res, next) => {
     const list = cards
       .sort(compareCards)
       .map((card) => {
-        // 宮廷牌靠牌名判斷（編號在不同牌組不一致），所以由後端給 kind，
-        // 前端只拿來分組顯示，不自己判斷哪些是宮廷牌
+        // 宮廷牌的判斷集中在 getCardProfile（依牌名），由後端給 kind，
+        // 前端只拿來分組顯示，不自己判斷哪些是宮廷牌。
+        // 號碼本身四個牌組一致（侍者 11、騎士 12、皇后 13、國王 14，2026-11-04 查資料庫確認）
         const profile = getCardProfile(card)
 
         return {
@@ -258,15 +259,21 @@ app.post('/api/readings/manual', optionalAuth, async (req, res, next) => {
 
 // 把完整產生的 AI 解讀存回使用者自己的那筆紀錄。沒帶 readingId（例如舊版前端）就跳過；
 // 存檔失敗不影響已經送出去的解讀，只記 log。
+// 回傳 null：沒有指定紀錄（還沒保存），本來就不存；true／false：有指定紀錄時是否存成功。
+// 重新產生時會直接覆蓋同一筆的 narration，不另開新紀錄。結果要回報給前端，
+// 否則存檔失敗只寫在 log，使用者以為紀錄已經更新。
 async function saveNarration({ readingId, userId, text, model, drawn }) {
-  if (!readingId || !userId || !text || !mongoose.isValidObjectId(readingId)) {
-    return
+  if (!readingId) {
+    return null
+  }
+  if (!userId || !text || !mongoose.isValidObjectId(readingId)) {
+    return false
   }
 
   try {
     const record = await Reading.findOne({ _id: readingId, user: userId })
     if (!record) {
-      return
+      return false
     }
 
     // 確認這段解讀講的就是那筆紀錄的牌，否則紀錄會配上一段和畫面無關的文字
@@ -277,13 +284,15 @@ async function saveNarration({ readingId, userId, text, model, drawn }) {
           String(card.cardId) === String(drawn[index].id) && card.orientation === drawn[index].orientation,
       )
     if (!sameCards) {
-      return
+      return false
     }
 
     record.narration = { text, model: model || '', createdAt: new Date() }
     await record.save()
+    return true
   } catch (error) {
     console.error('AI 解讀存檔失敗：', error.message)
+    return false
   }
 }
 
@@ -394,15 +403,15 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
           writeEvent({ type: 'delta', text })
         },
       })
-      // 只有完整產生才存；中途被停止的半截文字不留
-      await saveNarration({
+      // 只有完整產生才存；中途被停止的半截文字不留（紀錄裡原本那篇也保持不動）
+      const saved = await saveNarration({
         readingId: req.body.readingId,
         userId: req.auth.userId,
         text: narrationText,
         model,
         drawn,
       })
-      writeEvent({ type: 'done', model })
+      writeEvent({ type: 'done', model, saved })
       res.end()
     } catch (error) {
       if (controller.signal.aborted) {
