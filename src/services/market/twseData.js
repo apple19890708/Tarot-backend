@@ -250,7 +250,33 @@ function createTwseData({ fetchJson, cache, today }) {
     }
   }
 
-  return { getChips, getValuation }
+  // 選股用：全市場的估值 Map<代號, { pe, dividendYield, pb }>
+  function getValuationMap() {
+    return loadValuation()
+  }
+
+  // 選股用：全市場三大法人的連買／連賣天數 Map<代號, { foreign, trust }>（正數連買、負數連賣）。
+  // 上市用最近幾個交易日的 T86；上櫃免費資料只有最新一日，最多算 1 日
+  async function getChipStreaks(dates) {
+    const recent = dates.slice(-(CHIP_DAYS + 2))
+    const days = (await Promise.all(recent.map(async (date) => loadT86(date).catch(() => null)))).filter(Boolean).slice(-CHIP_DAYS)
+    const result = new Map()
+    const codes = new Set(days.flatMap((day) => [...day.keys()]))
+    for (const code of codes) {
+      const series = (key) => days.map((day) => day.get(code)?.[key] ?? 0)
+      result.set(code, { foreign: streak(series('foreign')), trust: streak(series('trust')) })
+    }
+    try {
+      for (const [code, row] of await loadTpexInsti()) {
+        if (!result.has(code)) result.set(code, { foreign: Math.sign(row.foreign || 0), trust: Math.sign(row.trust || 0) })
+      }
+    } catch (error) {
+      console.error('上櫃三大法人失敗：', error.message)
+    }
+    return { streaks: result, days: days.length }
+  }
+
+  return { getChips, getValuation, getValuationMap, getChipStreaks }
 }
 
 // ---- 判讀（純函式）----

@@ -1,0 +1,37 @@
+# 股市追蹤的排程：網頁關著時也檢查價位提醒並推播（Discord），收盤後記每日資產快照。
+# 只在交易時段呼叫；後端自己也會判斷是否開盤，非開盤時間直接略過。
+#
+# 需要在 GitHub repository 設定兩個 secret（Settings → Secrets and variables → Actions）：
+#   BACKEND_URL  後端網址，例如 https://xxx.onrender.com（結尾不要斜線）
+#   CRON_SECRET  和後端環境變數 CRON_SECRET 相同的值
+#
+# 注意：GitHub 的排程在尖峰時段可能延遲 5～15 分鐘；Render 免費方案休眠時第一次喚醒要數十秒。
+name: market-cron
+
+on:
+  schedule:
+    # 台股 09:00～13:50（台北）＝ UTC 01:00～05:50，平日
+    - cron: '*/10 1-5 * * 1-5'
+    # 美股 09:30～16:10（紐約），夏令與冬令合併成 UTC 13:00～21:50，平日
+    - cron: '*/10 13-21 * * 1-5'
+    # 台股收盤後的每日資產快照：UTC 06:10 ＝ 台北 14:10
+    - cron: '10 6 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call backend
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$BACKEND_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "BACKEND_URL 或 CRON_SECRET 沒有設定，略過"
+            exit 0
+          fi
+          curl -fsS -m 120 --retry 2 --retry-delay 20 \
+            -X POST -H "x-cron-secret: $CRON_SECRET" \
+            "$BACKEND_URL/api/cron/market"

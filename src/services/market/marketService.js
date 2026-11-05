@@ -24,18 +24,54 @@ const CONTEXT_INDEX = {
 const CHART_DAYS = 120
 // 少於這麼多根 K 棒（約一年）就不做回測與預測，樣本太少的統計只會誤導
 const MIN_RESEARCH_BARS = 250
-const { buildNameIndex, findMarketTargets } = require('./symbols')
+const { buildNameIndex, findMarketTargets, resolveTargetIn, searchTargets: searchLocalTargets, US_SYMBOL_PATTERN } = require('./symbols')
+
+const corporateEvents = require('./corporateEvents')
+const screener = require('./screener')
+// 大盤概況與選股用的全市場收盤資料、類股指數：一天只變一次，快取 30 分鐘
+const DAILY_TTL = 30 * 60 * 1000
+const LISTED_CODE_PATTERN = /^(\d{4}|00\d{2,4}[A-Z]?)$/
+const OVERVIEW_TTL = 10 * 60 * 1000
+const MI_INDEX_URL = 'https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX'
+const OVERVIEW_TARGETS = {
+  tw: [
+    { kind: 'index', market: 'tw', code: 't00', exchange: 'tse', symbol: '^TWII', name: '加權指數' },
+    { kind: 'index', market: 'tw', code: 'o00', exchange: 'otc', symbol: null, name: '櫃買指數' },
+  ],
+  us: [
+    { kind: 'index', market: 'us', symbol: '^GSPC', name: '標普 500' },
+    { kind: 'index', market: 'us', symbol: '^IXIC', name: '那斯達克' },
+    { kind: 'index', market: 'us', symbol: '^DJI', name: '道瓊工業' },
+    { kind: 'index', market: 'us', symbol: '^SOX', name: '費城半導體' },
+    { kind: 'index', market: 'us', symbol: 'TWD=X', name: '美元兌台幣' },
+  ],
+}
+// 除權息預告與月營收一天變動很少，快取 6 小時；抓不到時 10 分鐘後再試
+const EVENTS_TTL = 6 * 60 * 60 * 1000
+const EVENTS_FAILURE_TTL = 10 * 60 * 1000
+
+// 美股搜尋只收美國交易所的股票、ETF 與指數（Yahoo 的 exchange 代碼）
+const US_EXCHANGES = new Set(['NMS', 'NGM', 'NCM', 'NYQ', 'ASE', 'PCX', 'BTS', 'NAS', 'NYS', 'SNP', 'DJI', 'NIM', 'WCB'])
+const US_QUOTE_TYPES = new Set(['EQUITY', 'ETF', 'INDEX'])
+const SEARCH_LIMIT = 10
+
+// 自訂追蹤：迷你走勢圖畫最近這麼多個交易日；52 週約 250 個交易日
+const SPARK_DAYS = 60
+const YEAR_BARS = 250
 
 const URLS = {
   twseList: 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL',
   tpexList: 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
   mis: 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp',
   yahooChart: 'https://query1.finance.yahoo.com/v8/finance/chart/',
+  // 非正式介面，只用來給美股輸入框的候選
+  yahooSearch: 'https://query1.finance.yahoo.com/v1/finance/search',
 }
 
 const TTL = {
   directory: 12 * 60 * 60 * 1000,
   history: 5 * 60 * 1000,
+  search: 10 * 60 * 1000,
   realtime: 20 * 1000,
 }
 
@@ -60,8 +96,16 @@ function dateIn(timeZone, date) {
 
 // 快取最多這麼多筆；超過時先清掉過期的，還是太多就丟最舊的（Map 依插入順序）
 const CACHE_MAX_ENTRIES = 500
+// 搜尋候選用另一個小快取，避免大量不同的查詢字把股票清單與歷史資料擠掉
+const SEARCH_CACHE_MAX_ENTRIES = 200
+// 外部來源失敗（含查無代號）時，這段時間內不再重打，避免被限流時越打越糟
+const FAILURE_TTL = 60 * 1000
+// 自訂追蹤一次最多同時查幾檔的歷史資料
+const WATCH_CONCURRENCY = 5
+// 選股技術面的歷史資料快取筆數（每筆 6 個月日 K，很小）
+const SCREEN_CACHE_MAX_ENTRIES = 300
 
-function createCache(now) {
+function createCache(now, maxEntries = CACHE_MAX_ENTRIES) {
   const store = new Map()
   return {
     get(key) {
@@ -75,11 +119,11 @@ function createCache(now) {
     set(key, value, ttl) {
       store.delete(key)
       store.set(key, { value, expires: now() + ttl })
-      if (store.size > CACHE_MAX_ENTRIES) {
+      if (store.size > maxEntries) {
         for (const [k, hit] of store) {
           if (hit.expires <= now()) store.delete(k)
         }
-        while (store.size > CACHE_MAX_ENTRIES) {
+        while (store.size > maxEntries) {
           store.delete(store.keys().next().value)
         }
       }
@@ -91,6 +135,19 @@ class SymbolNotFoundError extends Error {}
 
 function createMarketService({ fetchImpl = (...args) => fetch(...args), now = () => Date.now() } = {}) {
   const cache = createCache(now)
+  const searchCache = createCache(now, SEARCH_CACHE_MAX_ENTRIES)
+  // 選股技術面用的短期歷史（6 個月）：獨立的小快取，避免把共用快取裡的全市場資料擠掉
+  const screenCache = createCache(now, SCREEN_CACHE_MAX_ENTRIES)
+  // 進行中的全市場資料請求（快取剛過期時，同時進來的請求共用同一次下載）
+  const inFlight = new Map()
+  function once(key, load) {
+    if (inFlight.has(key)) return inFlight.get(key)
+    const promise = load().finally(() => inFlight.delete(key))
+    inFlight.set(key, promise)
+    return promise
+  }
+  // 進行中的歷史資料請求：同一檔同時被查時共用同一個請求
+  const historyInFlight = new Map()
   // twseData 用的 fetchJson 在下面定義，這裡延後取用
   let twseData = null
   const getTwseData = () => {
@@ -161,6 +218,24 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     if (cached) {
       return cached
     }
+    const failed = cache.get(`history-failed:${symbol}`)
+    if (failed) {
+      throw failed
+    }
+    if (historyInFlight.has(symbol)) {
+      return historyInFlight.get(symbol)
+    }
+    const request = fetchHistory(symbol, key)
+      .catch((error) => {
+        cache.set(`history-failed:${symbol}`, error, FAILURE_TTL)
+        throw error
+      })
+      .finally(() => historyInFlight.delete(symbol))
+    historyInFlight.set(symbol, request)
+    return request
+  }
+
+  async function fetchHistory(symbol, key) {
 
     // 5 年日 K：指標只需要最近幾個月，回測與機器學習需要比較長的歷史
     const payload = await fetchJson(`${URLS.yahooChart}${encodeURIComponent(symbol)}?range=5y&interval=1d`)
@@ -247,8 +322,12 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return clock >= '09:00:00' && clock < '13:30:00' ? 'intraday' : 'closed'
   }
 
-  // extras：{ context: { label, series }, chips, valuation }，都可以省略
+  // extras：{ context: { label, series }, chips, valuation, light }，都可以省略
+  // light：自訂追蹤用的輕量版，只算報價與技術指標，不做回測、預測、圖表與操作建議
   function buildItem(target, history, realtime, extras = {}) {
+    const light = extras.light === true
+    // detail：自訂追蹤展開卡片用，有圖表與籌碼，但不做回測、預測與操作建議（太慢，也和股市諮詢的結論重複）
+    const detail = extras.detail === true
     const nowDate = new Date(now())
     let bars = history ? history.bars.map((bar) => ({ ...bar })) : []
 
@@ -291,7 +370,8 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     // 少於 20 根 K 棒的指標沒有意義（例如櫃買指數只有即時報價）
     const indicators = bars.length >= 20 ? computeIndicators(bars) : null
     const analysis = buildSignals({ price: round(price), indicators, intraday: session === 'intraday' })
-    const series = bars.length >= 20 ? computeSeries(bars) : null
+    // light 不做回測、預測與圖表，用不到序列
+    const series = !light && bars.length >= 20 ? computeSeries(bars) : null
 
     const item = {
       symbol: target.symbol,
@@ -320,23 +400,45 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       analysis,
       // 歷史回測、策略比較、機器學習預測（資料不足一年時為 null）
       research:
-        series && analysis && bars.length >= MIN_RESEARCH_BARS
+        !light && !detail && series && analysis && bars.length >= MIN_RESEARCH_BARS
           ? {
               backtest: backtestSignals(series, analysis.signals),
               strategies: backtestStrategies(series, target.market),
               prediction: predictDirection(series, { context: extras.context || null }),
             }
           : null,
-      chart: series ? buildChart(series) : null,
+      chart: !light && series ? buildChart(series) : null,
       // 籌碼面（台股才有）：三大法人與融資融券，summary 是判讀文字
       chips: extras.chips ? { ...extras.chips, summary: describeChips(extras.chips, indicators?.change5d ?? null) } : null,
       // 估值（台股個股才有）：本益比、殖利率、股價淨值比與在全體上市櫃的百分位
       valuation: extras.valuation ? { ...extras.valuation, summary: describeValuation(extras.valuation) } : null,
       barCount: bars.length,
     }
-    // 操作建議要用到上面的全部資料，最後才算
-    item.advice = buildAdvice(item)
+    // 操作建議要用到上面的全部資料，最後才算；輕量版缺回測與籌碼，算出來會不一致，所以不算
+    item.advice = light || detail ? null : buildAdvice(item)
+    if (light) {
+      item.spark = bars.slice(-SPARK_DAYS).map((bar) => round(bar.close))
+      item.range52w = yearRange(bars, price)
+    }
     return item
+  }
+
+  // 台股的籌碼（三大法人、融資融券）與估值；不是台股回傳空的。各自失敗只少一塊
+  async function loadTwExtras(target, history, realtime, { valuation: withValuation = true } = {}) {
+    if (target.market !== 'tw') return { chips: null, valuation: null, chipsFailed: false }
+    const dates = (history?.bars ?? []).map((bar) => bar.date)
+    if (realtime?.date && (dates.length === 0 || realtime.date > dates[dates.length - 1])) dates.push(realtime.date)
+    const [chips, valuation] = await Promise.allSettled([
+      dates.length > 0 ? getTwseData().getChips(target, dates) : null,
+      withValuation && target.kind === 'stock' ? getTwseData().getValuation(target.code) : null,
+    ])
+    if (chips.status === 'rejected') console.error(`籌碼資料失敗（${target.code}）：`, chips.reason?.message)
+    if (valuation.status === 'rejected') console.error(`估值資料失敗（${target.code}）：`, valuation.reason?.message)
+    return {
+      chips: chips.status === 'fulfilled' ? chips.value : null,
+      valuation: valuation.status === 'fulfilled' ? valuation.value : null,
+      chipsFailed: chips.status === 'rejected',
+    }
   }
 
   // 只給「股市諮詢」用：一定當成股市問題，問題沒寫到標的就看加權指數。
@@ -381,26 +483,10 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
 
     const twExtras = await Promise.all(
       found.targets.map(async (target, index) => {
-        if (target.market !== 'tw') return {}
-        const history = historyOf(index)
         const realtime = realtimeMap.get(`${target.exchange}_${target.code}`)
-        const dates = (history?.bars ?? []).map((bar) => bar.date)
-        if (realtime?.date && (dates.length === 0 || realtime.date > dates[dates.length - 1])) dates.push(realtime.date)
-        const [chips, valuation] = await Promise.allSettled([
-          dates.length > 0 ? getTwseData().getChips(target, dates) : null,
-          target.kind === 'stock' ? getTwseData().getValuation(target.code) : null,
-        ])
-        if (chips.status === 'rejected') {
-          console.error(`籌碼資料失敗（${target.code}）：`, chips.reason?.message)
-          notes.push(`${target.name} 的籌碼資料暫時取不到。`)
-        }
-        if (valuation.status === 'rejected') {
-          console.error(`估值資料失敗（${target.code}）：`, valuation.reason?.message)
-        }
-        return {
-          chips: chips.status === 'fulfilled' ? chips.value : null,
-          valuation: valuation.status === 'fulfilled' ? valuation.value : null,
-        }
+        const extras = await loadTwExtras(target, historyOf(index), realtime)
+        if (extras.chipsFailed) notes.push(`${target.name} 的籌碼資料暫時取不到。`)
+        return { chips: extras.chips, valuation: extras.valuation }
       }),
     )
     if (realtimeResult.status === 'rejected' && twTargets.length > 0) {
@@ -462,11 +548,404 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return (await loadHistory(symbol)).bars
   }
 
-  // 依使用者輸入找標的（手動新增提醒用）：和股市諮詢用同一套辨識，取第一個
-  async function resolveTarget(query) {
+  // 依使用者輸入找標的。
+  // 沒指定市場（手動新增提醒）：和股市諮詢用同一套辨識，取第一個。
+  // 指定市場（自訂追蹤）：只在該市場找；美股另外查一次歷史資料確認代號存在，並補上正式名稱
+  async function resolveTarget(query, market = null) {
     const directory = await loadDirectory()
-    const found = findMarketTargets(query, { directory: directory.entries, nameIndex: directory.nameIndex, force: false })
-    return found?.targets[0] ?? null
+    if (!market) {
+      const found = findMarketTargets(query, { directory: directory.entries, nameIndex: directory.nameIndex, force: false })
+      return found?.targets[0] ?? null
+    }
+    const target = resolveTargetIn(query, market, { directory: directory.entries, nameIndex: directory.nameIndex })
+    if (!target || market !== 'us') return target
+    try {
+      const history = await loadHistory(target.symbol)
+      return target.name === target.symbol && history.name ? { ...target, name: history.name } : target
+    } catch (error) {
+      if (error instanceof SymbolNotFoundError) return null
+      throw error
+    }
+  }
+
+  // 輸入框的下拉候選。台股只查本機清單；美股先列常用中文名與指數，再補 Yahoo 搜尋（失敗就只有本機的）
+  async function searchTargets(query, market) {
+    const directory = await loadDirectory()
+    const local = searchLocalTargets(query, market, { directory: directory.entries, limit: SEARCH_LIMIT })
+    if (market !== 'us' || !/^[\w .&-]{1,30}$/.test(query)) return local
+
+    const key = `search:${query.toUpperCase()}`
+    let remote = searchCache.get(key)
+    if (!remote) {
+      try {
+        const payload = await fetchJson(`${URLS.yahooSearch}?q=${encodeURIComponent(query)}&quotesCount=10&newsCount=0`)
+        remote = (payload?.quotes || [])
+          .filter((q) => US_EXCHANGES.has(q.exchange) && US_QUOTE_TYPES.has(q.quoteType) && US_SYMBOL_PATTERN.test(q.symbol || ''))
+          .map((q) => ({
+            kind: q.quoteType === 'INDEX' ? 'index' : 'stock',
+            market: 'us',
+            symbol: q.symbol,
+            name: q.shortname || q.longname || q.symbol,
+          }))
+        searchCache.set(key, remote, TTL.search)
+      } catch (error) {
+        console.error('美股搜尋失敗：', error.message)
+        remote = []
+        searchCache.set(key, remote, FAILURE_TTL)
+      }
+    }
+    const seen = new Set(local.map((t) => t.symbol))
+    return [...local, ...remote.filter((t) => !seen.has(t.symbol))].slice(0, SEARCH_LIMIT)
+  }
+
+  // 全市場最新一日收盤（上市 STOCK_DAY_ALL、上櫃收盤行情）：Map<代號, { code, name, exchange, close, change, changePct, volume（張）, date }>
+  async function loadDailyQuotes() {
+    const cached = cache.get('daily-quotes')
+    if (cached) return cached
+    const failed = cache.get('daily-quotes-failed')
+    if (failed) throw failed
+    return once('daily-quotes', () =>
+      fetchDailyQuotes().catch((error) => {
+        // 兩邊都失敗時 1 分鐘內不重打
+        cache.set('daily-quotes-failed', error, FAILURE_TTL)
+        throw error
+      }),
+    )
+  }
+
+  async function fetchDailyQuotes() {
+    const [twse, tpex] = await Promise.allSettled([fetchJson(URLS.twseList), fetchJson(URLS.tpexList)])
+    const map = new Map()
+    const add = (row) => {
+      // 只收股票（4 碼）與 ETF（00 開頭），排除權證、ETN 這類 6 碼的商品
+      if (row.close === null || !LISTED_CODE_PATTERN.test(row.code)) return
+      const prev = row.change === null ? null : row.close - row.change
+      map.set(row.code, { ...row, changePct: prev ? round((row.change / prev) * 100) : null })
+    }
+    if (twse.status === 'fulfilled') {
+      for (const r of twse.value || []) {
+        add({ code: r.Code, name: (r.Name || '').trim(), exchange: 'tse', close: toNumber(r.ClosingPrice), change: toNumber(r.Change), volume: toNumber(r.TradeVolume) === null ? null : Math.round(toNumber(r.TradeVolume) / 1000), date: corporateEvents.rocDate(r.Date) })
+      }
+    } else console.error('上市收盤資料失敗：', twse.reason?.message)
+    if (tpex.status === 'fulfilled') {
+      for (const r of tpex.value || []) {
+        add({ code: r.SecuritiesCompanyCode, name: (r.CompanyName || '').trim(), exchange: 'otc', close: toNumber(r.Close), change: toNumber(String(r.Change || '').trim()), volume: toNumber(r.TradingShares) === null ? null : Math.round(toNumber(r.TradingShares) / 1000), date: corporateEvents.rocDate(r.Date) })
+      }
+    } else console.error('上櫃收盤資料失敗：', tpex.reason?.message)
+    if (map.size === 0) throw new Error('全市場收盤資料暫時取不到')
+    // 只抓到一邊（例如上櫃那份資料很大、偶爾中斷）時，5 分鐘後就重抓
+    const complete = twse.status === 'fulfilled' && tpex.status === 'fulfilled'
+    cache.set('daily-quotes', map, complete ? DAILY_TTL : 5 * 60 * 1000)
+    return map
+  }
+
+  // 類股指數的漲跌（證交所 MI_INDEX，前一個交易日收盤）
+  async function loadSectors() {
+    const cached = cache.get('sectors')
+    if (cached) return cached
+    const rows = await fetchJson(MI_INDEX_URL)
+    const sectors = (rows || [])
+      .filter((r) => /類指數$/.test(r['指數'] || '') && !/報酬/.test(r['指數']))
+      .map((r) => ({
+        name: r['指數'].replace(/類指數$/, ''),
+        close: toNumber(r['收盤指數']),
+        changePct: toNumber(r['漲跌百分比']),
+        date: corporateEvents.rocDate(r['日期']),
+      }))
+      .filter((s) => s.changePct !== null)
+    cache.set('sectors', sectors, DAILY_TTL)
+    return sectors
+  }
+
+  // 大盤概況：主要指數、漲跌家數、類股漲跌、三大法人、美股與匯率。各區塊各自失敗只少一塊
+  async function getMarketOverview() {
+    const cached = cache.get('overview')
+    if (cached) return cached
+    return once('overview', buildOverview)
+  }
+
+  async function buildOverview() {
+    const notes = []
+    const [twIndices, usIndices, quotes, sectors, twiiHistory] = await Promise.allSettled([
+      getWatchSummaries(OVERVIEW_TARGETS.tw),
+      getWatchSummaries(OVERVIEW_TARGETS.us),
+      loadDailyQuotes(),
+      loadSectors(),
+      loadHistory('^TWII'),
+    ])
+    const pick = (result, label) => {
+      if (result.status === 'fulfilled') return result.value
+      console.error(`大盤概況（${label}）失敗：`, result.reason?.message)
+      notes.push(`${label}暫時取不到。`)
+      return null
+    }
+    const indexCards = (summaries, targets) =>
+      (summaries || []).map((s, i) => (s ? { name: targets[i].name, symbol: targets[i].symbol, ...pickIndex(s) } : null)).filter(Boolean)
+
+    // 漲跌家數（上市、上櫃各自；ETF 也算在內，和交易所公布的口徑接近）
+    const quoteMap = pick(quotes, '漲跌家數')
+    let breadth = null
+    if (quoteMap) {
+      breadth = {}
+      for (const exchange of ['tse', 'otc']) {
+        const rows = [...quoteMap.values()].filter((q) => q.exchange === exchange && q.change !== null)
+        // 這一邊的資料沒抓到就是 null（畫面顯示暫時取不到），不要顯示成 0 家
+        if (rows.length === 0) {
+          breadth[exchange] = null
+          continue
+        }
+        breadth[exchange] = {
+          up: rows.filter((q) => q.change > 0).length,
+          down: rows.filter((q) => q.change < 0).length,
+          flat: rows.filter((q) => q.change === 0).length,
+          date: rows[0]?.date ?? null,
+        }
+      }
+    }
+
+    // 三大法人（上市，最近 5 個交易日，億元）
+    let institutional = null
+    const history = pick(twiiHistory, '加權指數歷史資料')
+    if (history) {
+      try {
+        const dates = history.bars.map((bar) => bar.date)
+        const chips = await getTwseData().getChips(OVERVIEW_TARGETS.tw[0], dates)
+        institutional = chips ? { ...chips, summary: describeChips(chips, null) } : null
+      } catch (error) {
+        console.error('大盤三大法人失敗：', error.message)
+        notes.push('三大法人資料暫時取不到。')
+      }
+    }
+
+    const overview = {
+      asOf: new Date(now()).toISOString(),
+      tw: indexCards(pick(twIndices, '台股指數'), OVERVIEW_TARGETS.tw),
+      us: indexCards(pick(usIndices, '美股指數'), OVERVIEW_TARGETS.us),
+      breadth,
+      sectors: (pick(sectors, '類股漲跌') || []).sort((a, b) => b.changePct - a.changePct),
+      institutional,
+      notes,
+    }
+    cache.set('overview', overview, OVERVIEW_TTL)
+    return overview
+  }
+
+  // 選股用的全市場合併表（價量、估值、月營收、籌碼連買天數），快取 30 分鐘
+  async function loadScreenUniverse() {
+    const cached = cache.get('screen-universe')
+    if (cached) return cached
+    return once('screen-universe', buildScreenUniverse)
+  }
+
+  async function buildScreenUniverse() {
+    const [quotes, valuation, events, history] = await Promise.allSettled([
+      loadDailyQuotes(),
+      getTwseData().getValuationMap(),
+      loadCorporateEvents(),
+      loadHistory('^TWII'),
+    ])
+    if (quotes.status === 'rejected') throw quotes.reason
+    const notes = []
+    if (valuation.status === 'rejected') notes.push('估值資料暫時取不到，本益比、殖利率、股價淨值比條件會篩不到股票。')
+    if (events.status === 'rejected' || !events.value) notes.push('月營收資料暫時取不到。')
+    let streaks = null
+    let chipDays = 0
+    if (history.status === 'fulfilled') {
+      try {
+        const result = await getTwseData().getChipStreaks(history.value.bars.map((bar) => bar.date))
+        streaks = result.streaks
+        chipDays = result.days
+      } catch (error) {
+        console.error('選股籌碼失敗：', error.message)
+      }
+    }
+    if (!streaks) notes.push('三大法人資料暫時取不到，連買條件會篩不到股票。')
+    const rows = screener.buildUniverse({
+      quotes: quotes.value,
+      valuation: valuation.status === 'fulfilled' ? valuation.value : null,
+      revenue: events.status === 'fulfilled' ? events.value?.revenue : null,
+      streaks,
+    })
+    const quoteDate = [...quotes.value.values()].find((q) => q.exchange === 'tse')?.date ?? null
+    const universe = { rows, notes, quoteDate, chipDays }
+    cache.set('screen-universe', universe, notes.length ? 5 * 60 * 1000 : DAILY_TTL)
+    return universe
+  }
+
+  // 選股：filters 已經過 screener.parseFilters 驗證
+  async function screenStocks(filters) {
+    const universe = await loadScreenUniverse()
+    let matched = screener.sortRows(universe.rows.filter((row) => screener.passes(row, filters)), filters.sort)
+    const total = matched.length
+    let technicalChecked = 0
+    const notes = [...universe.notes]
+    if (screener.technicalNeeded(filters)) {
+      // 技術面只對前 TECH_LIMIT 檔逐檔算（要抓歷史 K 線）
+      const candidates = matched.slice(0, screener.TECH_LIMIT)
+      technicalChecked = candidates.length
+      // 選股看的是收盤資料，不打證交所即時報價；歷史只抓 6 個月、用獨立快取
+      const signals = await settleLimited(candidates, WATCH_CONCURRENCY, (row) =>
+        screenSignals(`${row.code}.${row.exchange === 'otc' ? 'TWO' : 'TW'}`),
+      )
+      matched = candidates.filter((row, i) => screener.passesTechnical(signals[i].status === 'fulfilled' ? signals[i].value : null, filters))
+      if (total > screener.TECH_LIMIT) notes.push(`技術面條件只檢查了前 ${screener.TECH_LIMIT} 檔（依目前的排序），可以先用其他條件縮小範圍。`)
+    }
+    return {
+      asOf: new Date(now()).toISOString(),
+      quoteDate: universe.quoteDate,
+      chipDays: universe.chipDays,
+      universeSize: universe.rows.length,
+      total,
+      technicalChecked,
+      results: matched.slice(0, screener.RESULT_LIMIT),
+      notes,
+    }
+  }
+
+  // 台股除權息預告與月營收（上市＋上櫃，整個市場一份）。各來源失敗只少一塊；全部失敗回傳 null
+  async function loadCorporateEvents() {
+    const cached = cache.get('corporate-events')
+    if (cached !== undefined) return cached
+    const { URLS: E } = corporateEvents
+    const [twseEx, tpexEx, twseRev, tpexRev] = await Promise.allSettled(
+      [E.twseExDividend, E.tpexExDividend, E.twseRevenue, E.tpexRevenue].map((url) => fetchJson(url)),
+    )
+    const ok = (r) => (r.status === 'fulfilled' && Array.isArray(r.value) ? r.value : null)
+    for (const [label, r] of [['上市除權息', twseEx], ['上櫃除權息', tpexEx], ['上市營收', twseRev], ['上櫃營收', tpexRev]]) {
+      if (r.status === 'rejected') console.error(`${label}資料失敗：`, r.reason?.message)
+    }
+    const all = [twseEx, tpexEx, twseRev, tpexRev].map(ok)
+    if (all.every((rows) => rows === null)) {
+      cache.set('corporate-events', null, EVENTS_FAILURE_TTL)
+      return null
+    }
+    const events = {
+      exDividends: corporateEvents.parseExDividends(all[0], all[1]),
+      revenue: corporateEvents.parseRevenue(all[2], all[3]),
+    }
+    cache.set('corporate-events', events, EVENTS_TTL)
+    return events
+  }
+
+  // 自訂追蹤清單：每個標的的輕量摘要，順序和 targets 相同；查不到的是 null。
+  // 台股即時報價一次批次查完，歷史資料各自查（有 5 分鐘快取）
+  async function getWatchSummaries(targets) {
+    const twTargets = targets.filter((t) => t.market === 'tw' && t.code && t.exchange)
+    const [realtimeResult, historyResults] = await Promise.all([
+      loadRealtime(twTargets).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason }),
+      ),
+      settleLimited(targets, WATCH_CONCURRENCY, (target) => (target.symbol ? loadHistory(target.symbol) : null)),
+    ])
+    const realtimeMap = realtimeResult.status === 'fulfilled' ? realtimeResult.value : new Map()
+    if (realtimeResult.status === 'rejected' && twTargets.length > 0) {
+      console.error('自訂追蹤的即時報價失敗：', realtimeResult.reason?.message)
+    }
+    const historyOf = (index) => (historyResults[index].status === 'fulfilled' ? historyResults[index].value : null)
+    const realtimeOf = (target) => (target.market === 'tw' ? realtimeMap.get(`${target.exchange}_${target.code}`) : null)
+
+    // 台股個股的籌碼（只用來產生「外資連 3 買」這類小標記）。三大法人資料是整個市場一天一份、有快取，
+    // 多檔共用同幾天的資料；但第一次可能要幾秒，超過時間就先略過，下次再補
+    // 除權息與月營收（台股才有；整個市場一份、有快取）
+    const hasTw = targets.some((t) => t.market === 'tw' && t.kind === 'stock')
+    const events = hasTw ? await loadCorporateEvents().catch(() => null) : null
+    const today = dateIn(TW_TIMEZONE, new Date(now()))
+
+    const chipsList = await Promise.all(
+      targets.map((target, index) =>
+        target.market === 'tw' && target.kind === 'stock'
+          ? withTimeout(loadTwExtras(target, historyOf(index), realtimeOf(target), { valuation: false }), WATCH_CHIPS_TIMEOUT_MS)
+              .then((extras) => extras?.chips ?? null)
+              .catch(() => null)
+          : null,
+      ),
+    )
+
+    return targets.map((target, index) => {
+      if (historyResults[index].status === 'rejected') {
+        console.error(`自訂追蹤的歷史資料失敗（${target.symbol}）：`, historyResults[index].reason?.message)
+      }
+      const item = buildItem(target, historyOf(index), realtimeOf(target), { light: true, chips: chipsList[index] })
+      if (!item) return null
+      const summary = toWatchSummary(item)
+      // 除權息（今天以後最近一次）與最新月營收；不是台股個股、或資料抓不到時是 null
+      summary.events = events && target.market === 'tw' && target.kind === 'stock' ? corporateEvents.eventsFor(target.code, events, today) : null
+      return summary
+    })
+  }
+
+  // 選股技術面：6 個月日 K 算 MA5／20／60 與 RSI（不打即時報價）
+  async function screenSignals(symbol) {
+    const key = `screen:${symbol}`
+    const cached = screenCache.get(key)
+    if (cached !== undefined) return cached
+    let signals = null
+    try {
+      const payload = await fetchJson(`${URLS.yahooChart}${encodeURIComponent(symbol)}?range=6mo&interval=1d`)
+      const result = payload?.chart?.result?.[0]
+      const quote = result?.indicators?.quote?.[0] || {}
+      const bars = (result?.timestamp || [])
+        .map((_, i) => ({ open: quote.open?.[i], high: quote.high?.[i], low: quote.low?.[i], close: quote.close?.[i], volume: quote.volume?.[i] }))
+        .filter((bar) => [bar.open, bar.high, bar.low, bar.close].every(Number.isFinite))
+      if (bars.length >= 60) {
+        const ind = computeIndicators(bars)
+        signals = { price: bars[bars.length - 1].close, ma5: ind.ma5, ma20: ind.ma20, ma60: ind.ma60, rsi: ind.rsi14 }
+      }
+    } catch (error) {
+      console.error(`選股技術面失敗（${symbol}）：`, error.message)
+    }
+    screenCache.set(key, signals, signals ? TTL.history : FAILURE_TTL)
+    return signals
+  }
+
+  // 價格以外的提醒條件要的指標（單檔；歷史資料有快取）
+  async function getAlertSignals(target) {
+    const twTargets = target.market === 'tw' && target.code && target.exchange ? [target] : []
+    const [realtimeResult, historyResult] = await Promise.allSettled([
+      loadRealtime(twTargets),
+      target.symbol ? loadHistory(target.symbol) : Promise.resolve(null),
+    ])
+    const realtime = realtimeResult.status === 'fulfilled' ? realtimeResult.value.get(`${target.exchange}_${target.code}`) : null
+    const history = historyResult.status === 'fulfilled' ? historyResult.value : null
+    const item = buildItem(target, history, realtime, { light: true })
+    if (!item) return null
+    const ind = item.indicators || {}
+    return {
+      price: item.quote.price,
+      changePct: item.quote.changePct,
+      date: item.quote.date ?? null,
+      ma5: ind.ma5 ?? null,
+      ma20: ind.ma20 ?? null,
+      ma60: ind.ma60 ?? null,
+      k: ind.k ?? null,
+      d: ind.d ?? null,
+      prevK: ind.prevK ?? null,
+      prevD: ind.prevD ?? null,
+      rsi: ind.rsi14 ?? null,
+      volumeRatio: ind.volumeRatio ?? null,
+    }
+  }
+
+  // 自訂追蹤展開卡片：價格走勢圖（含均線、支撐壓力）、籌碼與估值。台股以外只有圖表
+  async function getWatchDetail(target) {
+    const twTargets = target.market === 'tw' && target.code && target.exchange ? [target] : []
+    const [realtimeResult, historyResult] = await Promise.allSettled([
+      loadRealtime(twTargets),
+      target.symbol ? loadHistory(target.symbol) : Promise.resolve(null),
+    ])
+    const realtime = realtimeResult.status === 'fulfilled' ? realtimeResult.value.get(`${target.exchange}_${target.code}`) : null
+    const history = historyResult.status === 'fulfilled' ? historyResult.value : null
+    const extras = await loadTwExtras(target, history, realtime)
+    const item = buildItem(target, history, realtime, { detail: true, chips: extras.chips, valuation: extras.valuation })
+    if (!item) return null
+    return {
+      chart: item.chart,
+      analysis: item.analysis,
+      chips: item.chips,
+      valuation: item.valuation,
+      notes: extras.chipsFailed ? ['籌碼資料暫時取不到。'] : [],
+    }
   }
 
   return {
@@ -474,12 +953,99 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     getQuote,
     getHistoryBars,
     resolveTarget,
+    getWatchSummaries,
+    getWatchDetail,
+    getAlertSignals,
+    getMarketOverview,
+    loadDailyQuotes,
+    screenStocks,
+    searchTargets,
     // 啟動時先載入股票清單，第一次問股票就不用等
     warmUp: () => loadDirectory().then(() => undefined),
   }
 }
 
 // 價格走勢圖的資料：最近 CHART_DAYS 天的收盤、均線與成交量
+// 和 Promise.allSettled 一樣的回傳格式，但最多同時跑 limit 個
+async function settleLimited(items, limit, run) {
+  const results = new Array(items.length)
+  let next = 0
+  async function worker() {
+    while (next < items.length) {
+      const index = next
+      next += 1
+      try {
+        results[index] = { status: 'fulfilled', value: await run(items[index]) }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
+// 52 週高低與目前價格的位置（0 = 在低點、100 = 在高點）
+function yearRange(bars, price) {
+  const recent = bars.slice(-YEAR_BARS)
+  if (recent.length < 20) return null
+  const high = Math.max(...recent.map((bar) => bar.high), price)
+  const low = Math.min(...recent.map((bar) => bar.low), price)
+  return {
+    high: round(high),
+    low: round(low),
+    position: high > low ? round(((price - low) / (high - low)) * 100, 0) : null,
+    fromHigh: round((price / high - 1) * 100),
+  }
+}
+
+// 大盤概況的指數卡片：只留畫面要的欄位
+function pickIndex(summary) {
+  return { price: summary.quote.price, change: summary.quote.change, changePct: summary.quote.changePct, date: summary.quote.date, session: summary.session, spark: summary.spark }
+}
+
+// 清單摘要等籌碼資料最多等這麼久
+const WATCH_CHIPS_TIMEOUT_MS = 4000
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms).unref?.())])
+}
+
+// 清單那一行的籌碼小標記：外資優先，其次投信；連續 2 日以上同方向才標
+function chipsTagOf(summary) {
+  if (!summary) return null
+  for (const side of [summary.foreign, summary.trust]) {
+    if (side && Math.abs(side.streak) >= 2) {
+      const buying = side.streak > 0
+      return { text: `${side.name}連 ${Math.abs(side.streak)} ${buying ? '買' : '賣'}`, tone: buying ? 'bull' : 'bear' }
+    }
+  }
+  return null
+}
+
+// 自訂追蹤的一列：報價、區間漲跌、52 週位置、迷你走勢與幾個主要的技術判讀（文字由 signals 產生）
+const WATCH_SIGNAL_KEYS = ['trend', 'ma20', 'ma60', 'rsi', 'kd', 'volume']
+function toWatchSummary(item) {
+  return {
+    name: item.name,
+    currency: item.currency,
+    session: item.session,
+    source: item.source,
+    quote: item.quote,
+    changes: item.indicators
+      ? { d5: item.indicators.change5d, d20: item.indicators.change20d, d60: item.indicators.change60d }
+      : null,
+    volumeRatio: item.indicators?.volumeRatio ?? null,
+    range52w: item.range52w ?? null,
+    spark: item.spark ?? [],
+    signals: (item.analysis?.signals ?? []).filter((signal) => WATCH_SIGNAL_KEYS.includes(signal.key)),
+    supports: item.analysis?.supports ?? [],
+    resistances: item.analysis?.resistances ?? [],
+    // 籌碼小標記（台股個股、資料有取到才有）
+    chipsTag: chipsTagOf(item.chips?.summary),
+  }
+}
+
 function buildChart(series) {
   const from = Math.max(0, series.closes.length - CHART_DAYS)
   const pick = (values) => values.slice(from).map((value) => (value === null ? null : round(value)))

@@ -191,9 +191,108 @@ function findMarketTargets(question, { directory = [], nameIndex, force = false 
   return { targets }
 }
 
+// 美股代號：1～5 個大寫字母（BRK-B 這種多一段），指數以 ^ 開頭
+const US_SYMBOL_PATTERN = /^\^?[A-Z]{1,5}(?:-[A-Z])?$/
+
+// 自訂追蹤用：使用者已經指定台股或美股，只在那個市場裡找「一個」標的。
+// 和 findMarketTargets 不同，這裡的輸入就是代號或名稱本身，不需要股市關鍵字。
+// 美股代號是否真的存在由取資料那一端確認。
+function resolveTargetIn(query, market, { directory = [], nameIndex } = {}) {
+  const text = typeof query === 'string' ? query.trim() : ''
+  if (!text) return null
+
+  if (market === 'tw') {
+    const upper = text.toUpperCase()
+    const byCode = directory.find((entry) => entry.code.toUpperCase() === upper)
+    if (byCode) return twTarget(byCode)
+
+    const index = nameIndex || buildNameIndex(directory)
+    // 完全相同的名稱優先，其次是名稱包含輸入（「聯發」→ 聯發科，取最短的），最後是輸入包含名稱
+    const exact = index.find(({ alias }) => alias === text)
+    if (exact) return twTarget(exact.entry)
+    // 只打一個字（例如「台」）會比對到太多，不做部分比對
+    const containing =
+      text.length >= 2 ? index.filter(({ alias }) => alias.includes(text)).sort((a, b) => a.alias.length - b.alias.length)[0] : null
+    if (containing) return twTarget(containing.entry)
+    const contained = index.find(({ alias }) => alias.length >= 2 && text.includes(alias))
+    if (contained) return twTarget(contained.entry)
+
+    const indexRule = INDEX_RULES.find((rule) => rule.target.market === 'tw' && rule.pattern.test(text))
+    return indexRule ? { ...indexRule.target } : null
+  }
+
+  if (market === 'us') {
+    const named = Object.entries(US_NAMES).find(([name]) => name.toUpperCase() === text.toUpperCase())
+    if (named) return usTarget(named[1], named[0])
+    const indexRule = INDEX_RULES.find(
+      (rule) => rule.target.market === 'us' && (rule.target.symbol === text.toUpperCase() || rule.pattern.test(text)),
+    )
+    if (indexRule) return { ...indexRule.target }
+    const symbol = text.replace(/^\$/, '').toUpperCase()
+    return US_SYMBOL_PATTERN.test(symbol) ? usTarget(symbol) : null
+  }
+
+  return null
+}
+
+// 輸入框的下拉候選（本機清單）：台股比對代號開頭與名稱，美股比對常用中文名與指數。
+// 排序：代號／名稱完全相同 → 開頭相同 → 包含，同一層依代號排
+function searchTargets(query, market, { directory = [], limit = 10 } = {}) {
+  const text = typeof query === 'string' ? query.trim() : ''
+  if (!text) return []
+  const upper = text.toUpperCase()
+  const scored = []
+
+  const score = (fields) => {
+    let best = null
+    for (const field of fields) {
+      if (!field) continue
+      const value = field.toUpperCase()
+      const s = value === upper ? 0 : value.startsWith(upper) ? 1 : value.includes(upper) ? 2 : null
+      if (s !== null && (best === null || s < best)) best = s
+    }
+    return best
+  }
+
+  if (market === 'tw') {
+    for (const entry of directory) {
+      const s = score([entry.code, entry.name])
+      if (s !== null) scored.push({ s, order: entry.code, target: twTarget(entry) })
+    }
+    for (const { target } of INDEX_RULES.filter((rule) => rule.target.market === 'tw')) {
+      const s = score([target.name, target.code])
+      if (s !== null) scored.push({ s, order: target.code, target: { ...target } })
+    }
+  } else if (market === 'us') {
+    for (const [name, symbol] of Object.entries(US_NAMES)) {
+      const s = score([name, symbol])
+      if (s !== null) scored.push({ s, order: symbol, target: usTarget(symbol, name) })
+    }
+    for (const { target } of INDEX_RULES.filter((rule) => rule.target.market === 'us')) {
+      const s = score([target.name, target.symbol])
+      if (s !== null) scored.push({ s, order: target.symbol, target: { ...target } })
+    }
+  }
+
+  const seen = new Set()
+  return scored
+    .sort((a, b) => a.s - b.s || a.order.localeCompare(b.order))
+    .map((item) => item.target)
+    .filter((target) => {
+      const key = target.symbol || `${target.exchange}_${target.code}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, limit)
+}
+
 module.exports = {
   MARKET_KEYWORDS,
   MAX_TARGETS,
+  US_SYMBOL_PATTERN,
   buildNameIndex,
   findMarketTargets,
+  resolveTargetIn,
+  searchTargets,
 }

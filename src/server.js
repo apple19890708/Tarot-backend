@@ -21,6 +21,18 @@ const { recordCalls } = require('./services/market/tracking')
 const { createMarketRouter } = require('./routes/market')
 const MarketCall = require('./models/MarketCall')
 const MarketAlert = require('./models/MarketAlert')
+const MarketWatch = require('./models/MarketWatch')
+const MarketWatchGroup = require('./models/MarketWatchGroup')
+const MarketProfile = require('./models/MarketProfile')
+const MarketSnapshot = require('./models/MarketSnapshot')
+const MarketNews = require('./models/MarketNews')
+const { createNewsSync } = require('./services/market/materialNews')
+const { createSnapshotRecorder } = require('./services/market/snapshotRecorder')
+const { createCronRouter } = require('./routes/cron')
+const { createDiscord } = require('./services/discord')
+const { createWebPush } = require('./services/webPush')
+const PushSubscription = require('./models/PushSubscription')
+const { createNotifier } = require('./services/market/notifier')
 const {
   compareCards,
   validateManualCards,
@@ -321,10 +333,60 @@ async function saveNarration({ readingId, userId, text, model, market, drawn }) 
   }
 }
 
-// 股市諮詢：行情快照、建議追蹤、價位提醒（限金融股市權限，不呼叫 AI、不產生費用）
+// 到價推播：瀏覽器推播（所有會員；VAPID 金鑰沒設定時自動關閉）與 Discord Webhook（只給 admin）
+const notifier = createNotifier({ discord: createDiscord(), webPush: createWebPush(), MarketProfile, PushSubscription, User, MarketAlert })
+// 重大訊息：公開資訊觀測站只給當天的，抓到就存 30 天（排程與使用者開頁面時都會觸發，30 分鐘最多一次）
+const newsSync = createNewsSync({
+  MarketNews,
+  fetchJson: async (url) => {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TarotMarket/1.0)', Accept: 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!response.ok) throw new Error(`${response.status} ${url}`)
+    return response.json()
+  },
+})
+
+// 每日資產快照：台股收盤後由排程記錄，使用者開自訂追蹤頁時也會補記
+const snapshotRecorder = createSnapshotRecorder({
+  MarketSnapshot,
+  MarketWatch,
+  MarketProfile,
+  User,
+  marketService: defaultMarketService,
+})
+
+// 股市諮詢：行情快照、建議追蹤、價位提醒、自訂追蹤（限金融股市權限，不呼叫 AI、不產生費用）
 app.use(
   '/api/market',
-  createMarketRouter({ requireStockAccess, ensureDatabase, marketService: defaultMarketService, MarketCall, MarketAlert }),
+  createMarketRouter({
+    requireStockAccess,
+    ensureDatabase,
+    marketService: defaultMarketService,
+    MarketCall,
+    MarketAlert,
+    MarketWatch,
+    MarketWatchGroup,
+    MarketProfile,
+    notifier,
+    snapshots: snapshotRecorder,
+    news: newsSync,
+  }),
+)
+
+// 外部排程（GitHub Actions）呼叫：網頁關著也檢查價位提醒並推播。用 CRON_SECRET 驗證，沒設定就關閉
+app.use(
+  '/api/cron',
+  createCronRouter({
+    ensureDatabase,
+    marketService: defaultMarketService,
+    notifier,
+    MarketAlert,
+    User,
+    recordSnapshots: () => snapshotRecorder.recordAll(),
+    syncNews: () => newsSync.sync(),
+  }),
 )
 
 // 依牌與正逆位重算組合分析，再交給 AI 改寫成口語解讀；不信任前端傳來的分析文字
