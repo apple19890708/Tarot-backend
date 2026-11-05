@@ -50,12 +50,30 @@ function createAuthMiddleware({ findUserById, secret } = {}) {
   const requireAdmin = createUserGuard((user) => user.role === 'admin', '沒有權限。')
 
   // AI 解析：admin 一律可以，member 要被管理者開通
-  const requireAiAccess = createUserGuard(
-    (user) => (typeof user.canUseAi === 'function' ? user.canUseAi() : user.role === 'admin' || Boolean(user.aiAccess)),
-    'AI 解讀需要管理者開通，請聯絡管理者。',
-  )
+  const canUseAi = (user) =>
+    typeof user.canUseAi === 'function' ? user.canUseAi() : user.role === 'admin' || Boolean(user.aiAccess)
+  const requireAiAccess = createUserGuard(canUseAi, 'AI 解讀需要管理者開通，請聯絡管理者。')
 
-  return { optionalAuth, requireAuth, requireAdmin, requireAiAccess }
+  // 金融股市（股市諮詢、股市追蹤）：admin 一律可以，member 要被管理者開通，和 AI 權限分開
+  const canUseStock = (user) =>
+    typeof user.canUseStock === 'function' ? user.canUseStock() : user.role === 'admin' || Boolean(user.stockAccess)
+  const requireStockAccess = createUserGuard(canUseStock, '金融股市功能需要管理者開通，請聯絡管理者。')
+
+  // 不擋請求、只回答「這個請求的使用者有沒有某個權限」。給 optionalAuth 的端點判斷個別欄位用（例如股市諮詢）
+  function createChecker(isAllowed) {
+    return async function check(req) {
+      const payload = verifyToken(readBearerToken(req.headers.authorization), { secret })
+      if (!payload) {
+        return false
+      }
+      const user = await findUserById(payload.sub)
+      return Boolean(user && isAllowed(user))
+    }
+  }
+  const hasAiAccess = createChecker(canUseAi)
+  const hasStockAccess = createChecker(canUseStock)
+
+  return { optionalAuth, requireAuth, requireAdmin, requireAiAccess, hasAiAccess, requireStockAccess, hasStockAccess }
 }
 
 module.exports = { createAuthMiddleware }

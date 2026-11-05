@@ -294,6 +294,26 @@ test('規則 8：行動與結果的行動位、建議位依牌的極性換讀法
   assert.ok(reading.analysis.positions.every((f) => f.text.length > 0))
 })
 
+test('規則 8：投資決策的動機、風險、機會、建議位都有判定', () => {
+  const spread = spreads.find((s) => s.key === 'investment-decision')
+  const positionKeys = keysOf('investment-decision')
+  // hopes-fears（動機）, hidden（忽略的風險）, positive（可能的機會）, advice（建議的態度）, outcome
+  const entries = [up(TOWER), up(TOWER), up(EMPRESS), rev(TOWER), up(WANDS_4)]
+  const types = analyzeCombination({ entries, positionKeys }).positions.map((f) => f.type)
+  assert.deepEqual(types, ['hopesFearsHeavy', 'hiddenRisk', 'supportActive', 'adviceLetGo'])
+
+  // 權重總和為 1，每種判定都要有文字
+  const total = spread.positions.reduce((sum, p) => sum + p.weight, 0)
+  assert.ok(Math.abs(total - 1) < 1e-9)
+  const reading = buildReading({
+    question: '這週要不要加碼台股',
+    spread,
+    cards: [TOWER, CUPS_4, EMPRESS, SWORDS_6, WANDS_4].map((card, i) => ({ ...card, _id: `c${i}`, slug: `c${i}` })),
+    drawOrientation: () => 'upright',
+  })
+  assert.ok(reading.analysis.positions.every((f) => f.text.length > 0))
+})
+
 test('規則 8：馬蹄鐵的隱藏影響與環境位', () => {
   const positionKeys = keysOf('horseshoe')
   // past, present, hidden, challenge, environment, advice, outcome

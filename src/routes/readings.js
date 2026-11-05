@@ -28,6 +28,8 @@ function createReadingsRouter({
   requireAuth,
   Reading = ReadingModel,
   loadCardsInOrder = defaultLoadCardsInOrder,
+  // 股市諮詢這類限 AI 權限的問題類型，由 server 注入檢查；測試沒注入時一律放行
+  ensureDomainAllowed = async () => true,
 }) {
   const router = express.Router()
 
@@ -57,6 +59,9 @@ function createReadingsRouter({
         res.status(400).json({ message: domainError })
         return
       }
+      if (!(await ensureDomainAllowed(req, res, domain))) {
+        return
+      }
 
       // 有牌陣就用牌陣，沒有就看使用者有沒有自訂位置；兩者都沒有則是自選牌
       let spread = null
@@ -81,7 +86,7 @@ function createReadingsRouter({
         spread = custom.spread
       }
 
-      const { narration, error: narrationError } = resolveNarration(req.body.narration)
+      const { narration, error: narrationError } = resolveNarration(req.body.narration, { allowMarket: domain === 'stock' })
       if (narrationError) {
         res.status(400).json({ message: narrationError })
         return
@@ -183,6 +188,7 @@ function createReadingsRouter({
           ? {
               text: record.narration.text,
               model: record.narration.model || '',
+              market: record.narration.market || null,
               createdAt: record.narration.createdAt,
             }
           : null,
@@ -219,8 +225,36 @@ function createReadingsRouter({
   return router
 }
 
+// 解讀時查到的市場資料由前端帶回來（還沒保存成紀錄時，後端沒有地方先存）。
+// 只有股市諮詢才收；只做形狀、大小與 key 的檢查，不合格就不存（解讀照存）。
+// 內容只有本人讀得到，前端也只當數字與純文字顯示，不會當 HTML
+// 含圖表與回測曲線，一個標的約 20KB，最多 4 個
+const MARKET_MAX_LENGTH = 200000
+const MARKET_MAX_DEPTH = 8
+
+// Mongo 不接受以 $ 開頭或含 . 的 key（存進 Mixed 欄位會 save 失敗），結構也不該太深
+function hasUnsafeKeys(value, depth = 0) {
+  if (depth > MARKET_MAX_DEPTH) return true
+  if (Array.isArray(value)) return value.some((v) => hasUnsafeKeys(v, depth + 1))
+  if (value && typeof value === 'object') {
+    return Object.entries(value).some(([key, v]) => key.startsWith('$') || key.includes('.') || hasUnsafeKeys(v, depth + 1))
+  }
+  return false
+}
+
+function resolveMarket(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.items)) {
+    return null
+  }
+  if (JSON.stringify(raw).length > MARKET_MAX_LENGTH || hasUnsafeKeys(raw)) {
+    return null
+  }
+  return raw
+}
+
 // 保存時可以一起帶上剛才產生好的 AI 解讀；沒有就是 null（之後仍可在紀錄頁補做）
-function resolveNarration(raw) {
+// allowMarket：只有股市諮詢的紀錄才收行情資料
+function resolveNarration(raw, { allowMarket = false } = {}) {
   if (raw === undefined || raw === null) {
     return { narration: null }
   }
@@ -233,7 +267,7 @@ function resolveNarration(raw) {
   }
   const model = typeof raw.model === 'string' ? raw.model.slice(0, 100) : ''
 
-  return { narration: { text, model, createdAt: new Date() } }
+  return { narration: { text, model, market: allowMarket ? resolveMarket(raw.market) : null, createdAt: new Date() } }
 }
 
 // id 不合法時直接當成找不到，避免 CastError。

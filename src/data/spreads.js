@@ -61,6 +61,28 @@ const spreads = [
     ],
   },
   {
+    key: 'investment-decision',
+    name: '投資決策',
+    cardCount: 5,
+    description: '不猜漲跌，而是盤點你這次進場的動機、忽略的風險與機會，看清自己的決策狀態。',
+    // 排成十字：上方動機、左右是風險與機會、中間是建議、下方是結果。
+    // 位置 key 沿用既有判定：動機讀「想要與害怕」、風險讀「隱藏影響」、機會讀「助力」
+    grid: { cols: 3, rows: 3 },
+    positions: [
+      { key: 'hopes-fears', label: '動機', prompt: '你想進場的真正原因：是看好、貪心，還是怕錯過', weight: 0.2, layout: { col: 2, row: 1 } },
+      { key: 'hidden', label: '忽略的風險', prompt: '這筆投資裡你還沒正視的風險', weight: 0.2, layout: { col: 1, row: 2 } },
+      { key: 'positive', label: '可能的機會', prompt: '這件事裡真正站得住腳的機會', weight: 0.15, layout: { col: 3, row: 2 } },
+      { key: 'advice', label: '建議的態度', prompt: '面對這筆投資最適合的心態與做法', weight: 0.2, layout: { col: 2, row: 2 } },
+      { key: 'outcome', label: '結果', prompt: '照你目前的想法做下去，你會走到什麼處境', weight: 0.25, layout: { col: 2, row: 3 } },
+    ],
+    relations: [
+      { from: 1, to: 2, kind: 'contrast' }, // 風險 ↔ 機會，這個牌陣的重點
+      { from: 1, to: 3, kind: 'remedy' }, // 面對風險，建議是可用的方式
+      { from: 0, to: 4, kind: 'arc' }, // 動機 → 結果
+      { from: 3, to: 4, kind: 'sequence' }, // 照建議調整後走到結果
+    ],
+  },
+  {
     key: 'two-choice',
     name: '二擇一',
     cardCount: 5,

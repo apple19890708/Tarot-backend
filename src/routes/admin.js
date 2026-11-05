@@ -44,43 +44,48 @@ function createAdminRouter({ ensureDatabase, requireAdmin }) {
     }
   })
 
-  // 開通／收回某個會員的 AI 解析權限
-  router.patch('/users/:id/ai-access', async (req, res, next) => {
-    try {
-      if (!ensureDatabase(res)) {
-        return
+  // 開通／收回會員的權限：AI 解析（aiAccess）、金融股市（stockAccess）
+  router.patch('/users/:id/ai-access', updateAccess('aiAccess', 'AI 解析'))
+  router.patch('/users/:id/stock-access', updateAccess('stockAccess', '金融股市功能'))
+
+  function updateAccess(field, label) {
+    return async (req, res, next) => {
+      try {
+        if (!ensureDatabase(res)) {
+          return
+        }
+
+        if (typeof req.body.allowed !== 'boolean') {
+          res.status(400).json({ message: 'allowed 必須是 true 或 false。' })
+          return
+        }
+
+        if (!mongoose.isValidObjectId(req.params.id)) {
+          res.status(404).json({ message: '找不到這位使用者。' })
+          return
+        }
+
+        const user = await User.findById(req.params.id)
+        if (!user) {
+          res.status(404).json({ message: '找不到這位使用者。' })
+          return
+        }
+
+        // admin 本來就有權限，不需要也不應該被這支關掉
+        if (user.role === 'admin') {
+          res.status(409).json({ message: `管理者本來就能使用${label}，不需要開通。` })
+          return
+        }
+
+        user[field] = req.body.allowed
+        await user.save()
+
+        res.json({ user: user.toPublicJSON() })
+      } catch (error) {
+        next(error)
       }
-
-      if (typeof req.body.allowed !== 'boolean') {
-        res.status(400).json({ message: 'allowed 必須是 true 或 false。' })
-        return
-      }
-
-      if (!mongoose.isValidObjectId(req.params.id)) {
-        res.status(404).json({ message: '找不到這位使用者。' })
-        return
-      }
-
-      const user = await User.findById(req.params.id)
-      if (!user) {
-        res.status(404).json({ message: '找不到這位使用者。' })
-        return
-      }
-
-      // admin 本來就有權限，不需要也不應該被這支關掉
-      if (user.role === 'admin') {
-        res.status(409).json({ message: '管理者本來就能使用 AI 解析，不需要開通。' })
-        return
-      }
-
-      user.aiAccess = req.body.allowed
-      await user.save()
-
-      res.json({ user: user.toPublicJSON() })
-    } catch (error) {
-      next(error)
     }
-  })
+  }
 
   return router
 }

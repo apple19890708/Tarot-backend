@@ -239,3 +239,47 @@ test('權限被收回後，舊的 token 立刻失效（因為每次都回資料�
     assert.strictEqual((await fetch(`${base}/narrate`, { method: 'POST', headers })).status, 403)
   })
 })
+
+test('hasAiAccess：只回答能不能用 AI，不擋請求（股市諮詢用）', async () => {
+  const users = new Map([
+    ['admin-id', { role: 'admin' }],
+    ['granted-id', { role: 'member', aiAccess: true }],
+    ['plain-id', { role: 'member', aiAccess: false }],
+  ])
+  const { hasAiAccess } = createAuthMiddleware({ findUserById: async (id) => users.get(id) || null, secret: SECRET })
+  const reqOf = (id) => ({
+    headers: id ? { authorization: `Bearer ${signToken({ id, role: users.get(id)?.role || 'member' }, { secret: SECRET })}` } : {},
+  })
+
+  assert.strictEqual(await hasAiAccess(reqOf('admin-id')), true)
+  assert.strictEqual(await hasAiAccess(reqOf('granted-id')), true)
+  assert.strictEqual(await hasAiAccess(reqOf('plain-id')), false)
+  assert.strictEqual(await hasAiAccess(reqOf('missing-id')), false)
+  assert.strictEqual(await hasAiAccess(reqOf(null)), false)
+})
+
+test('金融股市權限：admin 一律可用，member 要開通，和 AI 權限互不影響', async () => {
+  const users = new Map([
+    ['admin-id', { role: 'admin' }],
+    ['stock-id', { role: 'member', aiAccess: false, stockAccess: true }],
+    ['ai-id', { role: 'member', aiAccess: true, stockAccess: false }],
+  ])
+  const { hasStockAccess, hasAiAccess, requireStockAccess } = createAuthMiddleware({
+    findUserById: async (id) => users.get(id) || null,
+    secret: SECRET,
+  })
+  const reqOf = (id) => ({ headers: { authorization: `Bearer ${signToken({ id, role: users.get(id).role }, { secret: SECRET })}` } })
+
+  assert.strictEqual(await hasStockAccess(reqOf('admin-id')), true)
+  assert.strictEqual(await hasStockAccess(reqOf('stock-id')), true)
+  assert.strictEqual(await hasStockAccess(reqOf('ai-id')), false)
+  assert.strictEqual(await hasAiAccess(reqOf('stock-id')), false)
+
+  const app = express()
+  app.get('/market', requireStockAccess, (_req, res) => res.json({ ok: true }))
+  await withServer(app, async (base) => {
+    const get = (id) => fetch(`${base}/market`, { headers: reqOf(id).headers })
+    assert.strictEqual((await get('stock-id')).status, 200)
+    assert.strictEqual((await get('ai-id')).status, 403)
+  })
+})

@@ -107,7 +107,7 @@ function makeFakeReading({ records = [makeRecord()] } = {}) {
 }
 
 // userId 固定成 OWNER，等於「已登入的那位使用者」
-function makeApp({ Reading, userId = OWNER } = {}) {
+function makeApp({ Reading, userId = OWNER, ensureDomainAllowed } = {}) {
   const app = express()
   app.use(express.json())
   app.use(
@@ -119,6 +119,7 @@ function makeApp({ Reading, userId = OWNER } = {}) {
         next()
       },
       Reading,
+      ensureDomainAllowed,
       // 不連資料庫，牌名直接給假的
       loadCardsInOrder: async (drawn) => ({
         cards: drawn.map((item, index) => ({ _id: item.id, nameZh: `牌${index + 1}` })),
@@ -228,6 +229,34 @@ test('保存紀錄：可以一起存剛產生的 AI 解讀', async () => {
   assert.strictEqual(Reading.calls.create[0].narration.model, 'test-model')
 })
 
+test('保存紀錄：可以一起存解讀當下的市場資料，形狀不對就不存', async () => {
+  const Reading = makeFakeReading()
+  const market = { asOf: '2026-11-05T02:40:00.000Z', items: [{ symbol: '^TWII' }], notes: [] }
+  await withServer(makeApp({ Reading }), async (base) => {
+    // 只有股市諮詢的紀錄才收行情資料
+    await postReading(base, { question: '', domain: 'stock', cards: [{ id: CARD_A, orientation: 'upright' }], narration: { text: '解讀', market } })
+    await postReading(base, { question: '', domain: 'stock', cards: [{ id: CARD_A, orientation: 'upright' }], narration: { text: '解讀', market: 'bad' } })
+  })
+  assert.deepStrictEqual(Reading.calls.create[0].narration.market, market)
+  assert.strictEqual(Reading.calls.create[1].narration.market, null)
+})
+
+test('保存紀錄：沒有 AI 權限的人不能存股市諮詢的紀錄', async () => {
+  const Reading = makeFakeReading()
+  const deny = async (_req, res, domain) => {
+    if (domain !== 'stock') return true
+    res.status(403).json({ message: '股市諮詢需要 AI 解讀權限，請聯絡管理者開通。' })
+    return false
+  }
+  await withServer(makeApp({ Reading, ensureDomainAllowed: deny }), async (base) => {
+    const denied = await postReading(base, { question: '', domain: 'stock', cards: [{ id: CARD_A, orientation: 'upright' }] })
+    assert.strictEqual(denied.status, 403)
+    const allowed = await postReading(base, { question: '', domain: 'money', cards: [{ id: CARD_A, orientation: 'upright' }] })
+    assert.strictEqual(allowed.status, 201)
+  })
+  assert.strictEqual(Reading.calls.create.length, 1)
+})
+
 test('保存紀錄：牌格式不正確時回 400，不寫進資料庫', async () => {
   const Reading = makeFakeReading()
   await withServer(makeApp({ Reading }), async (base) => {
@@ -313,4 +342,17 @@ test('超過上限時刪掉最舊的，且只刪自己的', async () => {
   assert.strictEqual(model.state.skip, MAX_READINGS_PER_USER)
   assert.strictEqual(String(model.state.deleted.user), OWNER)
   assert.deepStrictEqual(model.state.deleted._id.$in, ['old-0', 'old-1'])
+})
+
+test('保存紀錄：行情資料只有股市諮詢才收，含 $ 開頭的 key 不存', async () => {
+  const Reading = makeFakeReading()
+  const market = { asOf: '2026-11-05T02:40:00.000Z', items: [{ symbol: '^TWII' }], notes: [] }
+  await withServer(makeApp({ Reading }), async (base) => {
+    const card = [{ id: CARD_A, orientation: 'upright' }]
+    await postReading(base, { question: '', domain: 'money', cards: card, narration: { text: '解讀', market } })
+    await postReading(base, { question: '', domain: 'stock', cards: card, narration: { text: '解讀', market: { items: [{ $where: 'x' }] } } })
+  })
+  assert.strictEqual(Reading.calls.create[0].narration.market, null)
+  assert.strictEqual(Reading.calls.create[1].narration.market, null)
+  assert.strictEqual(Reading.calls.create[1].narration.text, '解讀')
 })

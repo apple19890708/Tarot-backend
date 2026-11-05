@@ -1,4 +1,5 @@
 const { ELEMENT_LABELS, COURT_RANKS, getCardProfile } = require('../data/cardAttributes')
+const { formatMarketForPrompt } = require('./market/marketService')
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-opus-4.8'
@@ -148,6 +149,50 @@ const SYSTEM_PROMPT = `你是一位經驗豐富、說話直接的塔羅師，正
 - 那個最常帶頭鬧情緒的學生，你打算先跟他建立關係，還是先讓他知道底線？
 </example>`
 
+// 問題和股市有關、而且查到了市場資料時，附加在系統提示後面。
+// 這時解讀以數據分析為主、牌面為輔，結構也換成這一套（取代上面的「結構」與字數要求）。
+const MARKET_INSTRUCTIONS = `這次的問題和股市有關，資料裡附上了 <market_data>（查詢當下的報價與技術指標）。這次的解讀以**市場數據分析為主、牌面為輔**，以下規則優先於上面的結構與字數要求：
+
+數據的使用：
+- 價格、漲跌、指標數字**只能用 <market_data> 裡有的**，不可以自行編造或回憶任何價格、新聞、財報、法人買賣超、目標價。資料沒有的就不提。
+- 數字照資料寫，不要改寫成其他精度；提到價位時要說明它來自哪裡（例如「MA20 的 46,680」「近 20 日低點 41,855」）。
+- 資料是盤中時，要提醒收盤前還會變動；資料是收盤時，要寫出是哪一天的收盤。
+- <market_data> 的備註寫著查不到或從缺的，要在開場一句話交代，並說明這會讓判斷少了哪一塊。
+- 數據和牌面方向不一致時，**以數據為準**，牌面用來提醒操作心態與風險，不可以拿牌面推翻數據。上面「指向分析的結論必須一致」那條，在這裡只適用於牌面補充那一節。
+
+分析的方法：
+- 趨勢：看現價與 MA5／MA20／MA60 的相對位置、均線排列（多頭排列、空頭排列或糾結）、近 5／20／60 日漲跌。
+- 動能：RSI 高於 70 偏過熱、低於 30 偏超賣；KD 看黃金交叉或死亡交叉、是否鈍化；MACD 看柱體正負與擴大或收斂。
+- 量能：放量或量縮，搭配漲跌判斷是追價、恐慌賣壓還是觀望。
+- 支撐與壓力：只用資料裡的「支撐」「壓力」與均線、近 20／60 日高低點。
+- 資料裡的「判讀」（均線排列、站上或跌破月線、RSI、KD、MACD、量能）已經算好，畫面上也會顯示同一份；你的分析要和它一致，重點是解釋這些訊號放在一起代表什麼，不要逐條重念。
+- 判斷要明確：給出短線（數日到兩週）的方向判斷——偏多、偏空或區間整理——以及支持這個判斷的兩三個最關鍵的數據理由。
+- 預測要寫成有條件的情境，每個情境都要有觸發價位：「站回某價位就……，跌破某價位就……」。
+
+歷史回測與機器學習（資料裡有才寫）：
+- 引用訊號當理由時，要附上這個訊號在這檔標的的歷史表現（出現次數、10 日上漲機率），並和基準比較。上漲機率和基準差不到 5 個百分點，要直說「這個訊號在這檔股票上沒有明顯優勢」，不能拿它當主要理由。樣本不足的訊號要註明。
+- 策略回測：說出哪個策略過去表現最好、技術策略有沒有贏過買進持有、代價是多大的回落；如果都輸給買進持有，要直說技術操作在這檔股票上不划算。
+- 資料裡的「操作建議（規則計算）」是畫面上也會顯示的結論。你的方向判斷、停損與目標價**必須和它一致**，不可以給出相反的方向或不同的停損；你的工作是解釋為什麼、補上情境細節，以及牌面對操作心態的提醒。
+- 籌碼（法人買賣超、融資）與估值（本益比百分位）有提供時要納入：法人連續買賣超是重要佐證；估值偏貴要提醒追高風險。
+- 分段驗證：前後期方向相反的訊號、兩段沒有都贏過買進持有的策略，要說明它們可能只是剛好適合過去。
+- 機器學習：寫出上漲機率，並同時寫出樣本外準確率與基準。標示不可靠時，要明講「模型沒有贏過基準，不要拿這個機率做決定」，結論不能建立在它上面。
+
+結構（使用 Markdown，取代上面的結構）：
+1. 第一行列出牌面，格式同上，用粗體。
+2. 開場一段：直接給結論（方向判斷＋最關鍵的一個價位），一兩句話。
+3. ## 行情現況：用資料講現在的價位、漲跌、在均線的哪一側、近期跌了或漲了多少。有多個標的時分開寫，最後一句比較它們的強弱。
+4. ## 技術面判斷：趨勢、動能、量能各一段，最後列出支撐與壓力價位（項目清單）。
+4-1. ## 歷史回測與模型：資料裡有回測或機器學習時才寫這節。先講目前訊號過去的勝率與基準的差距，再講策略比較，最後講模型的機率與可信度。用數字說話，三到六個項目即可。
+5. ## 牌面怎麼補充：整組牌只用一節講完，不要每個位置各開一節。挑最關鍵的兩三張，講它們對「你這次的操作」提醒了什麼（進場的心態、忽略的風險、該守的紀律）。牌不能拿來預測價格。
+6. ## 情境與操作：列出兩到三個情境，每個都要有觸發價位、代表的意義、對應的做法（進場、加碼、減碼、停損或觀望）。停損價位要具體。
+7. ## 最後的判斷：用粗體寫出結論（例如「短線方向：偏空，等站回 MA5 再說」），再點出最需要盯的一個價位與一個指標。
+
+格式：只用 ## 標題、項目清單（-）、粗體、→ 箭頭；不要表格、不要表情符號。全文約 900 到 1500 字。不要寫「你可以問自己」那一節。`
+
+function buildSystemPrompt(market) {
+  return market ? `${SYSTEM_PROMPT}\n\n${MARKET_INSTRUCTIONS}` : SYSTEM_PROMPT
+}
+
 function isNarrationAvailable() {
   return Boolean(process.env.OPENROUTER_API_KEY)
 }
@@ -189,7 +234,7 @@ function buildNumberSequence(reading, profiles) {
     .join(' → ')
 }
 
-function buildUserMessage({ reading, cards }) {
+function buildUserMessage({ reading, cards, market = null }) {
   const { analysis } = reading
   const profiles = cards.map((card) => getCardProfile(card))
 
@@ -270,7 +315,7 @@ ${listOrNone(analysis.conflicts)}
 ${listOrNone(analysis.uncertainties)}
 </combination_analysis>
 
-請依照上述資料撰寫這次的解讀。`
+${market ? `<market_data>\n${formatMarketForPrompt(market)}\n</market_data>\n\n` : ''}請依照上述資料撰寫這次的解讀。`
 }
 
 class NarrationRefusedError extends Error {}
@@ -301,7 +346,8 @@ function createSseParser(onData) {
 // 以串流方式產生解讀。signal 被中斷時（例如使用者按停止、關閉頁面），
 // 會一併中斷對 OpenRouter 的請求，OpenRouter 隨即停止生成與計費。
 // onStart 在 OpenRouter 接受請求後才呼叫，之前的錯誤可以用一般的 HTTP 狀態碼回應。
-async function streamNarration({ reading, cards, signal, onStart, onDelta }) {
+// market：buildMarketSnapshot 的結果；問題和股市無關時為 null
+async function streamNarration({ reading, cards, market = null, signal, onStart, onDelta }) {
   const response = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
@@ -317,8 +363,8 @@ async function streamNarration({ reading, cards, signal, onStart, onDelta }) {
       reasoning: { effort: readReasoningEffort(), exclude: true },
       stream: true,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserMessage({ reading, cards }) },
+        { role: 'system', content: buildSystemPrompt(market) },
+        { role: 'user', content: buildUserMessage({ reading, cards, market }) },
       ],
     }),
     signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
@@ -371,6 +417,8 @@ async function streamNarration({ reading, cards, signal, onStart, onDelta }) {
 module.exports = {
   // 匯出供測試檢查提示內容，不會因此呼叫 AI
   SYSTEM_PROMPT,
+  MARKET_INSTRUCTIONS,
+  buildSystemPrompt,
   isNarrationAvailable,
   streamNarration,
   buildUserMessage,

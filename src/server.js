@@ -16,6 +16,11 @@ const { loadCardsInOrder } = require('./services/cardLoader')
 const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
 const { isNarrationAvailable, streamNarration, NarrationRefusedError } = require('./services/narrationService')
+const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./services/market/marketService')
+const { recordCalls } = require('./services/market/tracking')
+const { createMarketRouter } = require('./routes/market')
+const MarketCall = require('./models/MarketCall')
+const MarketAlert = require('./models/MarketAlert')
 const {
   compareCards,
   validateManualCards,
@@ -24,6 +29,7 @@ const {
   resolveCustomSpread,
 } = require('./services/manualDraw')
 const { getCardProfile } = require('./data/cardAttributes')
+const { STOCK_ONLY_DOMAINS } = require('./data/ruleConfig')
 
 const ORIENTATIONS = ['upright', 'reversed']
 
@@ -50,6 +56,9 @@ app.use(
     },
   }),
 )
+// 保存紀錄時會一起帶上股市諮詢當時的行情（含圖表與回測曲線，最多約 200KB），只放寬這條；
+// 這個 parser 先解析過，後面的全域 express.json() 就會略過
+app.post('/api/readings', express.json({ limit: '300kb' }))
 app.use(express.json())
 
 // 牌卡圖片（公共領域 RWS 1909），放在 public/cards/
@@ -71,7 +80,7 @@ function ensureDatabase(res) {
   return false
 }
 
-const { optionalAuth, requireAuth, requireAdmin, requireAiAccess } = createAuthMiddleware({
+const { optionalAuth, requireAuth, requireAdmin, requireAiAccess, requireStockAccess, hasStockAccess } = createAuthMiddleware({
   // token 裡的 sub 不一定是合法的 ObjectId（偽造或舊資料），先擋掉避免 CastError
   findUserById: (id) => (mongoose.isValidObjectId(id) ? User.findById(id) : null),
 })
@@ -79,7 +88,17 @@ const { optionalAuth, requireAuth, requireAdmin, requireAiAccess } = createAuthM
 app.use('/api/auth', createAuthRouter({ ensureDatabase, requireAuth }))
 app.use('/api/admin', createAdminRouter({ ensureDatabase, requireAdmin }))
 // 只定義 GET／DELETE，與下面公開的 POST /api/readings/draw 等端點不衝突
-app.use('/api/readings', createReadingsRouter({ ensureDatabase, requireAuth }))
+// 股市諮詢只給 admin 與開通「金融股市」的會員。選單只是不顯示，真正的放行在這裡。
+// 用在 draw、manual、narrate 與保存紀錄；narrate 另外還要 AI 權限（requireAiAccess）
+async function ensureDomainAllowed(req, res, domain) {
+  if (!STOCK_ONLY_DOMAINS.includes(domain) || (await hasStockAccess(req))) {
+    return true
+  }
+  res.status(403).json({ message: '股市諮詢需要金融股市權限，請聯絡管理者開通。' })
+  return false
+}
+
+app.use('/api/readings', createReadingsRouter({ ensureDatabase, requireAuth, ensureDomainAllowed }))
 
 app.get('/api/health', async (_req, res) => {
   const cardCount = isDatabaseReady() ? await Card.countDocuments() : 0
@@ -136,6 +155,9 @@ app.post('/api/readings/draw', optionalAuth, async (req, res, next) => {
     const { domain, error: domainError } = resolveDomain(req.body.domain)
     if (domainError) {
       res.status(400).json({ message: domainError })
+      return
+    }
+    if (!(await ensureDomainAllowed(req, res, domain))) {
       return
     }
 
@@ -207,6 +229,9 @@ app.post('/api/readings/manual', optionalAuth, async (req, res, next) => {
       res.status(400).json({ message: domainError })
       return
     }
+    if (!(await ensureDomainAllowed(req, res, domain))) {
+      return
+    }
 
     const { drawn, error } = validateManualCards(req.body.cards)
     if (error) {
@@ -262,7 +287,7 @@ app.post('/api/readings/manual', optionalAuth, async (req, res, next) => {
 // 回傳 null：沒有指定紀錄（還沒保存），本來就不存；true／false：有指定紀錄時是否存成功。
 // 重新產生時會直接覆蓋同一筆的 narration，不另開新紀錄。結果要回報給前端，
 // 否則存檔失敗只寫在 log，使用者以為紀錄已經更新。
-async function saveNarration({ readingId, userId, text, model, drawn }) {
+async function saveNarration({ readingId, userId, text, model, market, drawn }) {
   if (!readingId) {
     return null
   }
@@ -287,7 +312,7 @@ async function saveNarration({ readingId, userId, text, model, drawn }) {
       return false
     }
 
-    record.narration = { text, model: model || '', createdAt: new Date() }
+    record.narration = { text, model: model || '', market: market || null, createdAt: new Date() }
     await record.save()
     return true
   } catch (error) {
@@ -295,6 +320,12 @@ async function saveNarration({ readingId, userId, text, model, drawn }) {
     return false
   }
 }
+
+// 股市諮詢：行情快照、建議追蹤、價位提醒（限金融股市權限，不呼叫 AI、不產生費用）
+app.use(
+  '/api/market',
+  createMarketRouter({ requireStockAccess, ensureDatabase, marketService: defaultMarketService, MarketCall, MarketAlert }),
+)
 
 // 依牌與正逆位重算組合分析，再交給 AI 改寫成口語解讀；不信任前端傳來的分析文字
 // AI 解讀會產生費用，所以限 admin 與被管理者開通的會員（未登入者仍可抽牌與看規則分析）
@@ -327,6 +358,10 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
     const { domain: narrateDomain, error: narrateDomainError } = resolveDomain(req.body.domain)
     if (narrateDomainError) {
       res.status(400).json({ message: narrateDomainError })
+      return
+    }
+    // requireAiAccess 只確認 AI 權限；股市諮詢還要金融股市權限，否則會拿到行情、回測與操作建議
+    if (!(await ensureDomainAllowed(req, res, narrateDomain))) {
       return
     }
 
@@ -371,6 +406,21 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
       domain: narrateDomain,
     })
 
+    // 問題和股市有關時，先查即時報價與技術指標一起交給 AI。查詢失敗不影響解讀，只是少了數據
+    // 只有「股市諮詢」才查市場資料、改用技術分析的寫法；其他問題類型一律走原本的塔羅解讀。
+    // 查詢失敗不影響解讀，只是少了數據
+    const market =
+      narrateDomain === 'stock'
+        ? await buildMarketSnapshot(question).catch((error) => {
+            console.error('市場資料查詢失敗：', error.message)
+            return null
+          })
+        : null
+    // AI 解讀時查到的建議也記下來（自動對答案用）；失敗不影響解讀
+    if (market && mongoose.connection.readyState === 1) {
+      recordCalls(MarketCall, req.auth.userId, market).catch((err) => console.error('建議紀錄失敗：', err.message))
+    }
+
     // 前端中斷連線（按停止、重新抽牌、關閉頁面）時，連帶中斷對 OpenRouter 的請求以停止計費
     const controller = new AbortController()
     res.on('close', () => {
@@ -379,7 +429,8 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
       }
     })
 
-    // 回應格式為 NDJSON，每行一個事件：delta（一段文字）、done（完成）、error（串流途中失敗）
+    // 回應格式為 NDJSON，每行一個事件：market（查到的市場資料，只在股市問題出現、排在最前面）、
+    // delta（一段文字）、done（完成）、error（串流途中失敗）
     const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
 
     // 完整產生的解讀要存回紀錄（AI 文字要花錢又無法重現），所以邊送邊收集
@@ -389,6 +440,7 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
       const { model } = await streamNarration({
         reading,
         cards,
+        market,
         signal: controller.signal,
         onStart: () => {
           res.status(200).set({
@@ -397,6 +449,9 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
             'X-Accel-Buffering': 'no',
           })
           res.flushHeaders()
+          if (market) {
+            writeEvent({ type: 'market', snapshot: market })
+          }
         },
         onDelta: (text) => {
           narrationText += text
@@ -409,6 +464,7 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
         userId: req.auth.userId,
         text: narrationText,
         model,
+        market,
         drawn,
       })
       writeEvent({ type: 'done', model, saved })
@@ -467,6 +523,9 @@ async function start() {
   }
 
   await connectDatabase()
+
+  // 先載入股票清單（名稱對代號），第一次問股票時不用等；失敗也不影響啟動
+  warmUpMarket().catch((error) => console.error('股票清單預載失敗：', error.message))
 
   app.listen(port, () => {
     console.log(`Tarot API running at http://localhost:${port}`)

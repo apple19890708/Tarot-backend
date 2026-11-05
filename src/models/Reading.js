@@ -41,6 +41,8 @@ const readingSchema = new mongoose.Schema(
         {
           text: { type: String, required: true },
           model: { type: String, default: '' },
+          // 解讀當下查到的市場資料（股市問題才有）。之後回頭看可以對照當時的數字與後來的走勢
+          market: { type: mongoose.Schema.Types.Mixed, default: null },
           createdAt: { type: Date, default: Date.now },
         },
         { _id: false },

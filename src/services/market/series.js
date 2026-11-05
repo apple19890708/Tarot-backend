@@ -1,0 +1,135 @@
+// 每一天的技術指標序列（回測、機器學習、圖表用）。
+// 演算法和 indicators.js 的「最後一天」版本相同，只是保留每一天的值；資料不足的天數為 null。
+const { emaSeries } = require('./indicators')
+
+function smaSeries(values, period) {
+  const result = new Array(values.length).fill(null)
+  let sum = 0
+  for (let i = 0; i < values.length; i += 1) {
+    sum += values[i]
+    if (i >= period) sum -= values[i - period]
+    if (i >= period - 1) result[i] = sum / period
+  }
+  return result
+}
+
+function rsiSeries(closes, period = 14) {
+  const result = new Array(closes.length).fill(null)
+  if (closes.length <= period) return result
+  let gain = 0
+  let loss = 0
+  for (let i = 1; i <= period; i += 1) {
+    const diff = closes[i] - closes[i - 1]
+    if (diff >= 0) gain += diff
+    else loss -= diff
+  }
+  gain /= period
+  loss /= period
+  result[period] = loss === 0 ? 100 : 100 - 100 / (1 + gain / loss)
+  for (let i = period + 1; i < closes.length; i += 1) {
+    const diff = closes[i] - closes[i - 1]
+    gain = (gain * (period - 1) + Math.max(diff, 0)) / period
+    loss = (loss * (period - 1) + Math.max(-diff, 0)) / period
+    result[i] = loss === 0 ? 100 : 100 - 100 / (1 + gain / loss)
+  }
+  return result
+}
+
+function kdSeries(highs, lows, closes, period = 9) {
+  const k = new Array(closes.length).fill(null)
+  const d = new Array(closes.length).fill(null)
+  let kv = 50
+  let dv = 50
+  for (let i = period - 1; i < closes.length; i += 1) {
+    let high = -Infinity
+    let low = Infinity
+    for (let j = i - period + 1; j <= i; j += 1) {
+      if (highs[j] > high) high = highs[j]
+      if (lows[j] < low) low = lows[j]
+    }
+    const rsv = high === low ? 50 : ((closes[i] - low) / (high - low)) * 100
+    kv = (2 / 3) * kv + rsv / 3
+    dv = (2 / 3) * dv + kv / 3
+    k[i] = kv
+    d[i] = dv
+  }
+  return { k, d }
+}
+
+function macdHistSeries(closes) {
+  const fast = emaSeries(closes, 12)
+  const slow = emaSeries(closes, 26)
+  const start = 25
+  const dif = closes.map((_, i) => (i >= start ? fast[i] - slow[i] : null))
+  const validDif = dif.slice(start)
+  const signal = emaSeries(validDif, 9)
+  return closes.map((_, i) => {
+    const j = i - start
+    return j >= 0 && signal[j] !== null ? dif[i] - signal[j] : null
+  })
+}
+
+function rollingExtreme(values, period, pick) {
+  return values.map((_, i) => (i >= period - 1 ? pick(...values.slice(i - period + 1, i + 1)) : null))
+}
+
+function volumeRatioSeries(volumes, period = 20) {
+  return volumes.map((volume, i) => {
+    if (i < period || !Number.isFinite(volume) || volume <= 0) return null
+    let sum = 0
+    for (let j = i - period; j < i; j += 1) {
+      if (!Number.isFinite(volumes[j]) || volumes[j] <= 0) return null
+      sum += volumes[j]
+    }
+    return volume / (sum / period)
+  })
+}
+
+// bars：[{ date, open, high, low, close, volume }]，由舊到新
+function computeSeries(bars) {
+  const closes = bars.map((bar) => bar.close)
+  const highs = bars.map((bar) => bar.high)
+  const lows = bars.map((bar) => bar.low)
+  const { k, d } = kdSeries(highs, lows, closes)
+  return {
+    dates: bars.map((bar) => bar.date),
+    closes,
+    volumes: bars.map((bar) => bar.volume),
+    ma5: smaSeries(closes, 5),
+    ma20: smaSeries(closes, 20),
+    ma60: smaSeries(closes, 60),
+    rsi14: rsiSeries(closes),
+    k,
+    d,
+    macdHist: macdHistSeries(closes),
+    volumeRatio: volumeRatioSeries(bars.map((bar) => bar.volume)),
+    high20: rollingExtreme(highs, 20, Math.max),
+    low20: rollingExtreme(lows, 20, Math.min),
+    high60: rollingExtreme(highs, 60, Math.max),
+    low60: rollingExtreme(lows, 60, Math.min),
+  }
+}
+
+// 某一天的指標，格式和 computeIndicators 相同，可以直接交給 buildSignals
+function pointAt(series, i) {
+  const at = (name, index = i) => (index >= 0 ? series[name][index] : null)
+  return {
+    ma5: at('ma5'),
+    ma20: at('ma20'),
+    ma60: at('ma60'),
+    rsi14: at('rsi14'),
+    k: at('k'),
+    d: at('d'),
+    prevK: at('k', i - 1),
+    prevD: at('d', i - 1),
+    macdHist: at('macdHist'),
+    macdPrevHist: at('macdHist', i - 1),
+    volumeRatio: at('volumeRatio'),
+    high20: at('high20'),
+    low20: at('low20'),
+    high60: at('high60'),
+    low60: at('low60'),
+  }
+}
+
+module.exports = { smaSeries, rsiSeries, kdSeries, macdHistSeries, computeSeries, pointAt }

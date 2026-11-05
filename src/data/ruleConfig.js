@@ -27,6 +27,14 @@ const QUESTION_DOMAINS = {
     suits: ['cups'],
     dimensions: { action: 0.15, emotion: 0.55, logic: 0.2, material: 0.1 },
   },
+  // 股市諮詢：只有 admin 與開通「金融股市」的會員能選（STOCK_ONLY_DOMAINS）。
+  // 不放關鍵詞，「自動判斷」不會判成這一類——股票相關的字仍歸「財務」，避免沒有權限的人在分析裡看到這個分類
+  stock: {
+    label: '股市',
+    keywords: [],
+    suits: ['pentacles'],
+    dimensions: { action: 0.2, emotion: 0.05, logic: 0.35, material: 0.4 },
+  },
   study: {
     label: '學業與決策',
     keywords: ['考試', '學業', '讀書', '選擇', '決定', '該不該'],
@@ -46,6 +54,10 @@ const GENERAL_DOMAIN = {
 
 // 使用者可明確指定的問題類型（規則 11 的 domain 參數），不含內部退路的 general
 const SELECTABLE_DOMAINS = Object.keys(QUESTION_DOMAINS)
+
+// 只有能用金融股市功能的人（admin 與被開通的 member）可以指定的問題類型。
+// 前端只是不顯示，真正的放行在後端各端點
+const STOCK_ONLY_DOMAINS = ['stock']
 
 function getDomainConfig(domain) {
   return QUESTION_DOMAINS[domain] || GENERAL_DOMAIN
@@ -224,6 +236,7 @@ module.exports = {
   QUESTION_DOMAINS,
   GENERAL_DOMAIN,
   SELECTABLE_DOMAINS,
+  STOCK_ONLY_DOMAINS,
   getDomainConfig,
   NUMBER_STAGES,
   getNumberStage,
