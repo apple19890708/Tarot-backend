@@ -15,10 +15,12 @@ const { createReadingsRouter } = require('./routes/readings')
 const { loadCardsInOrder } = require('./services/cardLoader')
 const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
-const { isNarrationAvailable, streamNarration, NarrationRefusedError } = require('./services/narrationService')
+const { isNarrationAvailable, streamNarration, streamChat, NarrationRefusedError } = require('./services/narrationService')
 const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./services/market/marketService')
 const { recordCalls } = require('./services/market/tracking')
 const { createMarketRouter } = require('./routes/market')
+const { createMarketAnalysisRouter } = require('./routes/marketAnalysis')
+const MarketAnalysis = require('./models/MarketAnalysis')
 const MarketCall = require('./models/MarketCall')
 const MarketAlert = require('./models/MarketAlert')
 const MarketWatch = require('./models/MarketWatch')
@@ -372,6 +374,22 @@ app.use(
     notifier,
     snapshots: snapshotRecorder,
     news: newsSync,
+  }),
+)
+
+// 個股分析（v17 規格 F）：彈窗資料不呼叫 AI；AI 深度分析要 AI 權限、有次數限制；「我的紀錄」的股票分析
+app.use(
+  '/api/market',
+  createMarketAnalysisRouter({
+    requireStockAccess,
+    requireAiAccess,
+    ensureDatabase,
+    marketService: defaultMarketService,
+    MarketWatch,
+    MarketAnalysis,
+    MarketProfile,
+    news: newsSync,
+    ai: { isAvailable: isNarrationAvailable, stream: streamChat },
   }),
 )
 

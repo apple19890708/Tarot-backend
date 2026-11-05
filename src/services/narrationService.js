@@ -348,6 +348,19 @@ function createSseParser(onData) {
 // onStart 在 OpenRouter 接受請求後才呼叫，之前的錯誤可以用一般的 HTTP 狀態碼回應。
 // market：buildMarketSnapshot 的結果；問題和股市無關時為 null
 async function streamNarration({ reading, cards, market = null, signal, onStart, onDelta }) {
+  return streamChat({
+    messages: [
+      { role: 'system', content: buildSystemPrompt(market) },
+      { role: 'user', content: buildUserMessage({ reading, cards, market }) },
+    ],
+    signal,
+    onStart,
+    onDelta,
+  })
+}
+
+// 對 OpenRouter 發出串流請求，塔羅解讀與個股 AI 分析共用。回傳 { model }
+async function streamChat({ messages, signal, onStart, onDelta }) {
   const response = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
@@ -362,10 +375,7 @@ async function streamNarration({ reading, cards, market = null, signal, onStart,
       // exclude：推理過程不要回傳。前端是直接把串流接成 Markdown 顯示的，混進來會變亂碼般的內容
       reasoning: { effort: readReasoningEffort(), exclude: true },
       stream: true,
-      messages: [
-        { role: 'system', content: buildSystemPrompt(market) },
-        { role: 'user', content: buildUserMessage({ reading, cards, market }) },
-      ],
+      messages,
     }),
     signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
   })
@@ -421,6 +431,7 @@ module.exports = {
   buildSystemPrompt,
   isNarrationAvailable,
   streamNarration,
+  streamChat,
   buildUserMessage,
   createSseParser,
   NarrationRefusedError,

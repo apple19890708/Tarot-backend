@@ -49,6 +49,8 @@ const OVERVIEW_TARGETS = {
 // 除權息預告與月營收一天變動很少，快取 6 小時；抓不到時 10 分鐘後再試
 const EVENTS_TTL = 6 * 60 * 60 * 1000
 const EVENTS_FAILURE_TTL = 10 * 60 * 1000
+// 個股分析的單檔快照
+const TARGET_SNAPSHOT_TTL = 10 * 60 * 1000
 
 // 美股搜尋只收美國交易所的股票、ETF 與指數（Yahoo 的 exchange 代碼）
 const US_EXCHANGES = new Set(['NMS', 'NGM', 'NCM', 'NYQ', 'ASE', 'PCX', 'BTS', 'NAS', 'NYS', 'SNP', 'DJI', 'NIM', 'WCB'])
@@ -453,12 +455,16 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     if (!found) {
       return null
     }
+    return snapshotOf(found.targets)
+  }
 
+  // 指定標的的完整快照（行情、指標、籌碼、估值、回測、預測、操作建議）。股市諮詢與個股分析共用
+  async function snapshotOf(targets) {
     const notes = []
-    const twTargets = found.targets.filter((target) => target.market === 'tw')
+    const twTargets = targets.filter((target) => target.market === 'tw')
     const [realtimeResult, ...historyResults] = await Promise.allSettled([
       loadRealtime(twTargets),
-      ...found.targets.map((target) => (target.symbol ? loadHistory(target.symbol) : Promise.resolve(null))),
+      ...targets.map((target) => (target.symbol ? loadHistory(target.symbol) : Promise.resolve(null))),
     ])
 
     const realtimeMap = realtimeResult.status === 'fulfilled' ? realtimeResult.value : new Map()
@@ -466,7 +472,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
 
     // 大盤序列（機器學習特徵）、籌碼、估值：各自失敗只少一塊資料
     const contextSymbols = [
-      ...new Set(found.targets.filter((t) => t.kind === 'stock').map((t) => CONTEXT_INDEX[t.market]?.symbol).filter(Boolean)),
+      ...new Set(targets.filter((t) => t.kind === 'stock').map((t) => CONTEXT_INDEX[t.market]?.symbol).filter(Boolean)),
     ]
     const contextEntries = await Promise.all(
       contextSymbols.map(async (symbol) => {
@@ -482,7 +488,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     const contextSeries = new Map(contextEntries)
 
     const twExtras = await Promise.all(
-      found.targets.map(async (target, index) => {
+      targets.map(async (target, index) => {
         const realtime = realtimeMap.get(`${target.exchange}_${target.code}`)
         const extras = await loadTwExtras(target, historyOf(index), realtime)
         if (extras.chipsFailed) notes.push(`${target.name} 的籌碼資料暫時取不到。`)
@@ -495,7 +501,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     }
 
     const items = []
-    found.targets.forEach((target, index) => {
+    targets.forEach((target, index) => {
       const historyResult = historyResults[index]
       const history = historyResult.status === 'fulfilled' ? historyResult.value : null
       if (historyResult.status === 'rejected') {
@@ -524,6 +530,28 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     })
 
     return { asOf: new Date(now()).toISOString(), items, notes }
+  }
+
+  // 個股分析彈窗：單一標的的完整快照，加上除權息與月營收。結果快取 10 分鐘（不含個人持股，所有人共用）
+  async function buildTargetSnapshot(target) {
+    const key = `target-snapshot:${target.symbol || `${target.exchange}_${target.code}`}`
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    return once(key, async () => {
+      const isTwStock = target.market === 'tw' && target.kind === 'stock' && target.code
+      const [snapshot, events] = await Promise.all([
+        snapshotOf([target]),
+        isTwStock ? loadCorporateEvents().catch(() => null) : null,
+      ])
+      const today = dateIn(TW_TIMEZONE, new Date(now()))
+      const result = {
+        ...snapshot,
+        events: events && isTwStock ? corporateEvents.eventsFor(target.code, events, today) : null,
+      }
+      // 完全查不到報價時只快取 1 分鐘，稍後可以重試
+      cache.set(key, result, result.items.length > 0 ? TARGET_SNAPSHOT_TTL : FAILURE_TTL)
+      return result
+    })
   }
 
   // 單一標的的最新價格（價位提醒用）：台股優先用證交所即時報價，其次 Yahoo
@@ -950,6 +978,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
 
   return {
     buildMarketSnapshot,
+    buildTargetSnapshot,
     getQuote,
     getHistoryBars,
     resolveTarget,
