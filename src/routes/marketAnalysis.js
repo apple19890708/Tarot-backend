@@ -62,9 +62,20 @@ function createMarketAnalysisRouter({
   news = null,
   // AI：isAvailable() 與 stream({ messages, signal, onStart, onDelta }) → { model }
   ai,
+  // AI 用量紀錄（每日次數）：AI 開始產生就記一筆，中途停止的也算。沒傳時改數存下來的分析（只有完整產生的）
+  MarketAiUsage = null,
   now = () => Date.now(),
 }) {
   const router = express.Router()
+
+  // AI 開始產生（開始計費）時記一筆用量；記錄失敗只寫 log，不中斷分析
+  function recordUsage(userId) {
+    if (!MarketAiUsage) return
+    const expireAt = new Date(now() + (MarketAiUsage.KEEP_DAYS || 2) * 86400000)
+    Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'stock', expireAt })).catch((error) =>
+      console.error('AI 用量記錄失敗：', error.message),
+    )
+  }
   // 同一個人同時只能跑一個 AI 分析；最近一次開始的時間（中斷的也算，避免中斷再重來繞過冷卻）
   const running = new Set()
   const startedAt = new Map()
@@ -104,7 +115,11 @@ function createMarketAnalysisRouter({
   async function quotaOf(req, watchId) {
     const userId = req.auth.userId
     const [usedToday, latest] = await Promise.all([
-      MarketAnalysis.countDocuments({ user: userId, createdAt: { $gte: startOfTaipeiDay(now()) } }),
+      (MarketAiUsage || MarketAnalysis).countDocuments({
+        user: userId,
+        ...(MarketAiUsage ? { kind: 'stock' } : {}),
+        createdAt: { $gte: startOfTaipeiDay(now()) },
+      }),
       MarketAnalysis.findOne({ user: userId, watch: watchId }).sort({ createdAt: -1 }),
     ])
     const lastStart = Math.max(latest ? new Date(latest.createdAt).getTime() : 0, startedAt.get(`${userId}:${watchId}`) || 0)
@@ -166,6 +181,14 @@ function createMarketAnalysisRouter({
         res.status(409).json({ message: '上一個 AI 分析還在進行，請等它完成。' })
         return
       }
+      // 檢查完立刻上鎖（同步執行），同時送多個請求也只有一個能往下走；早退時由 finally 釋放
+      running.add(userId)
+      locked = true
+      // 一開始就監聽中斷：查行情時使用者已經關掉彈窗的話，就不呼叫 AI
+      const controller = new AbortController()
+      res.on('close', () => {
+        if (!res.writableFinished) controller.abort()
+      })
       const { quota } = await quotaOf(req, watch._id)
       if (quota.retryAt) {
         res.status(429).json({ message: '這檔股票剛分析過，請稍後再試。', retryAt: quota.retryAt })
@@ -176,8 +199,6 @@ function createMarketAnalysisRouter({
         return
       }
 
-      running.add(userId)
-      locked = true
       lockKey = `${userId}:${watch._id}`
       startedAt.set(lockKey, now())
 
@@ -194,12 +215,11 @@ function createMarketAnalysisRouter({
         return
       }
       const holding = holdingOf(watch, item, fees)
-
-      // 前端中斷連線（按停止、關閉彈窗）時，連帶中斷 AI 請求以停止計費
-      const controller = new AbortController()
-      res.on('close', () => {
-        if (!res.writableFinished) controller.abort()
-      })
+      // 還沒呼叫 AI 就斷線：不計費，也不算冷卻
+      if (controller.signal.aborted) {
+        startedAt.delete(lockKey)
+        return
+      }
       // NDJSON：delta（一段文字）、done（完成，附存好的紀錄摘要）、error（串流途中失敗）
       const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
       let text = ''
@@ -215,6 +235,7 @@ function createMarketAnalysisRouter({
               'X-Accel-Buffering': 'no',
             })
             res.flushHeaders()
+            recordUsage(userId)
           },
           onDelta: (delta) => {
             text += delta

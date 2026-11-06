@@ -989,6 +989,8 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     loadDailyQuotes,
     screenStocks,
     searchTargets,
+    // 台股上市櫃清單 { entries, nameIndex }（財經新聞比對提及個股用）
+    getDirectory: () => loadDirectory(),
     // 啟動時先載入股票清單，第一次問股票就不用等
     warmUp: () => loadDirectory().then(() => undefined),
   }

@@ -20,6 +20,12 @@ const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./s
 const { recordCalls } = require('./services/market/tracking')
 const { createMarketRouter } = require('./routes/market')
 const { createMarketAnalysisRouter } = require('./routes/marketAnalysis')
+const { createFinanceNewsRouter } = require('./routes/financeNews')
+const FinanceNews = require('./models/FinanceNews')
+const FinanceNewsAnalysis = require('./models/FinanceNewsAnalysis')
+const MarketAiUsage = require('./models/MarketAiUsage')
+const { createFinanceNewsSync } = require('./services/market/financeNews')
+const { createNewsDigest, digestFromHtml } = require('./services/market/newsDigest')
 const MarketAnalysis = require('./models/MarketAnalysis')
 const MarketCall = require('./models/MarketCall')
 const MarketAlert = require('./models/MarketAlert')
@@ -350,6 +356,49 @@ const newsSync = createNewsSync({
   },
 })
 
+// 讀外部內容（財經新聞來源與原文）：外部內容不可信，邊讀邊累計，超過 2MB 就中斷；失敗的錯誤帶 status
+async function fetchLimitedText(url, accept, timeoutMs = 10000) {
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TarotMarket/1.0)', Accept: accept },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) {
+    const error = new Error(`${response.status} ${url}`)
+    error.status = response.status
+    throw error
+  }
+  const MAX_BYTES = 2 * 1024 * 1024
+  const reader = response.body.getReader()
+  const chunks = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > MAX_BYTES) {
+      await reader.cancel()
+      throw new Error(`回應超過 2MB：${url}`)
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+// 財經新聞（v17 規格 G）：國內外免費 RSS／鉅亨網，抓到就存 7 天（15 分鐘最多抓一次）
+const financeNewsSync = createFinanceNewsSync({
+  FinanceNews,
+  fetchText: (url) => fetchLimitedText(url, 'application/rss+xml, application/xml, application/json, text/xml'),
+  // 鉅亨網的列表附全文：同步時就先產生新聞重點，打開不用再讀原文（原文頁第一次讀要十幾秒）
+  prepareDigest: async (row, html) => digestFromHtml(row, html, await defaultMarketService.getDirectory()),
+})
+// 新聞重點彈窗：第一次有人打開才讀原文、節錄重點與標籤（不呼叫 AI），結果存在那則新聞上
+const newsDigest = createNewsDigest({
+  FinanceNews,
+  // 原文頁第一次讀可能比較慢（鉅亨網沒快取時約 15 秒）
+  fetchHtml: (url) => fetchLimitedText(url, 'text/html', 20000),
+  getDirectory: () => defaultMarketService.getDirectory(),
+})
+
 // 每日資產快照：台股收盤後由排程記錄，使用者開自訂追蹤頁時也會補記
 const snapshotRecorder = createSnapshotRecorder({
   MarketSnapshot,
@@ -388,7 +437,24 @@ app.use(
     MarketWatch,
     MarketAnalysis,
     MarketProfile,
+    MarketAiUsage,
     news: newsSync,
+    ai: { isAvailable: isNarrationAvailable, stream: streamChat },
+  }),
+)
+
+// 財經新聞（v17 規格 G）：新聞列表不呼叫 AI；AI 影響分析要使用者手動按、要 AI 權限、有次數限制
+app.use(
+  '/api/market',
+  createFinanceNewsRouter({
+    requireStockAccess,
+    requireAiAccess,
+    ensureDatabase,
+    financeNews: financeNewsSync,
+    newsDigest,
+    MarketWatch,
+    FinanceNewsAnalysis,
+    MarketAiUsage,
     ai: { isAvailable: isNarrationAvailable, stream: streamChat },
   }),
 )
@@ -404,6 +470,7 @@ app.use(
     User,
     recordSnapshots: () => snapshotRecorder.recordAll(),
     syncNews: () => newsSync.sync(),
+    syncFinanceNews: () => financeNewsSync.sync(),
   }),
 )
 

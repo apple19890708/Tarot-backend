@@ -290,7 +290,10 @@ function searchTargets(query, market, { directory = [], limit = 10 } = {}) {
 module.exports = {
   MARKET_KEYWORDS,
   MAX_TARGETS,
+  US_NAMES,
+  TICKER_STOPWORDS,
   US_SYMBOL_PATTERN,
+  aliasesOf,
   buildNameIndex,
   findMarketTargets,
   resolveTargetIn,
