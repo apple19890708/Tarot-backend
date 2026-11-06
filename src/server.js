@@ -16,6 +16,7 @@ const { loadCardsInOrder } = require('./services/cardLoader')
 const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
 const { isNarrationAvailable, streamNarration, streamChat, NarrationRefusedError } = require('./services/narrationService')
+const { startNdjson } = require('./lib/ndjsonStream')
 const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./services/market/marketService')
 const { recordCalls } = require('./services/market/tracking')
 const { createMarketRouter } = require('./routes/market')
@@ -590,12 +591,8 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
         market,
         signal: controller.signal,
         onStart: () => {
-          res.status(200).set({
-            'Content-Type': 'application/x-ndjson; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no',
-          })
-          res.flushHeaders()
+          // 送出標頭並開始心跳（前端靠它分辨「還在等 AI」和「連線斷了」）
+          startNdjson(res)
           if (market) {
             writeEvent({ type: 'market', snapshot: market })
           }

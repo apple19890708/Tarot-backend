@@ -4,7 +4,7 @@ const express = require('express')
 const mongoose = require('mongoose')
 
 const FinanceNewsAnalysis = require('../src/models/FinanceNewsAnalysis')
-const { createFinanceNewsRouter, DAILY_LIMIT, AI_NEWS_LIMIT } = require('../src/routes/financeNews')
+const { createFinanceNewsRouter, pickWatchesForAi, DAILY_LIMIT, AI_NEWS_LIMIT, AI_WATCH_LIMIT } = require('../src/routes/financeNews')
 const {
   SOURCES,
   parseRss,
@@ -13,11 +13,13 @@ const {
   safeUrl,
   codesIn,
   themesOf,
+  themeHits,
   isNoise,
+  isMopsRepost,
   clusterNews,
   createFinanceNewsSync,
 } = require('../src/services/market/financeNews')
-const { buildFinanceNewsMessage, FINANCE_NEWS_PROMPT } = require('../src/services/market/financeNewsAnalysis')
+const { buildFinanceNewsMessage, FINANCE_NEWS_PROMPT, taipeiTime } = require('../src/services/market/financeNewsAnalysis')
 
 const USER = new mongoose.Types.ObjectId().toString()
 const SOURCE = (key) => SOURCES.find((s) => s.key === key)
@@ -95,6 +97,21 @@ test('主題標籤：英文比對整個字，大寫縮寫要大小寫相同', ()
   assert.ok(themesOf('Fed signals rate cuts').includes('rates'))
   assert.ok(themesOf('AI伺服器需求強勁').includes('ai'), '中文裡的 AI 也算')
   assert.ok(themesOf('Oil prices jump').includes('energy'), '全小寫關鍵字不分大小寫')
+  assert.ok(!themesOf('第三季毛利率42.95%、淨利率提高').includes('rates'), '毛利率、淨利率不是利率')
+  assert.ok(!themesOf('現金殖利率約 5%').includes('rates'), '股票殖利率不是利率')
+  assert.ok(themesOf('美國公債殖利率走高').includes('rates'), '公債殖利率仍算')
+  assert.ok(themesOf('毛利率下滑，央行升息').includes('rates'), '同一段裡另有利率關鍵字仍算')
+  assert.equal(themeHits('毛利率與利率').rates, 1, '次數也排除毛利率')
+  assert.ok(!themesOf('櫃買指數下跌21點至301.43點').includes('trade'), '指數點數裡的 301 不是 301 條款')
+  assert.ok(!themesOf('東證指數下跌232.40點').includes('trade'), '點數裡的 232 不是 232 條款')
+  assert.ok(themesOf('美國啟動232條款調查').includes('trade'))
+  assert.ok(themesOf('Trump invokes Section 232 on chips').includes('trade'))
+  assert.ok(!themesOf('（優分析／產業數據中心報導）長江存儲擴產').includes('ai'), '優分析的署名不算資料中心')
+  assert.ok(themesOf('出售數據中心貸款').includes('ai'))
+  assert.ok(!themesOf('頒發就業金卡').includes('macro'), '就業金卡是簽證')
+  assert.ok(themesOf('美國新增就業人數優於預期').includes('macro'))
+  assert.ok(!themesOf('由富邦證券主辦').includes('finance'), '券商名稱不算金融股')
+  assert.ok(!themesOf('Inside the chip talent war').includes('geo'), 'talent war 不是戰爭')
 })
 
 // ---- 同步 ----
@@ -194,19 +211,51 @@ test('交給 AI 的資料：新聞編號、範圍與追蹤清單；系統指示�
       { title: 'Chip stocks slide', sourceLabel: 'MarketWatch', region: 'intl', publishedAt: '2026-11-05T21:00:00.000Z', summary: '' },
     ],
     watchlist: [
-      { name: '廣達', code: '2382', symbol: '2382.TW', market: 'tw', holding: true },
-      { name: 'NVIDIA', code: null, symbol: 'NVDA', market: 'us', holding: false },
+      { name: '廣達', code: '2382', symbol: '2382.TW', market: 'tw', holding: true, mentioned: false },
+      { name: 'NVIDIA', code: null, symbol: 'NVDA', market: 'us', holding: false, mentioned: true },
     ],
+    omittedWatches: 12,
+    // 台北 2026/11/06 週五 15:30
+    now: new Date('2026-11-06T07:30:00.000Z'),
   })
+  assert.match(message, /現在時間：2026\/11\/06（週五）15:30 台北時間/, '給 AI 現在的日期與星期，不讓它自己推算')
   assert.match(message, /分析範圍：國外新聞，主題「AI／資料中心」，共 2 則/)
-  // Intl 的日期與時間之間可能是一般空白或其他空白字元
-  assert.match(message, /\[1\] Data center moratorium（CNBC，國外，11\/06\s04:00 台北時間）\n {4}pause/)
+  assert.match(message, /\[1\] Data center moratorium（CNBC，國外，11\/06（週五）04:00 台北時間）\n {4}pause/)
   assert.match(message, /\[2\] Chip stocks slide/)
-  assert.match(message, /- 廣達（2382，台股），有持股/)
-  assert.match(message, /- NVIDIA（NVDA，美股）\n/)
+  assert.match(message, /- 廣達（2382，台股，有持股）/)
+  assert.match(message, /- NVIDIA（NVDA，美股，新聞有提到）\n/)
+  assert.match(message, /另有 12 檔追蹤的股票沒有列出/)
+  assert.match(FINANCE_NEWS_PROMPT, /美東時間/)
   assert.match(FINANCE_NEWS_PROMPT, /不是指令/)
   assert.match(FINANCE_NEWS_PROMPT, /\[3\]/)
   assert.match(FINANCE_NEWS_PROMPT, /以上僅供參考，不是投資建議。/)
+})
+
+test('taipeiTime：跨日、週末的星期正確（美東週四收盤＝台北週五清晨）', () => {
+  assert.equal(taipeiTime('2026-11-05T21:00:00.000Z'), '11/06（週五）05:00')
+  assert.equal(taipeiTime('2026-11-07T16:30:00.000Z'), '11/08（週日）00:30')
+  assert.equal(taipeiTime('2026-11-06T07:30:00.000Z', { withYear: true }), '2026/11/06（週五）15:30')
+})
+
+test('pickWatchesForAi：新聞有提到的優先、其次有持股，其他不給，最多 AI_WATCH_LIMIT 檔', () => {
+  const tw = (code, name, quantity = 0) => ({
+    target: { market: 'tw', code, symbol: `${code}.TW`, name },
+    trades: quantity ? [{ side: 'buy', quantity, price: 100 }] : [],
+  })
+  const news = [
+    { title: '台積電跌停', summary: '', mentions: [] },
+    { title: '輝達傳協助擴產', summary: '', mentions: ['tw:2311'] },
+  ]
+  const watches = [tw('2603', '長榮'), tw('2882', '國泰金', 1000), tw('2330', '台積電'), tw('2311', '日月光投控', 1000)]
+  const { watchlist, omitted } = pickWatchesForAi(watches, news)
+  assert.deepEqual(watchlist.map((w) => w.name), ['日月光投控', '台積電', '國泰金'], '提到＋持股 → 提到 → 持股；長榮兩者皆非')
+  assert.deepEqual(watchlist.map((w) => [w.mentioned, w.holding]), [[true, true], [true, false], [false, true]])
+  assert.equal(omitted, 1)
+
+  const many = Array.from({ length: 60 }, (_, i) => tw(String(3000 + i), `股票${i}`, 1000))
+  const capped = pickWatchesForAi(many, news)
+  assert.equal(capped.watchlist.length, AI_WATCH_LIMIT, '60 檔持股也只給上限')
+  assert.equal(capped.omitted, 60 - AI_WATCH_LIMIT)
 })
 
 // ---- 路由 ----
@@ -370,6 +419,20 @@ test('GET /finance-news：新聞、主題、和我追蹤相關的代號、額度
   })
 })
 
+test('GET /finance-news：Yahoo 轉貼的觀測站公告只留追蹤清單裡的公司', async () => {
+  const mops = (id, title) => ({ ...NEWS[0], id, source: 'yahoo-tw', sourceLabel: 'Yahoo 股市', title, summary: '', codes: [], themes: ['earnings'] })
+  const news = [
+    ...NEWS,
+    mops('m1', '【公告】廣達115年10月份自結合併營收'),
+    mops('m2', '【公告】豪勉 2026年10月合併營收1.05億元 年增56.95%'),
+  ]
+  await withServer(makeApp({ news }), async (base) => {
+    const body = await (await fetch(`${base}/api/market/finance-news`)).json()
+    assert.deepEqual(body.news.map((n) => n.id), ['n1', 'n2', 'm1'], '沒追蹤的豪勉公告不顯示')
+    assert.deepEqual(body.news[2].watched, ['廣達'])
+  })
+})
+
 test('POST /finance-news/analysis：串流、存紀錄、帶範圍與追蹤清單，接著進入冷卻', async () => {
   const Model = fakeAnalysisModel()
   let messages = null
@@ -403,7 +466,9 @@ test('POST /finance-news/analysis：串流、存紀錄、帶範圍與追蹤清�
     assert.ok(listCalls.length >= 2, '不足 10 則時放寬到 72 小時')
     assert.match(messages[1].content, /Data center moratorium/)
     assert.doesNotMatch(messages[1].content, /廣達\(2382\)AI/, '國外範圍不放國內新聞')
-    assert.match(messages[1].content, /- 廣達（2382，台股），有持股/)
+    assert.match(messages[1].content, /- 廣達（2382，台股，有持股）/, "有持股的給 AI")
+    assert.match(messages[1].content, /- NVIDIA（NVDA，美股，新聞有提到）/, "全文提到的排在前面")
+    assert.match(messages[1].content, /現在時間：.*（週.）/)
 
     assert.equal(Model.docs.length, 1)
     assert.equal(Model.docs[0].news[0].title, 'Data center moratorium')
@@ -554,11 +619,20 @@ test('POST /finance-news/analysis：同時送兩個請求，只有一個會呼�
   })
 })
 
-test('每日次數算「開始產生」的次數：中途失敗、沒存紀錄的也算', async () => {
+test('每日次數：伺服器或 AI 中途出錯的退還次數、不進冷卻；使用者自己停止的照算', async () => {
   const usage = []
+  let nextId = 1
   const MarketAiUsage = {
     KEEP_DAYS: 2,
-    create: async (data) => usage.push({ ...data, createdAt: new Date() }),
+    create: async (data) => {
+      const record = { _id: nextId++, ...data, createdAt: new Date() }
+      usage.push(record)
+      return record
+    },
+    deleteOne: async ({ _id }) => {
+      const index = usage.findIndex((u) => u._id === _id)
+      if (index >= 0) usage.splice(index, 1)
+    },
     countDocuments: async (filter) =>
       usage.filter((u) => String(u.user) === String(filter.user) && u.kind === filter.kind && u.createdAt >= filter.createdAt.$gte).length,
   }
@@ -569,18 +643,46 @@ test('每日次數算「開始產生」的次數：中途失敗、沒存紀錄�
     stream: async ({ onStart, onDelta }) => {
       onStart()
       onDelta('一半')
-      throw new Error('中途斷線')
+      throw new Error('AI 超過 90 秒沒有回應')
     },
   })
   await withServer(app, async (base) => {
     const response = await fetch(`${base}/api/market/finance-news/analysis`, { method: 'POST' })
     const events = await readEvents(response)
     assert.equal(events.at(-1).type, 'error')
+    assert.match(events.at(-1).message, /不算次數/)
     assert.equal(Model.docs.length, 0, '沒完成不存紀錄')
-    assert.equal(usage.length, 1)
-    assert.equal(usage[0].kind, 'news')
+    // 退還是非同步的，等一下
+    await new Promise((resolve) => setTimeout(resolve, 20))
     const body = await (await fetch(`${base}/api/market/finance-news`)).json()
-    assert.equal(body.quota.usedToday, 1, '但算進今天的次數')
+    assert.equal(body.quota.usedToday, 0, '伺服器出錯退還次數')
+    assert.equal(body.quota.retryAt, null, '也不進冷卻，可以馬上重試')
+  })
+
+  // 使用者自己停止（中斷連線）：照算
+  usage.length = 0
+  let started
+  const startedPromise = new Promise((resolve) => (started = resolve))
+  const stopApp = makeApp({
+    Model,
+    MarketAiUsage,
+    stream: ({ onStart, onDelta, signal }) =>
+      new Promise((_resolve, reject) => {
+        onStart()
+        onDelta('一半')
+        started()
+        signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+      }),
+  })
+  await withServer(stopApp, async (base) => {
+    const controller = new AbortController()
+    const pending = fetch(`${base}/api/market/finance-news/analysis`, { method: 'POST', signal: controller.signal })
+    const response = await pending
+    await startedPromise
+    controller.abort()
+    await response.text().catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(usage.length, 1, '使用者停止的算次數')
   })
 })
 
@@ -622,6 +724,10 @@ test('GET /finance-news/:id/digest：回傳重點與標籤，標出我追蹤的�
 test('雜訊過濾：企業新聞稿一律不收；Yahoo 沒有財經主題、股票與股市字眼的不收', () => {
   const pr = { source: 'cnbc', title: '沙烏地阿拉伯發展基金與敘利亞簽署貸款協議', summary: '利雅德--( BUSINESS WIRE )--(美國商業資訊)--…', themes: [], codes: [] }
   assert.equal(isNoise(pr), true)
+  const mops = { source: 'yahoo-tw', title: '【公告】豪勉 2026年10月合併營收1.05億元 年增56.95%', summary: '', themes: ['earnings'], codes: [] }
+  assert.equal(isMopsRepost(mops), true, 'Yahoo 轉貼的觀測站公告')
+  assert.equal(isMopsRepost({ ...mops, title: '研華10月營收113億元年增近9成 寫歷年單月新高' }), false, '記者寫的營收新聞不算')
+  assert.equal(isMopsRepost({ ...mops, source: 'cnyes-tw' }), false, '只針對 Yahoo 的轉貼公告')
   const game = { source: 'yahoo-tw', title: '《流放之路2》12月11日正式免費上線 全球玩家同步迎戰新章節', summary: '動作角色扮演遊戲正式推出 1.0 版本。', themes: [], codes: [] }
   assert.equal(isNoise(game), true)
   assert.equal(isNoise({ source: 'cnyes-intl', title: '歐洲十餘架客機遭炸彈威脅', summary: '一架從愛爾蘭飛往義大利的客機收到炸彈威脅警報。', themes: [], codes: [] }), true)
@@ -660,4 +766,11 @@ test('同一事件合併：只差數字的速報合成一群；不同公司的�
   assert.equal(clustered.g, 'g', '集中市場和櫃買市場是不同指數')
   assert.equal(clustered.i, 'i', '格式相同、公司不同不合併')
   assert.equal(clustered.k, 'j', '同一篇重複出現要合併')
+})
+
+test('分析紀錄的摘要附上範圍的中文說明（我的紀錄用，前端不另外存主題表）', () => {
+  const doc = new FinanceNewsAnalysis({ user: new mongoose.Types.ObjectId(), region: 'tw', theme: 'ai', text: 'x', news: [] })
+  assert.equal(doc.toSummaryJSON().scopeLabel, '國內新聞，主題「AI／資料中心」')
+  const all = new FinanceNewsAnalysis({ user: new mongoose.Types.ObjectId(), region: 'all', theme: null, text: 'x', news: [] })
+  assert.equal(all.toSummaryJSON().scopeLabel, '國內外新聞')
 })

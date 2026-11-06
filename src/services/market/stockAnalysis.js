@@ -1,6 +1,7 @@
 // 個股 AI 深度分析（v17 規格 F）：系統指示與交給 AI 的資料。
 // 只做文字組裝，不呼叫 AI；串流由 narrationService.streamChat 負責。
 const { formatMarketForPrompt } = require('./marketService')
+const { taipeiTime } = require('./financeNewsAnalysis')
 
 const STOCK_ANALYSIS_PROMPT = `你是一位說話直接、重視數據的台股與美股分析師，正在替使用者分析他追蹤的一檔股票。你會收到 <market_data>（查詢當下的報價、技術指標、籌碼、估值、歷史回測、機器學習預測與規則算出的操作建議），可能還有 <holding>（使用者自己的持股與損益）、<events>（除權息、月營收）與 <news>（近期重大訊息）。
 
@@ -67,8 +68,9 @@ function formatNews(news) {
   return news.map((n) => `- ${n.date} ${n.title}\n  ${String(n.detail || '').slice(0, 600)}`).join('\n')
 }
 
-function buildStockAnalysisMessage({ snapshot, holding = null, news = [] }) {
-  const sections = [`<market_data>\n${formatMarketForPrompt(snapshot)}\n</market_data>`]
+function buildStockAnalysisMessage({ snapshot, holding = null, news = [], now = new Date() }) {
+  // 現在時間（含星期）：「今天」「昨天」、盤中或收盤由 AI 對照資料時間判斷，不讓它自己推算星期
+  const sections = [`現在時間：${taipeiTime(now, { withYear: true })} 台北時間。`, `<market_data>\n${formatMarketForPrompt(snapshot)}\n</market_data>`]
   const holdingText = formatHolding(holding)
   if (holdingText) sections.push(`<holding>\n${holdingText}\n</holding>`)
   const eventsText = formatEvents(snapshot.events)

@@ -38,8 +38,8 @@ const NEWS_THEMES = [
     key: 'trade',
     label: '關稅與貿易',
     groups: { tw: ['出口導向電子', '傳產出口（紡織、工具機）', '航運'], us: ['進口零售', '製造業'] },
-    zh: ['關稅', '降稅', '減稅', '貿易戰', '貿易協議', '貿易談判', '出口管制', '制裁', '進口', '採購', '232', '301'],
-    en: ['tariff', 'tariffs', 'trade war', 'export controls', 'export control', 'sanctions', 'trade deal', 'trade talks'],
+    zh: ['關稅', '降稅', '減稅', '貿易戰', '貿易協議', '貿易談判', '出口管制', '制裁', '進口', '232條款', '301條款'],
+    en: ['tariff', 'tariffs', 'trade war', 'export controls', 'export control', 'sanctions', 'trade deal', 'trade talks', 'Section 232', 'Section 301'],
   },
   {
     key: 'macro',
@@ -68,7 +68,7 @@ const NEWS_THEMES = [
     label: '地緣政治',
     groups: { tw: ['國防軍工', '航運', '能源'], us: ['國防', '能源'] },
     zh: ['地緣', '戰爭', '衝突', '台海', '中東', '以色列', '伊朗', '烏克蘭', '俄羅斯', '北韓', '中美'],
-    en: ['war', 'geopolitical', 'Ukraine', 'Russia', 'Israel', 'Iran', 'Middle East', 'Taiwan Strait', 'North Korea', 'conflict', 'missile'],
+    en: ['geopolitical', 'Ukraine', 'Russia', 'Israel', 'Iran', 'Middle East', 'Taiwan Strait', 'North Korea', 'conflict', 'missile'],
   },
   {
     key: 'ev',
@@ -81,7 +81,7 @@ const NEWS_THEMES = [
     key: 'finance',
     label: '金融股',
     groups: { tw: ['金控', '銀行', '壽險', '證券'], us: ['銀行', '保險', '券商'] },
-    zh: ['金控', '銀行', '壽險', '保險', '證券', '金融股'],
+    zh: ['金控', '銀行', '壽險', '保險', '證券股', '金融股'],
     en: ['bank', 'banks', 'banking', 'lender', 'lenders', 'insurer', 'insurers', 'JPMorgan', 'Goldman Sachs', 'credit'],
   },
   {
@@ -96,7 +96,7 @@ const NEWS_THEMES = [
     label: '財報與營收',
     groups: { tw: [], us: [] },
     zh: ['財報', '營收', 'EPS', '獲利', '法說會', '財測', '毛利率', '盈餘'],
-    en: ['earnings', 'revenue', 'guidance', 'profit', 'quarterly results', 'forecast', 'EPS', 'outlook'],
+    en: ['earnings', 'revenue', 'guidance', 'profit', 'quarterly results', 'forecast', 'EPS'],
   },
 ]
 

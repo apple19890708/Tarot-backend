@@ -360,7 +360,31 @@ async function streamNarration({ reading, cards, market = null, signal, onStart,
 }
 
 // 對 OpenRouter 發出串流請求，塔羅解讀與個股 AI 分析共用。回傳 { model }
-async function streamChat({ messages, signal, onStart, onDelta }) {
+// OpenRouter 超過這麼久沒有送任何東西（連處理中的註解都沒有）就當成卡住，主動中止，不要等到整體逾時
+const IDLE_TIMEOUT_MS = 90_000
+
+class AiStalledError extends Error {}
+
+async function streamChat({ messages, signal, onStart, onDelta, idleTimeoutMs = IDLE_TIMEOUT_MS }) {
+  const idle = new AbortController()
+  let idleTimer = null
+  const touch = () => {
+    if (idleTimer) clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => idle.abort(new AiStalledError(`AI 超過 ${Math.round(idleTimeoutMs / 1000)} 秒沒有回應`)), idleTimeoutMs)
+  }
+  touch()
+  try {
+    return await streamChatInner({ messages, signal: AbortSignal.any([signal, idle.signal]), onStart, onDelta, touch })
+  } catch (error) {
+    // 卡住而中止的，丟出看得懂的錯誤（不要被當成使用者停止）
+    if (idle.signal.aborted && !signal.aborted) throw idle.signal.reason
+    throw error
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer)
+  }
+}
+
+async function streamChatInner({ messages, signal, onStart, onDelta, touch }) {
   const response = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
@@ -407,6 +431,7 @@ async function streamChat({ messages, signal, onStart, onDelta }) {
 
   const decoder = new TextDecoder()
   for await (const chunk of response.body) {
+    touch()
     parse(decoder.decode(chunk, { stream: true }))
   }
   parse(`${decoder.decode()}\n`)

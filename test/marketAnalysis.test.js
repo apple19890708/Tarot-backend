@@ -277,7 +277,9 @@ test('AI 分析的提示：附上行情、持股、事件與重大訊息，並�
     snapshot: SNAPSHOT,
     holding: { market: 'tw', quantity: 2, avgCost: 900, costBasis: 1800000, marketValue: 2000000, unrealized: 190000, unrealizedPct: 10.5, realized: 0, dividends: 0, totalReturn: 190000 },
     news: [{ date: '2026-11-04', title: '公告董事會決議', detail: '說明' }],
+    now: new Date('2026-11-06T07:30:00.000Z'),
   })
+  assert.match(message, /^現在時間：2026\/11\/06（週五）15:30 台北時間/, '附上現在時間與星期')
   assert.match(message, /<market_data>[\s\S]*台積電（2330）/)
   assert.match(message, /<holding>[\s\S]*持有 2 張，平均成本 900/)
   assert.match(message, /<events>[\s\S]*年增 30%/)

@@ -1,5 +1,7 @@
 const mongoose = require('mongoose')
 
+const { scopeText } = require('../services/market/financeNewsAnalysis')
+
 // 每位使用者保留的筆數上限，超過就從最舊的開始刪
 const MAX_ANALYSES_PER_USER = 30
 
@@ -34,6 +36,8 @@ financeNewsAnalysisSchema.methods.toSummaryJSON = function toSummaryJSON() {
     id: String(this._id),
     region: this.region,
     theme: this.theme || null,
+    // 範圍的中文說明（「國內新聞，主題「AI／資料中心」」），主題名稱以後端主題表為準
+    scopeLabel: scopeText({ region: this.region, theme: this.theme }),
     newsCount: (this.news || []).length,
     model: this.model || '',
     createdAt: this.createdAt,

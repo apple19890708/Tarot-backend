@@ -7,10 +7,11 @@ const mongoose = require('mongoose')
 const { NEWS_THEMES } = require('../data/newsThemes')
 const { tradesOf } = require('../services/market/portfolio')
 const { buildFinanceNewsMessages } = require('../services/market/financeNewsAnalysis')
-const { clusterNews } = require('../services/market/financeNews')
+const { clusterNews, isMopsRepost } = require('../services/market/financeNews')
 const { watchMatchers } = require('../services/market/newsDigest')
 const { NarrationRefusedError } = require('../services/narrationService')
 const { startOfTaipeiDay } = require('./marketAnalysis')
+const { startNdjson } = require('../lib/ndjsonStream')
 
 // 每人每天最多幾次（admin 不限）；兩次之間至少隔多久（中斷的也算）
 const DAILY_LIMIT = 10
@@ -18,6 +19,8 @@ const COOLDOWN_MS = 10 * 60 * 1000
 // 交給 AI 的新聞：最近 24 小時取最新 40 則，不足 10 則放寬到 72 小時
 const AI_NEWS_LIMIT = 40
 const AI_NEWS_MIN = 10
+// 交給 AI 的追蹤股票上限（追蹤清單可能有幾十檔，全丟會讓輸入變長、回答也只會逐檔說「沒關聯」）
+const AI_WATCH_LIMIT = 15
 const LIST_DAYS = 3
 const LIST_LIMIT = 200
 const REGIONS = ['all', 'tw', 'intl']
@@ -26,6 +29,37 @@ const THEME_KEYS = new Set(NEWS_THEMES.map((theme) => theme.key))
 function holdsShares(watch) {
   const total = tradesOf(watch).reduce((sum, t) => sum + (t.side === 'sell' ? -1 : 1) * (Number(t.quantity) || 0), 0)
   return total > 0
+}
+
+// 從追蹤清單挑出要給 AI 的：新聞（標題、摘要、全文提到的個股）有提到的優先，其次是有持股的，最多 AI_WATCH_LIMIT 檔。
+// 排序：提到且有持股 → 提到 → 有持股；新聞沒提到也沒持股的不給（AI 只能憑產業關聯硬湊）
+function pickWatchesForAi(watches, news) {
+  const matchers = new Map(watchMatchers(watches).map((m) => [m.key, m]))
+  const texts = news.map((n) => `${n.title} ${n.summary || ''}`)
+  const mentionedKeys = new Set(news.flatMap((n) => n.mentions || []))
+  const candidates = watches.map((w, index) => {
+    const t = w.target || {}
+    const key = t.market === 'tw' ? `tw:${t.code}` : `us:${t.symbol}`
+    const matcher = matchers.get(key)
+    const mentioned = mentionedKeys.has(key) || Boolean(matcher && texts.some((text) => matcher.test(text)))
+    return { index, mentioned, holding: holdsShares(w), target: t }
+  })
+  const rank = (c) => (c.mentioned ? 0 : 2) + (c.holding ? 0 : 1)
+  const picked = candidates
+    .filter((c) => c.mentioned || c.holding)
+    .sort((a, b) => rank(a) - rank(b) || a.index - b.index)
+    .slice(0, AI_WATCH_LIMIT)
+  return {
+    watchlist: picked.map((c) => ({
+      name: c.target.name,
+      code: c.target.code,
+      symbol: c.target.symbol,
+      market: c.target.market,
+      holding: c.holding,
+      mentioned: c.mentioned,
+    })),
+    omitted: watches.length - picked.length,
+  }
 }
 
 function createFinanceNewsRouter({
@@ -48,10 +82,19 @@ function createFinanceNewsRouter({
 
   // AI 開始產生（開始計費）時記一筆用量；記錄失敗只寫 log，不中斷分析
   function recordUsage(userId) {
-    if (!MarketAiUsage) return
+    if (!MarketAiUsage) return null
     const expireAt = new Date(now() + (MarketAiUsage.KEEP_DAYS || 2) * 86400000)
-    Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'news', expireAt })).catch((error) =>
-      console.error('AI 用量記錄失敗：', error.message),
+    return Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'news', expireAt })).catch((error) => {
+      console.error('AI 用量記錄失敗：', error.message)
+      return null
+    })
+  }
+  // 伺服器或 AI 那邊出錯（不是使用者停止）時退還這次的次數
+  async function refundUsage(pending) {
+    const record = await pending
+    if (!record?._id || !MarketAiUsage?.deleteOne) return
+    await Promise.resolve(MarketAiUsage.deleteOne({ _id: record._id })).catch((error) =>
+      console.error('AI 用量退還失敗：', error.message),
     )
   }
   const running = new Set()
@@ -94,8 +137,9 @@ function createFinanceNewsRouter({
 
   // 後端自己挑新聞，不收前端送來的內容
   // 同一件事的多則報導只取最新一則，40 則的名額不要被重複新聞佔掉（所以先多抓一些再去重）
+  // Yahoo 轉貼的觀測站公告（月營收、董事會決議）不給 AI，名額留給真正的新聞
   const onePerEvent = (items) =>
-    clusterNews(items)
+    clusterNews(items.filter((item) => !isMopsRepost(item)))
       .filter((item) => item.clusterId === item.id)
       .slice(0, AI_NEWS_LIMIT)
       .map(({ clusterId, ...item }) => item)
@@ -122,11 +166,15 @@ function createFinanceNewsRouter({
       res.json({
         // clusterId：同一件事的報導有相同的值（群裡最新那則的 id），畫面合併成一張卡
         // 與我追蹤相關：標題＋摘要比對，再加上全文產生的新聞重點裡提到的（和彈窗一致）
-        news: clusterNews(news).map(({ mentions = [], ...item }) => {
-          const text = `${item.title} ${item.summary}`
-          const inArticle = new Set(mentions)
-          return { ...item, watched: matchers.filter((m) => inArticle.has(m.key) || m.test(text)).map((m) => m.label) }
-        }),
+        // Yahoo 轉貼的觀測站公告（多半是小型股的月營收、董事會決議）只留公司在追蹤清單裡的，比對標題就好
+        news: clusterNews(news)
+          .map(({ mentions = [], ...item }) => {
+            if (isMopsRepost(item)) return { ...item, watched: matchers.filter((m) => m.test(item.title)).map((m) => m.label) }
+            const text = `${item.title} ${item.summary}`
+            const inArticle = new Set(mentions)
+            return { ...item, watched: matchers.filter((m) => inArticle.has(m.key) || m.test(text)).map((m) => m.label) }
+          })
+          .filter((item) => !isMopsRepost(item) || item.watched.length),
         themes: NEWS_THEMES.map((theme) => ({ key: theme.key, label: theme.label })),
         status: financeNews.status(),
         quota,
@@ -215,29 +263,21 @@ function createFinanceNewsRouter({
       }
       if (controller.signal.aborted) return
       startedAt.set(userId, now())
-      const watchlist = watches.map((w) => ({
-        name: w.target.name,
-        code: w.target.code,
-        symbol: w.target.symbol,
-        market: w.target.market,
-        holding: holdsShares(w),
-      }))
+      // 追蹤清單可能有幾十檔：只交給 AI 新聞有提到的、有持股的，最多 AI_WATCH_LIMIT 檔
+      const { watchlist, omitted: omittedWatches } = pickWatchesForAi(watches, news)
 
       const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
       let text = ''
+      let usage = null
 
       try {
         const { model } = await ai.stream({
-          messages: buildFinanceNewsMessages({ news, watchlist, ...scope }),
+          messages: buildFinanceNewsMessages({ news, watchlist, omittedWatches, ...scope, now: new Date(now()) }),
           signal: controller.signal,
           onStart: () => {
-            res.status(200).set({
-              'Content-Type': 'application/x-ndjson; charset=utf-8',
-              'Cache-Control': 'no-cache',
-              'X-Accel-Buffering': 'no',
-            })
-            res.flushHeaders()
-            recordUsage(userId)
+            // 送出標頭並開始心跳（前端靠它分辨「還在等 AI」和「連線斷了」）
+            startNdjson(res)
+            usage = recordUsage(userId)
           },
           onDelta: (delta) => {
             text += delta
@@ -266,13 +306,14 @@ function createFinanceNewsRouter({
           console.log('新聞 AI 分析已由使用者中斷')
           return
         }
-        // 還沒開始產生就失敗不算冷卻
-        if (!text) startedAt.delete(userId)
+        // 伺服器或 AI 出錯（不是使用者停止）：不算冷卻、退還次數，可以馬上重試
+        startedAt.delete(userId)
+        void refundUsage(usage)
         if (!res.headersSent) throw error
         console.error(error)
         writeEvent({
           type: 'error',
-          message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的分析。' : 'AI 分析中途發生錯誤，請再試一次。',
+          message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的分析。' : 'AI 分析中途發生錯誤，這次不算次數，請再試一次。',
         })
         res.end()
       }
@@ -347,4 +388,4 @@ function createFinanceNewsRouter({
   return router
 }
 
-module.exports = { createFinanceNewsRouter, DAILY_LIMIT, COOLDOWN_MS, AI_NEWS_LIMIT }
+module.exports = { createFinanceNewsRouter, pickWatchesForAi, DAILY_LIMIT, COOLDOWN_MS, AI_NEWS_LIMIT, AI_WATCH_LIMIT }

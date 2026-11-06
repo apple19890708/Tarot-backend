@@ -138,6 +138,30 @@ function codesIn(text) {
   return [...codes]
 }
 
+// 中文關鍵字的例外：前後接某些字時是別的詞，不算命中（真實新聞抽查到的誤判）
+// - 毛利率、淨利率、股票殖利率不是利率（公債殖利率另外列成關鍵字，不受影響）
+// - 「產業數據中心報導」是優分析的署名，不是在講資料中心
+// - 「就業金卡」是簽證，不是就業數據
+const ZH_EXCEPTIONS = {
+  利率: { notAfter: ['毛', '淨', '殖'] },
+  數據中心: { notAfter: ['產業'] },
+  就業: { notBefore: ['金卡'] },
+}
+
+// 有例外的中文關鍵字編成帶 g 的 RegExp，其他維持字串（用包含比對）
+function zhPattern(word, escape) {
+  const rule = ZH_EXCEPTIONS[word]
+  if (!rule) return word
+  const before = (rule.notAfter || []).map((text) => `(?<!${escape(text)})`).join('')
+  const after = (rule.notBefore || []).map((text) => `(?!${escape(text)})`).join('')
+  return new RegExp(`${before}${escape(word)}${after}`, 'g')
+}
+
+// 中文關鍵字（字串或帶 g 的 RegExp）在文字裡出現幾次
+function countWord(source, word) {
+  return typeof word === 'string' ? source.split(word).length - 1 : (source.match(word) || []).length
+}
+
 // 把關鍵字表編成比對函式：英文（ASCII）比對整個字，有大寫的要大小寫相同；中文用包含
 function compileThemes(themes) {
   const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -156,7 +180,8 @@ function compileThemes(themes) {
       // 計算命中次數用（帶 g；和上面分開，避免 test() 被 lastIndex 影響）
       sensitiveAll: build(sensitive, 'g'),
       insensitiveAll: build(insensitive, 'gi'),
-      others,
+      // 中文用包含；ZH_EXCEPTIONS 列的例外不算（「毛利率」不是「利率」）
+      others: others.map((word) => zhPattern(word, escape)),
     }
   })
 }
@@ -167,7 +192,7 @@ function themesOf(text) {
   const source = String(text || '')
   return COMPILED_THEMES.filter(
     (theme) =>
-      theme.sensitive?.test(source) || theme.insensitive?.test(source) || theme.others.some((word) => source.includes(word)),
+      theme.sensitive?.test(source) || theme.insensitive?.test(source) || theme.others.some((word) => countWord(source, word) > 0),
   ).map((theme) => theme.key)
 }
 
@@ -179,7 +204,7 @@ function themeHits(text) {
     const count =
       (theme.sensitiveAll ? (source.match(theme.sensitiveAll) || []).length : 0) +
       (theme.insensitiveAll ? (source.match(theme.insensitiveAll) || []).length : 0) +
-      theme.others.reduce((sum, word) => sum + (source.split(word).length - 1), 0)
+      theme.others.reduce((sum, word) => sum + countWord(source, word), 0)
     if (count) hits[theme.key] = count
   }
   return hits
@@ -242,6 +267,12 @@ function clusterNews(items) {
 
 // 企業新聞稿（美國商業資訊／Business Wire 代發）不是新聞，一律不收
 const PRESS_RELEASE = /美國商業資訊|BUSINESS\s*WIRE/i
+// Yahoo 股市的「【公告】」是公開資訊觀測站自動轉貼（月營收、董事會決議、法說會…），財報季一次幾十則、多半是小型股，會洗版。
+// 照樣存，列表時只留公司在使用者追蹤清單裡的（路由判斷），AI 分析不讀
+const MOPS_REPOST = /^【公告】/
+function isMopsRepost(item) {
+  return item?.source === 'yahoo-tw' && MOPS_REPOST.test(String(item.title || '').trim())
+}
 // 這些來源混有非財經內容（遊戲、娛樂、社會新聞），沒有財經主題、沒提到股票、也沒有股市字眼的不收。
 // 鉅亨網的「國際股」也會收一般國際新聞（例如「歐洲客機遭炸彈威脅」）。CNBC、MarketWatch 是英文財經媒體，不套用
 const MIXED_SOURCES = new Set(['yahoo-tw', 'cnyes-intl', 'cnyes-tw'])
@@ -380,7 +411,11 @@ function createFinanceNewsSync({ FinanceNews, fetchText, sources = SOURCES, now 
     // 新聞重點只取提及個股（列表要用來判斷「與我追蹤相關」），重點句與族群不讀
     const docs = await FinanceNews.find(filter).select('-digest.points -digest.groups').sort({ publishedAt: -1 }).limit(limit).lean()
     // 規則加上之前就存進來的雜訊，列表時也濾掉
-    return docs.filter((doc) => !isNoise(doc)).map(toJSON)
+    // 主題用目前的規則重新判斷（規則修正前存進來的也跟著更新）；規則只會少標不會多標，所以先用資料庫篩再補篩
+    return docs
+      .filter((doc) => !isNoise(doc))
+      .map(toJSON)
+      .filter((item) => !theme || item.themes.includes(theme))
   }
 
   function status() {
@@ -401,7 +436,7 @@ function toJSON(doc) {
     summary: doc.summary || '',
     url: doc.url,
     publishedAt: new Date(doc.publishedAt).toISOString(),
-    themes: doc.themes || [],
+    themes: themesOf(`${doc.title} ${doc.summary || ''}`),
     codes: doc.codes || [],
     // 已經產生過新聞重點的話：全文裡提到的個股（tw:2330、us:MU），路由用來算「與我追蹤相關」，不回傳給前端
     mentions: [...(doc.digest?.stocks || []), ...(doc.digest?.moreStocks || [])].map((stock) =>
@@ -425,5 +460,6 @@ module.exports = {
   similarity,
   clusterNews,
   isNoise,
+  isMopsRepost,
   createFinanceNewsSync,
 }

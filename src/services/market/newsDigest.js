@@ -7,7 +7,7 @@ const { US_NAMES, TICKER_STOPWORDS, buildNameIndex } = require('./symbols')
 const { plainText, decodeEntities, featuresOf, similarity, themeHits } = require('./financeNews')
 
 // 規則改了就加 1：存著的舊結果會在下次打開時重算
-const DIGEST_VERSION = 9
+const DIGEST_VERSION = 10
 // 只讀這些網域的原文，避免被當成跳板去打其他網址
 const ARTICLE_HOSTS = new Set(['www.cnbc.com', 'cnbc.com', 'www.marketwatch.com', 'marketwatch.com', 'news.cnyes.com', 'tw.stock.yahoo.com'])
 // 原站明確拒絕或不存在：存起來不再重讀

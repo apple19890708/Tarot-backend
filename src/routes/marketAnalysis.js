@@ -7,6 +7,7 @@ const mongoose = require('mongoose')
 const { computePosition, normalizeFees, tradesOf, DEFAULT_FEES } = require('../services/market/portfolio')
 const { buildStockAnalysisMessages } = require('../services/market/stockAnalysis')
 const { NarrationRefusedError } = require('../services/narrationService')
+const { startNdjson } = require('../lib/ndjsonStream')
 
 // 每人每天最多幾次 AI 深度分析（admin 不限）；同一檔要隔多久才能再跑一次
 const DAILY_LIMIT = 20
@@ -70,10 +71,19 @@ function createMarketAnalysisRouter({
 
   // AI 開始產生（開始計費）時記一筆用量；記錄失敗只寫 log，不中斷分析
   function recordUsage(userId) {
-    if (!MarketAiUsage) return
+    if (!MarketAiUsage) return null
     const expireAt = new Date(now() + (MarketAiUsage.KEEP_DAYS || 2) * 86400000)
-    Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'stock', expireAt })).catch((error) =>
-      console.error('AI 用量記錄失敗：', error.message),
+    return Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'stock', expireAt })).catch((error) => {
+      console.error('AI 用量記錄失敗：', error.message)
+      return null
+    })
+  }
+  // 伺服器或 AI 那邊出錯（不是使用者停止）時退還這次的次數
+  async function refundUsage(pending) {
+    const record = await pending
+    if (!record?._id || !MarketAiUsage?.deleteOne) return
+    await Promise.resolve(MarketAiUsage.deleteOne({ _id: record._id })).catch((error) =>
+      console.error('AI 用量退還失敗：', error.message),
     )
   }
   // 同一個人同時只能跑一個 AI 分析；最近一次開始的時間（中斷的也算，避免中斷再重來繞過冷卻）
@@ -223,19 +233,16 @@ function createMarketAnalysisRouter({
       // NDJSON：delta（一段文字）、done（完成，附存好的紀錄摘要）、error（串流途中失敗）
       const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
       let text = ''
+      let usage = null
 
       try {
         const { model } = await ai.stream({
-          messages: buildStockAnalysisMessages({ snapshot, holding, news: newsList }),
+          messages: buildStockAnalysisMessages({ snapshot, holding, news: newsList, now: new Date(now()) }),
           signal: controller.signal,
           onStart: () => {
-            res.status(200).set({
-              'Content-Type': 'application/x-ndjson; charset=utf-8',
-              'Cache-Control': 'no-cache',
-              'X-Accel-Buffering': 'no',
-            })
-            res.flushHeaders()
-            recordUsage(userId)
+            // 送出標頭並開始心跳（前端靠它分辨「還在等 AI」和「連線斷了」）
+            startNdjson(res)
+            usage = recordUsage(userId)
           },
           onDelta: (delta) => {
             text += delta
@@ -267,13 +274,14 @@ function createMarketAnalysisRouter({
           console.log('股票 AI 分析已由使用者中斷')
           return
         }
-        // 還沒開始產生就失敗（例如 AI 服務錯誤）不算冷卻
-        if (!text) startedAt.delete(lockKey)
+        // 伺服器或 AI 出錯（不是使用者停止）：不算冷卻、退還次數，可以馬上重試
+        startedAt.delete(lockKey)
+        void refundUsage(usage)
         if (!res.headersSent) throw error
         console.error(error)
         writeEvent({
           type: 'error',
-          message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的分析。' : 'AI 分析中途發生錯誤，請再試一次。',
+          message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的分析。' : 'AI 分析中途發生錯誤，這次不算次數，請再試一次。',
         })
         res.end()
       }
