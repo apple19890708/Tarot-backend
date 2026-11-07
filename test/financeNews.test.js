@@ -5,6 +5,7 @@ const mongoose = require('mongoose')
 
 const FinanceNewsAnalysis = require('../src/models/FinanceNewsAnalysis')
 const { createFinanceNewsRouter, pickWatchesForAi, DAILY_LIMIT, AI_NEWS_LIMIT, AI_WATCH_LIMIT } = require('../src/routes/financeNews')
+const { startOfTaipeiDay } = require('../src/routes/marketAnalysis')
 const {
   SOURCES,
   parseRss,
@@ -510,7 +511,9 @@ test('POST /finance-news/analysis：範圍不正確 400、沒權限 403、沒有
   const Model = fakeAnalysisModel()
   for (let i = 0; i < DAILY_LIMIT; i += 1) {
     const doc = new FinanceNewsAnalysis({ user: USER, text: 'x' })
-    doc.createdAt = new Date(Date.now() - 60 * 60 * 1000)
+    // 一小時前，但不早於台北的今天 0 點：00:00～01:00 跑測試時，一小時前是昨天、不算今天的次數（2026-11-08 凌晨失敗過）。
+    // 不能直接用現在：會先撞到冷卻，回的是另一句話
+    doc.createdAt = new Date(Math.max(Date.now() - 60 * 60 * 1000, startOfTaipeiDay(Date.now()).getTime()))
     Model.docs.push(doc)
   }
   await withServer(makeApp({ Model }), async (base) => {

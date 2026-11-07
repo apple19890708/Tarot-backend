@@ -32,6 +32,7 @@ const { buildNameIndex, findMarketTargets, resolveTargetIn, searchTargets: searc
 const corporateEvents = require('./corporateEvents')
 const taifex = require('./taifex')
 const macro = require('./macro')
+const tpexIndex = require('./tpexIndex')
 const screener = require('./screener')
 // 大盤概況與選股用的全市場收盤資料、類股指數：一天只變一次，快取 30 分鐘
 const DAILY_TTL = 30 * 60 * 1000
@@ -43,7 +44,8 @@ const MI_INDEX_URL = 'https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX'
 const OVERVIEW_TARGETS = {
   tw: [
     { kind: 'index', market: 'tw', code: 't00', exchange: 'tse', symbol: '^TWII', name: '加權指數' },
-    { kind: 'index', market: 'tw', code: 'o00', exchange: 'otc', symbol: null, name: '櫃買指數' },
+    // Yahoo 沒有櫃買指數（symbol 是 null）；走勢彈窗用櫃買中心的日線，代號是 chartSymbol
+    { kind: 'index', market: 'tw', code: 'o00', exchange: 'otc', symbol: null, chartSymbol: tpexIndex.CHART_SYMBOL, name: '櫃買指數' },
   ],
   // group：畫面分組；note：給沒學過的人看的一句話；unit：數字的單位（殖利率是 %）
   us: [
@@ -782,7 +784,44 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     })
   }
 
+  // 櫃買指數一個月的日線：過去的月份不會再變，快取 1 天；這個月 10 分鐘
+  async function loadTpexMonth({ year, month }, today) {
+    const key = `tpex-index:${year}-${month}`
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    return once(key, async () => {
+      const bars = tpexIndex.parseMonth(await fetchJson(tpexIndex.monthUrl(year, month)))
+      const current = today.startsWith(`${year}-${String(month).padStart(2, '0')}`)
+      cache.set(key, bars, current ? 10 * 60 * 1000 : 24 * 60 * 60 * 1000)
+      return bars
+    })
+  }
+
+  // 櫃買指數的走勢彈窗：範圍只有日線（櫃買中心沒有盤中分時），不支援的範圍改用 1 個月，回傳裡的 range 是實際用的
+  async function getTpexIndexChart(range) {
+    const today = dateIn(TW_TIMEZONE, new Date(now()))
+    const useRange = tpexIndex.RANGES.includes(range) ? range : tpexIndex.DEFAULT_RANGE
+    // 52 週高低要一年的資料，所以不管範圍都抓 13 個月（有快取）
+    const months = tpexIndex.recentMonths(today, 13)
+    const [monthResults, realtimeResult] = await Promise.all([
+      settleLimited(months, 4, (m) => loadTpexMonth(m, today)),
+      loadRealtime([OVERVIEW_TARGETS.tw[1]]).catch(() => null),
+    ])
+    const failed = monthResults.find((r) => r.status === 'rejected')
+    if (failed) throw failed.reason
+    const bars = monthResults.flatMap((r) => r.value)
+    const quote = realtimeResult?.get('otc_o00') ?? null
+    const realtime = quote
+      ? {
+          ...quote,
+          time: quote.date && quote.clock ? new Date(`${quote.date}T${quote.clock}+08:00`).toISOString() : null,
+        }
+      : null
+    return tpexIndex.buildChart(bars, realtime, useRange, today)
+  }
+
   async function getIndexChart(symbol, range) {
+    if (symbol === tpexIndex.CHART_SYMBOL && INDEX_CHART_RANGES[range]) return getTpexIndexChart(range)
     if (!INDEX_CHART_SYMBOLS.has(symbol) || !INDEX_CHART_RANGES[range]) return null
     // 線圖用指定範圍；今天的開盤、最高、最低、上次收盤價一律看 1 天的資料
     const [chart, today] = await Promise.all([loadYahooChart(symbol, range), range === '1d' ? null : loadYahooChart(symbol, '1d')])
@@ -887,8 +926,14 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       (summaries || [])
         .map((s, i) => {
           if (!s) return null
-          const { name, symbol, group, note, unit } = targets[i]
-          return { name, symbol, ...(group ? { group, note: note ?? null, unit: unit ?? null } : {}), ...pickIndex(s) }
+          const { name, symbol, chartSymbol, group, note, unit } = targets[i]
+          return {
+            name,
+            symbol,
+            ...(chartSymbol ? { chartSymbol } : {}),
+            ...(group ? { group, note: note ?? null, unit: unit ?? null } : {}),
+            ...pickIndex(s),
+          }
         })
         .filter(Boolean)
 
