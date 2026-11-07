@@ -8,7 +8,7 @@ const { NEWS_THEMES } = require('../data/newsThemes')
 const { tradesOf } = require('../services/market/portfolio')
 const { buildFinanceNewsMessages } = require('../services/market/financeNewsAnalysis')
 const { clusterNews, isMopsRepost } = require('../services/market/financeNews')
-const { watchMatchers } = require('../services/market/newsDigest')
+const { DIGEST_VERSION, listToneOf, watchMatchers } = require('../services/market/newsDigest')
 const { NarrationRefusedError } = require('../services/narrationService')
 const { startOfTaipeiDay } = require('./marketAnalysis')
 const { startNdjson } = require('../lib/ndjsonStream')
@@ -168,7 +168,11 @@ function createFinanceNewsRouter({
         // 與我追蹤相關：標題＋摘要比對，再加上全文產生的新聞重點裡提到的（和彈窗一致）
         // Yahoo 轉貼的觀測站公告（多半是小型股的月營收、董事會決議）只留公司在追蹤清單裡的，比對標題就好
         news: clusterNews(news)
-          .map(({ mentions = [], ...item }) => {
+          .map(({ mentions = [], digestTone = null, digestVersion = null, ...raw }) => {
+            // 語氣（用詞統計，不是預測）：打開過新聞重點、而且是目前規則版本的，用全文算的那份（和彈窗一致）；
+            // 其他用標題＋摘要，規則較嚴（標題要有漲跌用詞），見 newsDigest.listToneOf
+            const fromDigest = digestTone && digestVersion === DIGEST_VERSION ? digestTone : null
+            const item = { ...raw, tone: fromDigest ?? listToneOf(raw.title, raw.summary) }
             if (isMopsRepost(item)) return { ...item, watched: matchers.filter((m) => m.test(item.title)).map((m) => m.label) }
             const text = `${item.title} ${item.summary}`
             const inArticle = new Set(mentions)

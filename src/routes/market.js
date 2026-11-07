@@ -522,6 +522,44 @@ function createMarketRouter({
     }
   })
 
+  // 大盤概況重點卡點開的走勢彈窗：GET /index-chart?symbol=^TWII&range=1d（代號只限大盤概況裡的那幾個）
+  router.get('/index-chart', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!marketService.getIndexChart) {
+        res.status(503).json({ message: '指數走勢尚未啟用。' })
+        return
+      }
+      const symbol = typeof req.query.symbol === 'string' ? req.query.symbol : ''
+      const range = typeof req.query.range === 'string' ? req.query.range : '1d'
+      const chart = await marketService.getIndexChart(symbol, range)
+      if (!chart) {
+        res.status(404).json({ message: '只能查大盤概況裡的指數與匯率。' })
+        return
+      }
+      res.json({ chart })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // 台指期夜盤的分鐘走勢（期交所）：大盤概況的「台指期夜盤」卡點開用
+  router.get('/futures-chart', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!marketService.getFuturesNightChart) {
+        res.status(503).json({ message: '台指期走勢尚未啟用。' })
+        return
+      }
+      const chart = await marketService.getFuturesNightChart()
+      if (!chart) {
+        res.status(404).json({ message: '目前查不到台指期夜盤的資料。' })
+        return
+      }
+      res.json({ chart })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   // ---- 資產走勢 ----
 
   router.get('/history', requireStockAccess, async (req, res, next) => {

@@ -438,6 +438,10 @@ function toJSON(doc) {
     publishedAt: new Date(doc.publishedAt).toISOString(),
     themes: themesOf(`${doc.title} ${doc.summary || ''}`),
     codes: doc.codes || [],
+    // 已經產生過新聞重點的話：用全文算的語氣（和彈窗一致）；沒有的話路由用標題＋摘要算
+    digestTone: doc.digest?.tone ?? null,
+    // 新聞重點的規則版本：路由只採用目前版本算出的語氣（舊版本的會在下次打開時重算）
+    digestVersion: doc.digest?.version ?? null,
     // 已經產生過新聞重點的話：全文裡提到的個股（tw:2330、us:MU），路由用來算「與我追蹤相關」，不回傳給前端
     mentions: [...(doc.digest?.stocks || []), ...(doc.digest?.moreStocks || [])].map((stock) =>
       stock.market === 'tw' ? `tw:${stock.code}` : `us:${stock.symbol}`,

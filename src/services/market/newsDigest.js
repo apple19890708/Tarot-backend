@@ -7,7 +7,7 @@ const { US_NAMES, TICKER_STOPWORDS, buildNameIndex } = require('./symbols')
 const { plainText, decodeEntities, featuresOf, similarity, themeHits } = require('./financeNews')
 
 // 規則改了就加 1：存著的舊結果會在下次打開時重算
-const DIGEST_VERSION = 10
+const DIGEST_VERSION = 11
 // 只讀這些網域的原文，避免被當成跳板去打其他網址
 const ARTICLE_HOSTS = new Set(['www.cnbc.com', 'cnbc.com', 'www.marketwatch.com', 'marketwatch.com', 'news.cnyes.com', 'tw.stock.yahoo.com'])
 // 原站明確拒絕或不存在：存起來不再重讀
@@ -244,10 +244,10 @@ function keyPoints(text, title, { limit = POINTS } = {}) {
 
 // ---- 語氣（用詞統計，不是預測）----
 
-const NEGATIVE_ZH = ['重挫', '暴跌', '大跌', '下跌', '走低', '崩', '失守', '新低', '下修', '虧損', '衰退', '疲弱', '賣壓', '跌破', '狂瀉', '下殺', '利空', '不如預期', '遜於預期', '血崩', '翻黑']
-const POSITIVE_ZH = ['大漲', '上漲', '飆', '走高', '創新高', '新高', '上修', '優於預期', '強勁', '轉盈', '利多', '攻上', '站上', '勁揚', '翻紅', '大增', '暴增']
+const NEGATIVE_ZH = ['重挫', '暴跌', '大跌', '下跌', '走低', '崩', '失守', '新低', '下修', '虧損', '衰退', '疲弱', '賣壓', '跌破', '狂瀉', '下殺', '利空', '不如預期', '遜於預期', '血崩', '翻黑', '跌停']
+const POSITIVE_ZH = ['大漲', '上漲', '飆', '走高', '創新高', '新高', '上修', '優於預期', '強勁', '轉盈', '利多', '攻上', '站上', '勁揚', '翻紅', '大增', '暴增', '反彈', '回升', '漲停']
 const NEGATIVE_EN = /\b(?:plunge[sd]?|plunging|tumble[sd]?|slump(?:s|ed)?|sink(?:s)?|sank|falls?|fell|drops?|dropped|sell-?off|worst|declines?|declined|loss(?:es)?|miss(?:es|ed)?|downgrade[sd]?|weak(?:er|ness)?|crash(?:es|ed)?|slides?|slid)\b/gi
-const POSITIVE_EN = /\b(?:surge[sd]?|soar(?:s|ed)?|rall(?:y|ies|ied)|jump(?:s|ed)?|gains?|gained|rises?|rose|record high|beats?|upgrade[sd]?|strong(?:er)?|boost(?:s|ed)?|climb(?:s|ed)?|comeback)\b/gi
+const POSITIVE_EN = /\b(?:surge[sd]?|soar(?:s|ed)?|rall(?:y|ies|ied)|jump(?:s|ed)?|gains?|gained|rises?|rose|record high|beats?|upgrade[sd]?|strong(?:er)?|boost(?:s|ed)?|climb(?:s|ed)?|comeback|rebound(?:s|ed)?|recover(?:s|ed|y)?)\b/gi
 
 function countWords(text, words) {
   return words.reduce((sum, word) => sum + (text.split(word).length - 1), 0)
@@ -275,6 +275,18 @@ function toneOf(title, points) {
   if (score >= 2) return 'positive'
   if (score <= -2) return 'negative'
   return 'neutral'
+}
+
+// 新聞清單（還沒打開過新聞重點、只有標題＋摘要）用的語氣：比 toneOf 嚴格，標題本身要有漲跌用詞、而且和整體同方向。
+// 摘要裡碰巧出現的 fell、gains（政治、社會新聞）不算，避免非市場新聞被貼上偏多偏空（2026-11-07 用真實新聞抽查的誤判）
+// 英文的泛用字在政治、社會新聞也常見（boost the vote、strong job numbers、miss votes），清單判斷標題時不算
+const AMBIGUOUS_EN = /\b(?:boost(?:s|ed)?|strong(?:er)?|miss(?:es|ed)?|weak(?:er|ness)?|loss(?:es)?|gains?|gained)\b/gi
+
+function listToneOf(title, summary) {
+  const titleScore = toneScore(String(title || '').replace(AMBIGUOUS_EN, ' '))
+  if (titleScore === 0) return 'neutral'
+  const tone = toneOf(title, summary ? [summary] : [])
+  return (tone === 'positive' && titleScore > 0) || (tone === 'negative' && titleScore < 0) ? tone : 'neutral'
 }
 
 // ---- 提及個股 ----
@@ -571,6 +583,7 @@ module.exports = {
   splitSentences,
   keyPoints,
   toneOf,
+  listToneOf,
   mentionedStocks,
   watchMatchers,
   buildDigest,

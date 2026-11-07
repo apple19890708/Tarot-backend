@@ -30,11 +30,15 @@ const MIN_RESEARCH_BARS = 250
 const { buildNameIndex, findMarketTargets, resolveTargetIn, searchTargets: searchLocalTargets, US_SYMBOL_PATTERN } = require('./symbols')
 
 const corporateEvents = require('./corporateEvents')
+const taifex = require('./taifex')
+const macro = require('./macro')
 const screener = require('./screener')
 // 大盤概況與選股用的全市場收盤資料、類股指數：一天只變一次，快取 30 分鐘
 const DAILY_TTL = 30 * 60 * 1000
 const LISTED_CODE_PATTERN = /^(\d{4}|00\d{2,4}[A-Z]?)$/
 const OVERVIEW_TTL = 10 * 60 * 1000
+// 美國總經數據每月公布一次，快取 6 小時；全部抓不到時 1 分鐘後再試（FAILURE_TTL）
+const MACRO_TTL = 6 * 60 * 60 * 1000
 const MI_INDEX_URL = 'https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX'
 const OVERVIEW_TARGETS = {
   tw: [
@@ -167,9 +171,11 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return twseData
   }
 
-  async function fetchJson(url) {
+  // init：要 POST 時傳 { method, body, headers }（期交所的行情 API）
+  async function fetchJson(url, init = {}) {
     const response = await fetchImpl(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TarotMarket/1.0)', Accept: 'application/json' },
+      ...init,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TarotMarket/1.0)', Accept: 'application/json', ...init.headers },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
     if (response.status === 404) {
@@ -715,6 +721,94 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return sectors
   }
 
+  // ---- 指數走勢彈窗（大盤概況的重點卡點開）：像 Google 財經，不同時間範圍的線圖＋今天的開高低 ----
+  // 只開放大盤概況裡的代號，避免被拿來代查任意標的
+  const INDEX_CHART_SYMBOLS = new Map(
+    [...OVERVIEW_TARGETS.tw, ...OVERVIEW_TARGETS.us].filter((t) => t.symbol).map((t) => [t.symbol, t.name]),
+  )
+  // range → Yahoo 的 interval：1 天 5 分鐘一點、5 天 15 分鐘、1 個月～1 年每天、5 年每週
+  const INDEX_CHART_RANGES = { '1d': '5m', '5d': '15m', '1mo': '1d', '6mo': '1d', ytd: '1d', '1y': '1d', '5y': '1wk' }
+
+  async function loadYahooChart(symbol, range) {
+    const key = `index-chart:${symbol}:${range}`
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    return once(key, async () => {
+      const payload = await fetchJson(
+        `${URLS.yahooChart}${encodeURIComponent(symbol)}?range=${range}&interval=${INDEX_CHART_RANGES[range]}`,
+      )
+      const result = payload?.chart?.result?.[0]
+      if (!result) throw new SymbolNotFoundError(symbol)
+      const quote = result.indicators?.quote?.[0] || {}
+      const points = (result.timestamp || [])
+        .map((ts, i) => ({ t: new Date(ts * 1000).toISOString(), close: quote.close?.[i], open: quote.open?.[i] }))
+        .filter((p) => Number.isFinite(p.close))
+      const data = { meta: result.meta || {}, points }
+      // 盤中會變的短範圍快取 1 分鐘，其他 30 分鐘
+      cache.set(key, data, range === '1d' || range === '5d' ? 60 * 1000 : 30 * 60 * 1000)
+      return data
+    })
+  }
+
+  // 台指期夜盤的分鐘走勢（當次夜盤 15:00～隔天 05:00），快取 1 分鐘
+  async function getFuturesNightChart() {
+    const key = 'futures-night-chart'
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    return once(key, async () => {
+      const post = (url, body) =>
+        fetchJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      const quote = taifex.nearMonthQuote(await post(taifex.QUOTE_URL, taifex.requestBody('night')), 'night')
+      if (!quote) {
+        cache.set(key, null, FAILURE_TTL)
+        return null
+      }
+      const payload = await post(taifex.CHART_URL, JSON.stringify({ SymbolID: quote.symbolId }))
+      const result = { quote, points: taifex.chartPoints(payload, quote.date) }
+      cache.set(key, result, 60 * 1000)
+      return result
+    })
+  }
+
+  async function getIndexChart(symbol, range) {
+    if (!INDEX_CHART_SYMBOLS.has(symbol) || !INDEX_CHART_RANGES[range]) return null
+    // 線圖用指定範圍；今天的開盤、最高、最低、上次收盤價一律看 1 天的資料
+    const [chart, today] = await Promise.all([loadYahooChart(symbol, range), range === '1d' ? null : loadYahooChart(symbol, '1d')])
+    const day = today || chart
+    const meta = day.meta
+    const price = toNumber(meta.regularMarketPrice)
+    const prevClose = toNumber(meta.previousClose ?? meta.chartPreviousClose)
+    // 1 天的基準是上次收盤價；其他範圍是範圍起點的前一個收盤
+    const baseline = range === '1d' ? prevClose : toNumber(chart.meta.chartPreviousClose) ?? chart.points[0]?.close ?? null
+    const change = (from, to) => (from !== null && to !== null ? round(to - from) : null)
+    const pct = (from, to) => (from ? round(((to - from) / from) * 100) : null)
+    return {
+      symbol,
+      name: INDEX_CHART_SYMBOLS.get(symbol),
+      range,
+      currency: meta.currency || null,
+      timezone: meta.exchangeTimezoneName || null,
+      time: meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : null,
+      price: round(price),
+      // 今天和上次收盤比
+      dayChange: change(prevClose, price),
+      dayChangePct: pct(prevClose, price),
+      // 這個範圍的起點到現在
+      baseline: round(baseline),
+      rangeChange: change(baseline, price),
+      rangeChangePct: pct(baseline, price),
+      stats: {
+        open: round(toNumber(day.points[0]?.open) ?? null),
+        high: round(toNumber(meta.regularMarketDayHigh)),
+        low: round(toNumber(meta.regularMarketDayLow)),
+        prevClose: round(prevClose),
+        high52: round(toNumber(meta.fiftyTwoWeekHigh)),
+        low52: round(toNumber(meta.fiftyTwoWeekLow)),
+      },
+      points: chart.points.map((p) => ({ t: p.t, close: round(p.close) })),
+    }
+  }
+
   // 大盤概況：主要指數、漲跌家數、類股漲跌、三大法人、美股與匯率。各區塊各自失敗只少一塊
   async function getMarketOverview() {
     const cached = cache.get('overview')
@@ -722,14 +816,47 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return once('overview', buildOverview)
   }
 
+  // 美國總經數據（CPI、核心 CPI、PCE、核心 PCE、非農）：各自失敗只少那一張
+  async function loadMacro() {
+    const cached = cache.get('macro')
+    if (cached !== undefined) return cached
+    return once('macro', async () => {
+      // 年增率要 13 個月以上，抓近兩年
+      const from = `${Number(dateIn(TW_TIMEZONE, new Date(now())).slice(0, 4)) - 2}-01-01`
+      const results = await Promise.allSettled(
+        macro.SERIES.map(async (series) => {
+          const response = await fetchImpl(macro.csvUrl(series.id, from), {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TarotMarket/1.0)' },
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          })
+          if (!response.ok) throw new Error(`${response.status} ${series.id}`)
+          return macro.summarize(series, macro.parseFredCsv(await response.text()))
+        }),
+      )
+      results.forEach((result, i) => {
+        if (result.status === 'rejected') console.error(`總經數據失敗（${macro.SERIES[i].id}）：`, result.reason?.message)
+      })
+      const items = results.map((result) => (result.status === 'fulfilled' ? result.value : null)).filter(Boolean)
+      cache.set('macro', items, items.length ? MACRO_TTL : FAILURE_TTL)
+      return items
+    })
+  }
+
   async function buildOverview() {
     const notes = []
-    const [twIndices, usIndices, quotes, sectors, twiiHistory] = await Promise.allSettled([
+    const [twIndices, usIndices, quotes, sectors, twiiHistory, nightFutures, macroItems] = await Promise.allSettled([
       getWatchSummaries(OVERVIEW_TARGETS.tw),
       getWatchSummaries(OVERVIEW_TARGETS.us),
       loadDailyQuotes(),
       loadSectors(),
       loadHistory('^TWII'),
+      // 台指期夜盤（期交所即時行情）；抓不到只少這一張卡
+      fetchJson(taifex.QUOTE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: taifex.requestBody('night'),
+      }).then((payload) => taifex.nearMonthQuote(payload, 'night')),
+      loadMacro(),
     ])
     const pick = (result, label) => {
       if (result.status === 'fulfilled') return result.value
@@ -788,8 +915,13 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       breadth,
       sectors: (pick(sectors, '類股漲跌') || []).sort((a, b) => b.changePct - a.changePct),
       institutional,
+      // 台指期夜盤近月合約（大盤概況最上方的重點卡）；夜盤沒有成交或抓不到時是 null
+      futures: { night: nightFutures.status === 'fulfilled' ? nightFutures.value : null },
+      // 美國總經數據（FRED）：通膨看年增率，非農看當月新增人數（千人）
+      macro: macroItems.status === 'fulfilled' ? macroItems.value : [],
       notes,
     }
+    if (nightFutures.status === 'rejected') console.error('台指期夜盤失敗：', nightFutures.reason?.message)
     cache.set('overview', overview, OVERVIEW_TTL)
     return overview
   }
@@ -1022,6 +1154,8 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     getWatchDetail,
     getAlertSignals,
     getMarketOverview,
+    getIndexChart,
+    getFuturesNightChart,
     loadDailyQuotes,
     screenStocks,
     searchTargets,

@@ -334,3 +334,18 @@ test('截圖回報：引號裡的問號不切開；同一件事寫兩次只選�
   assert.equal(points.filter((p) => p.includes('2,020 元跌停價')).length, 1, points.join('\n'))
   assert.ok(!points.some((p) => p.startsWith('」')))
 })
+
+test('清單語氣 listToneOf：標題要有明確的漲跌用詞；政治社會新聞的泛用字不算（2026-11-07 真實新聞）', () => {
+  const { listToneOf } = require('../src/services/market/newsDigest')
+  // 誤判過的：boost the vote、strong job numbers、miss votes 不是漲跌
+  assert.equal(listToneOf('Mississippi Senate: Longshot Ty Pinkins says he aimed to spoil Hyde-Smith, boost Colom vote', 'gains among voters'), 'neutral')
+  assert.equal(listToneOf('A disturbing employment trend is hiding beneath the latest strong job numbers', ''), 'neutral')
+  assert.equal(listToneOf("Sen. Chris Murphy released from hospital after stroke, will miss votes for 'several weeks' as he rehabs", ''), 'neutral')
+  // 標題沒有漲跌字、只有摘要碰巧有的也算中性
+  assert.equal(listToneOf('科技巨頭終結免費網路時代 轉向「付費體驗」收割利潤', '股價下跌、賣壓沉重'), 'neutral')
+  // 明確的市場新聞照常判斷
+  assert.equal(listToneOf('Nasdaq drops into correction territory', 'stocks fell sharply'), 'negative')
+  assert.equal(listToneOf('Nvidia, AMD and other chip stocks rebound', 'shares rose'), 'positive')
+  assert.equal(listToneOf('〈熱門股〉華航客貨運業績暢旺 股價創3個月來新高', ''), 'positive')
+  assert.equal(listToneOf('AI賣壓席捲亞洲！台灣限空令', '台股重挫'), 'negative')
+})
