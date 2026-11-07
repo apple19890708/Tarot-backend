@@ -128,12 +128,14 @@ const STRATEGIES = [
     key: 'buyHold',
     label: '買進持有',
     description: '第一天買進後一直抱著',
+    plain: '一開始買進，之後不管漲跌都不賣。',
     decide: () => true,
   },
   {
     key: 'maCross',
     label: '均線交叉',
     description: 'MA5 向上穿過 MA20 買進，向下穿過賣出',
+    plain: '近 5 天的平均價漲過近 20 天的平均價就買，跌回下面就賣；也就是股價轉強時上車、轉弱時下車。',
     decide: (s, i) => {
       if ([s.ma5[i], s.ma20[i], s.ma5[i - 1], s.ma20[i - 1]].some((v) => v === null)) return null
       if (s.ma5[i - 1] <= s.ma20[i - 1] && s.ma5[i] > s.ma20[i]) return true
@@ -145,6 +147,7 @@ const STRATEGIES = [
     key: 'kd',
     label: 'KD 交叉',
     description: 'K 在 30 以下黃金交叉買進，70 以上死亡交叉賣出',
+    plain: '股價跌到近期的相對低點、開始往上彈時買；漲到相對高點、開始往下掉時賣。',
     decide: (s, i) => {
       if ([s.k[i], s.d[i], s.k[i - 1], s.d[i - 1]].some((v) => v === null)) return null
       if (s.k[i - 1] <= s.d[i - 1] && s.k[i] > s.d[i] && s.k[i] < 30) return true
@@ -156,6 +159,7 @@ const STRATEGIES = [
     key: 'rsi',
     label: 'RSI 反轉',
     description: 'RSI 低於 30 買進，高於 70 賣出',
+    plain: '短時間跌太多就買、漲太多就賣，賭它會反彈或拉回。',
     decide: (s, i) => {
       if (s.rsi14[i] === null) return null
       if (s.rsi14[i] < 30) return true
@@ -167,6 +171,7 @@ const STRATEGIES = [
     key: 'macd',
     label: 'MACD 翻紅',
     description: 'MACD 柱體由負翻正買進，由正翻負賣出',
+    plain: '上漲的力道由弱轉強時買，由強轉弱時賣。',
     decide: (s, i) => {
       if (s.macdHist[i] === null || s.macdHist[i - 1] === null) return null
       if (s.macdHist[i - 1] <= 0 && s.macdHist[i] > 0) return true
@@ -230,6 +235,7 @@ function runStrategy(series, strategy, { start, end = series.closes.length, cost
     key: strategy.key,
     label: strategy.label,
     description: strategy.description,
+    plain: strategy.plain,
     totalReturn: round(totalReturn),
     annualReturn: years > 0 ? round(((equity / 100) ** (1 / years) - 1) * 100) : null,
     maxDrawdown: round(maxDrawdown),

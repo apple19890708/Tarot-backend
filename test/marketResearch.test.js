@@ -2,7 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const { computeIndicators } = require('../src/services/market/indicators')
-const { computeSeries, pointAt } = require('../src/services/market/series')
+const { computeSeries, pointAt, aggregateSeries } = require('../src/services/market/series')
 const { backtestSignals, backtestStrategies, stats } = require('../src/services/market/backtest')
 const { predictDirection } = require('../src/services/market/prediction')
 
@@ -171,4 +171,48 @@ test('操作建議：訊號回測只有明顯優於或劣於基準才算數，�
 
 test('操作建議：沒有指標時回傳 null', () => {
   assert.equal(buildAdvice({ quote: { price: 1 }, analysis: null, indicators: null }), null)
+})
+
+test('aggregateSeries：日 K 合成週 K／月 K，收盤取最後一天、成交量加總、均線用合成後重算', () => {
+  // 2026-01-05（一）～2026-02-06（五），共 5 週、25 個交易日；收盤 1..25、成交量都是 10
+  const dates = []
+  const start = Date.UTC(2026, 0, 5)
+  for (let w = 0; w < 5; w += 1) {
+    for (let d = 0; d < 5; d += 1) dates.push(new Date(start + (w * 7 + d) * 86400000).toISOString().slice(0, 10))
+  }
+  const series = { dates, closes: dates.map((_, i) => i + 1), volumes: dates.map(() => 10) }
+
+  const weekly = aggregateSeries(series, 'week')
+  assert.deepEqual(weekly.dates, ['2026-01-09', '2026-01-16', '2026-01-23', '2026-01-30', '2026-02-06'])
+  assert.deepEqual(weekly.closes, [5, 10, 15, 20, 25])
+  assert.deepEqual(weekly.volumes, [50, 50, 50, 50, 50])
+  assert.deepEqual(weekly.ma5, [null, null, null, null, 15])
+
+  const monthly = aggregateSeries(series, 'month')
+  assert.deepEqual(monthly.dates, ['2026-01-30', '2026-02-06'])
+  assert.deepEqual(monthly.closes, [20, 25])
+  assert.deepEqual(monthly.volumes, [200, 50])
+})
+
+test('aggregateSeries：跨年的週仍算同一週（以週一為起點），成交量缺值當 0', () => {
+  const series = { dates: ['2025-12-31', '2026-01-02', '2026-01-05'], closes: [1, 2, 3], volumes: [5, null, 7] }
+  const weekly = aggregateSeries(series, 'week')
+  assert.deepEqual(weekly.dates, ['2026-01-02', '2026-01-05'])
+  assert.deepEqual(weekly.volumes, [5, 7])
+})
+
+test('aggregateSeries：週 K 的開盤取第一天、最高最低取整週極值', () => {
+  const series = {
+    dates: ['2026-01-05', '2026-01-06', '2026-01-07'],
+    opens: [10, 12, 11],
+    highs: [13, 15, 12],
+    lows: [9, 11, 8],
+    closes: [12, 11, 10],
+    volumes: [1, 1, 1],
+  }
+  const weekly = aggregateSeries(series, 'week')
+  assert.deepEqual(weekly.opens, [10])
+  assert.deepEqual(weekly.highs, [15])
+  assert.deepEqual(weekly.lows, [8])
+  assert.deepEqual(weekly.closes, [10])
 })

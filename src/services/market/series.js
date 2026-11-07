@@ -93,6 +93,10 @@ function computeSeries(bars) {
   const { k, d } = kdSeries(highs, lows, closes)
   return {
     dates: bars.map((bar) => bar.date),
+    // 開高低給圖表畫 K 棒
+    opens: bars.map((bar) => bar.open),
+    highs,
+    lows,
     closes,
     volumes: bars.map((bar) => bar.volume),
     ma5: smaSeries(closes, 5),
@@ -132,4 +136,61 @@ function pointAt(series, i) {
   }
 }
 
-module.exports = { smaSeries, rsiSeries, kdSeries, macdHistSeries, computeSeries, pointAt }
+// 把日 K 合成週 K／月 K（圖表用）：開盤取第一天、收盤取最後一天、最高最低取區間極值、成交量加總，日期標最後一個交易日。
+// 均線用合成後的收盤重算，所以週 K 的 ma5 是 5 週均線
+function weekKey(date) {
+  const [y, m, d] = date.split('-').map(Number)
+  const t = Date.UTC(y, m - 1, d)
+  // 以週一為一週的開始
+  const monday = new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000)
+  return monday.toISOString().slice(0, 10)
+}
+const monthKey = (date) => date.slice(0, 7)
+
+function aggregateSeries(series, period) {
+  const keyOf = period === 'week' ? weekKey : monthKey
+  const dates = []
+  const opens = []
+  const highs = []
+  const lows = []
+  const closes = []
+  const volumes = []
+  let lastKey = null
+  for (let i = 0; i < series.dates.length; i += 1) {
+    const key = keyOf(series.dates[i])
+    const volume = Number.isFinite(series.volumes[i]) ? series.volumes[i] : 0
+    // 舊的呼叫端（或測試）只給收盤時，開高低都用收盤
+    const open = series.opens?.[i] ?? series.closes[i]
+    const high = series.highs?.[i] ?? series.closes[i]
+    const low = series.lows?.[i] ?? series.closes[i]
+    if (key !== lastKey) {
+      dates.push(series.dates[i])
+      opens.push(open)
+      highs.push(high)
+      lows.push(low)
+      closes.push(series.closes[i])
+      volumes.push(volume)
+      lastKey = key
+    } else {
+      const last = dates.length - 1
+      dates[last] = series.dates[i]
+      highs[last] = Math.max(highs[last], high)
+      lows[last] = Math.min(lows[last], low)
+      closes[last] = series.closes[i]
+      volumes[last] += volume
+    }
+  }
+  return {
+    dates,
+    opens,
+    highs,
+    lows,
+    closes,
+    volumes,
+    ma5: smaSeries(closes, 5),
+    ma20: smaSeries(closes, 20),
+    ma60: smaSeries(closes, 60),
+  }
+}
+
+module.exports = { smaSeries, rsiSeries, kdSeries, macdHistSeries, computeSeries, pointAt, aggregateSeries }

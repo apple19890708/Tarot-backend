@@ -8,10 +8,11 @@
 // 任何一個來源失敗都只會少一部分資料，不會讓 AI 解讀失敗；全部失敗時 snapshot 會帶 notes 說明。
 const { computeIndicators, round } = require('./indicators')
 const { buildSignals } = require('./signals')
-const { computeSeries } = require('./series')
+const { computeSeries, aggregateSeries } = require('./series')
 const { backtestSignals, backtestStrategies } = require('./backtest')
 const { predictDirection } = require('./prediction')
 const { buildAdvice } = require('./advice')
+const { buildLongTermAdvice } = require('./longTermAdvice')
 const { createTwseData, describeChips, describeValuation } = require('./twseData')
 
 // 機器學習的大盤特徵：台股個股用加權指數、美股個股用標普 500
@@ -20,8 +21,10 @@ const CONTEXT_INDEX = {
   us: { symbol: '^GSPC', label: '標普 500' },
 }
 
-// 圖表只畫最近這麼多個交易日
-const CHART_DAYS = 120
+// 圖表能看的範圍：日 K 約一年、週 K 約三年、月 K 是抓到的全部（5 年）
+const CHART_DAYS = 250
+const CHART_WEEKS = 156
+const CHART_MONTHS = 60
 // 少於這麼多根 K 棒（約一年）就不做回測與預測，樣本太少的統計只會誤導
 const MIN_RESEARCH_BARS = 250
 const { buildNameIndex, findMarketTargets, resolveTargetIn, searchTargets: searchLocalTargets, US_SYMBOL_PATTERN } = require('./symbols')
@@ -38,12 +41,18 @@ const OVERVIEW_TARGETS = {
     { kind: 'index', market: 'tw', code: 't00', exchange: 'tse', symbol: '^TWII', name: '加權指數' },
     { kind: 'index', market: 'tw', code: 'o00', exchange: 'otc', symbol: null, name: '櫃買指數' },
   ],
+  // group：畫面分組；note：給沒學過的人看的一句話；unit：數字的單位（殖利率是 %）
   us: [
-    { kind: 'index', market: 'us', symbol: '^GSPC', name: '標普 500' },
-    { kind: 'index', market: 'us', symbol: '^IXIC', name: '那斯達克' },
-    { kind: 'index', market: 'us', symbol: '^DJI', name: '道瓊工業' },
-    { kind: 'index', market: 'us', symbol: '^SOX', name: '費城半導體' },
-    { kind: 'index', market: 'us', symbol: 'TWD=X', name: '美元兌台幣' },
+    { kind: 'index', market: 'us', symbol: '^GSPC', name: '標普 500', group: 'index', note: '美國 500 家大公司，最常拿來代表美股整體' },
+    { kind: 'index', market: 'us', symbol: '^IXIC', name: '那斯達克', group: 'index', note: '科技股比重高，看科技股的氣氛' },
+    { kind: 'index', market: 'us', symbol: '^DJI', name: '道瓊工業', group: 'index', note: '30 家老牌大公司' },
+    { kind: 'index', market: 'us', symbol: '^RUT', name: '羅素 2000', group: 'index', note: '2000 家中小型公司，反映美國國內景氣' },
+    { kind: 'index', market: 'us', symbol: '^SOX', name: '費城半導體', group: 'tw', note: '半導體股，和台股電子股連動最緊' },
+    { kind: 'stock', market: 'us', symbol: 'TSM', name: '台積電 ADR', group: 'tw', note: '台積電在美國掛牌的股票，常用來預估台股隔天開盤' },
+    { kind: 'index', market: 'us', symbol: 'TWD=X', name: '美元兌台幣', group: 'tw', note: '1 美元換多少台幣；數字變大代表台幣變弱，外資可能在匯出' },
+    { kind: 'index', market: 'us', symbol: '^VIX', name: '恐慌指數 VIX', group: 'mood', note: '越高代表市場越緊張；20 以下算平靜，30 以上算恐慌' },
+    { kind: 'index', market: 'us', symbol: '^TNX', name: '美國 10 年期公債殖利率', group: 'mood', unit: '%', note: '升高時股票（尤其科技股）通常比較有壓力' },
+    { kind: 'index', market: 'us', symbol: 'DX-Y.NYB', name: '美元指數', group: 'mood', note: '美元對歐元、日圓等主要貨幣的強弱，越高代表美元越強' },
   ],
 }
 // 除權息預告與月營收一天變動很少，快取 6 小時；抓不到時 10 分鐘後再試
@@ -324,7 +333,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return clock >= '09:00:00' && clock < '13:30:00' ? 'intraday' : 'closed'
   }
 
-  // extras：{ context: { label, series }, chips, valuation, light }，都可以省略
+  // extras：{ context: { label, series }, chips, valuation, revenue, light }，都可以省略
   // light：自訂追蹤用的輕量版，只算報價與技術指標，不做回測、預測、圖表與操作建議
   function buildItem(target, history, realtime, extras = {}) {
     const light = extras.light === true
@@ -333,13 +342,18 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     const nowDate = new Date(now())
     let bars = history ? history.bars.map((bar) => ({ ...bar })) : []
 
-    // 即時報價併進最後一根 K 棒：同一天就更新收盤與高低，新的一天就補一根
+    // 即時報價併進最後一根 K 棒：同一天就以即時報價的開高低收與成交量為準（Yahoo 當天那根常常不完整、成交量是 0），新的一天就補一根。
+    // 證交所的成交量單位是張，Yahoo 是股，換成股才能和前幾天比
     if (realtime?.date) {
       const last = bars[bars.length - 1]
+      // 指數的 v 是成交金額不是張數，不併
+      const liveVolume = target.kind !== 'index' && Number.isFinite(realtime.volume) ? realtime.volume * 1000 : null
       if (last && last.date === realtime.date) {
+        if (Number.isFinite(realtime.open)) last.open = realtime.open
         last.close = realtime.price
         last.high = Math.max(last.high, realtime.high ?? realtime.price)
         last.low = Math.min(last.low, realtime.low ?? realtime.price)
+        if (liveVolume !== null) last.volume = Math.max(Number.isFinite(last.volume) ? last.volume : 0, liveVolume)
       } else if (!last || realtime.date > last.date) {
         bars.push({
           date: realtime.date,
@@ -347,7 +361,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
           high: realtime.high ?? realtime.price,
           low: realtime.low ?? realtime.price,
           close: realtime.price,
-          volume: null,
+          volume: liveVolume,
         })
       }
     }
@@ -418,6 +432,17 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     }
     // 操作建議要用到上面的全部資料，最後才算；輕量版缺回測與籌碼，算出來會不一致，所以不算
     item.advice = light || detail ? null : buildAdvice(item)
+    // 長期建議（規格 H）：年線、大盤、買進持有年化、估值、月營收；歷史不到約一年時是 null
+    if (item.advice) {
+      item.advice.longTerm = buildLongTermAdvice({
+        series,
+        price: item.quote.price,
+        context: extras.context || null,
+        strategies: item.research?.strategies ?? null,
+        valuation: item.valuation,
+        revenue: extras.revenue || null,
+      })
+    }
     if (light) {
       item.spark = bars.slice(-SPARK_DAYS).map((bar) => round(bar.close))
       item.range52w = yearRange(bars, price)
@@ -487,6 +512,10 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     )
     const contextSeries = new Map(contextEntries)
 
+    // 月營收（長期建議用；台股個股才有，整個市場一份、有快取）
+    const hasTwStock = targets.some((t) => t.market === 'tw' && t.kind === 'stock')
+    const corporate = hasTwStock ? await loadCorporateEvents().catch(() => null) : null
+
     const twExtras = await Promise.all(
       targets.map(async (target, index) => {
         const realtime = realtimeMap.get(`${target.exchange}_${target.code}`)
@@ -521,7 +550,8 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       const context = contextInfo && contextSeries.get(contextInfo.symbol)
         ? { label: contextInfo.label, series: contextSeries.get(contextInfo.symbol) }
         : null
-      const item = buildItem(target, history, realtime, { ...twExtras[index], context })
+      const revenue = corporate && target.market === 'tw' && target.kind === 'stock' ? (corporate.revenue.get(target.code) ?? null) : null
+      const item = buildItem(target, history, realtime, { ...twExtras[index], context, revenue })
       if (item) {
         items.push(item)
       } else {
@@ -708,7 +738,13 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       return null
     }
     const indexCards = (summaries, targets) =>
-      (summaries || []).map((s, i) => (s ? { name: targets[i].name, symbol: targets[i].symbol, ...pickIndex(s) } : null)).filter(Boolean)
+      (summaries || [])
+        .map((s, i) => {
+          if (!s) return null
+          const { name, symbol, group, note, unit } = targets[i]
+          return { name, symbol, ...(group ? { group, note: note ?? null, unit: unit ?? null } : {}), ...pickIndex(s) }
+        })
+        .filter(Boolean)
 
     // 漲跌家數（上市、上櫃各自；ETF 也算在內，和交易所公布的口徑接近）
     const quoteMap = pick(quotes, '漲跌家數')
@@ -996,7 +1032,6 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
   }
 }
 
-// 價格走勢圖的資料：最近 CHART_DAYS 天的收盤、均線與成交量
 // 和 Promise.allSettled 一樣的回傳格式，但最多同時跑 limit 個
 async function settleLimited(items, limit, run) {
   const results = new Array(items.length)
@@ -1032,7 +1067,16 @@ function yearRange(bars, price) {
 
 // 大盤概況的指數卡片：只留畫面要的欄位
 function pickIndex(summary) {
-  return { price: summary.quote.price, change: summary.quote.change, changePct: summary.quote.changePct, date: summary.quote.date, session: summary.session, spark: summary.spark }
+  return {
+    price: summary.quote.price,
+    change: summary.quote.change,
+    changePct: summary.quote.changePct,
+    date: summary.quote.date,
+    session: summary.session,
+    spark: summary.spark,
+    // 近 5／20 日漲跌（%）；歷史資料不足時是 null
+    changes: summary.changes ? { d5: summary.changes.d5, d20: summary.changes.d20 } : null,
+  }
 }
 
 // 清單摘要等籌碼資料最多等這麼久
@@ -1077,16 +1121,28 @@ function toWatchSummary(item) {
   }
 }
 
-function buildChart(series) {
-  const from = Math.max(0, series.closes.length - CHART_DAYS)
-  const pick = (values) => values.slice(from).map((value) => (value === null ? null : round(value)))
+// 日 K 的欄位維持在最外層（舊版前端只認這幾個），週 K、月 K 放在 weekly／monthly
+function chartSlice(series, count) {
+  const from = Math.max(0, series.closes.length - count)
+  const pick = (values) => (values ? values.slice(from).map((value) => (Number.isFinite(value) ? round(value) : null)) : null)
   return {
     dates: series.dates.slice(from),
+    open: pick(series.opens),
+    high: pick(series.highs),
+    low: pick(series.lows),
     close: pick(series.closes),
     ma5: pick(series.ma5),
     ma20: pick(series.ma20),
     ma60: pick(series.ma60),
     volume: series.volumes.slice(from).map((value) => (Number.isFinite(value) ? value : null)),
+  }
+}
+
+function buildChart(series) {
+  return {
+    ...chartSlice(series, CHART_DAYS),
+    weekly: chartSlice(aggregateSeries(series, 'week'), CHART_WEEKS),
+    monthly: chartSlice(aggregateSeries(series, 'month'), CHART_MONTHS),
   }
 }
 
@@ -1256,6 +1312,20 @@ function formatAdvice(advice) {
     `- 建議部位：${advice.positionSize}`,
   ]
   if (advice.risks.length > 0) lines.push(`- 風險：${advice.risks.join(' ')}`)
+  const long = advice.longTerm
+  if (long) {
+    lines.push(
+      `長期建議（規則計算）：${long.stanceLabel}，信心${long.confidenceLabel}，適用 ${long.horizon}。${long.summary}`,
+      `- 依據：${long.evidence
+        .filter((e) => e.counted)
+        .map((e) => `${e.label}（${e.direction > 0 ? '偏多' : '偏空'}；${e.detail}）`)
+        .join('、')}`,
+      `- 關鍵價位：${formatNumber(long.keyLevel.price)}（${long.keyLevel.label}）`,
+      `- 長期還沒持有：${long.forNew}`,
+      `- 長期持有者：${long.forHolders}`,
+      `- 長期部位：${long.positionSize}`,
+    )
+  }
   return lines
 }
 

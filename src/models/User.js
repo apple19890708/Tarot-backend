@@ -11,8 +11,17 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
-    // bcrypt 雜湊；預設不查出來，避免不小心回傳給前端
-    passwordHash: { type: String, required: true, select: false },
+    // bcrypt 雜湊；預設不查出來，避免不小心回傳給前端。
+    // 用 Google 註冊的帳號沒有密碼（之後可以用忘記密碼設定一組），所以只有沒綁 Google 時才必填
+    passwordHash: {
+      type: String,
+      required() {
+        return !this.googleId
+      },
+      select: false,
+    },
+    // Google 帳號的 sub（Google 登入時用來找人）；沒用過 Google 登入的帳號沒有這個欄位
+    googleId: { type: String, unique: true, sparse: true },
     displayName: { type: String, default: '' },
     role: { type: String, enum: ROLES, default: 'member' },
     // AI 解析要由管理者逐一開通；admin 本身不看這個欄位，一律放行

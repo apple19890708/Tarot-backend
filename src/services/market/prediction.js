@@ -20,24 +20,24 @@ const MIN_TEST_SAMPLES = 100
 
 // 特徵：全部是相對值（比率、指標），不同價位的股票可以用同一套
 const FEATURES = [
-  { key: 'ret1', label: '昨日漲跌', get: (s, i) => s.closes[i] / s.closes[i - 1] - 1 },
-  { key: 'ret5', label: '近 5 日漲跌', get: (s, i) => s.closes[i] / s.closes[i - 5] - 1 },
-  { key: 'ret20', label: '近 20 日漲跌', get: (s, i) => s.closes[i] / s.closes[i - 20] - 1 },
-  { key: 'distMa20', label: '與月線的距離', get: (s, i) => s.closes[i] / s.ma20[i] - 1 },
-  { key: 'distMa60', label: '與季線的距離', get: (s, i) => s.closes[i] / s.ma60[i] - 1 },
-  { key: 'ma5Ma20', label: '短中均線差', get: (s, i) => s.ma5[i] / s.ma20[i] - 1 },
-  { key: 'rsi', label: 'RSI', get: (s, i) => s.rsi14[i] / 100 },
-  { key: 'k', label: 'K 值', get: (s, i) => s.k[i] / 100 },
-  { key: 'kMinusD', label: 'K 減 D', get: (s, i) => (s.k[i] - s.d[i]) / 100 },
-  { key: 'macd', label: 'MACD 柱體', get: (s, i) => s.macdHist[i] / s.closes[i] },
-  { key: 'volume', label: '量比', get: (s, i) => Math.log(s.volumeRatio[i] ?? 1) },
+  { key: 'ret1', label: '昨日漲跌', plain: '昨天的漲跌', get: (s, i) => s.closes[i] / s.closes[i - 1] - 1 },
+  { key: 'ret5', label: '近 5 日漲跌', plain: '最近 5 天的漲跌', get: (s, i) => s.closes[i] / s.closes[i - 5] - 1 },
+  { key: 'ret20', label: '近 20 日漲跌', plain: '最近 20 天的漲跌', get: (s, i) => s.closes[i] / s.closes[i - 20] - 1 },
+  { key: 'distMa20', label: '與月線的距離', plain: '股價比近 20 天平均價高或低多少', get: (s, i) => s.closes[i] / s.ma20[i] - 1 },
+  { key: 'distMa60', label: '與季線的距離', plain: '股價比近 60 天平均價高或低多少', get: (s, i) => s.closes[i] / s.ma60[i] - 1 },
+  { key: 'ma5Ma20', label: '短中均線差', plain: '近 5 天平均價比近 20 天平均價高或低', get: (s, i) => s.ma5[i] / s.ma20[i] - 1 },
+  { key: 'rsi', label: 'RSI', plain: '短期漲多還是跌多（RSI）', get: (s, i) => s.rsi14[i] / 100 },
+  { key: 'k', label: 'K 值', plain: '價格在近期高低之間的位置（K 值）', get: (s, i) => s.k[i] / 100 },
+  { key: 'kMinusD', label: 'K 減 D', plain: '短線正在轉強還是轉弱（KD）', get: (s, i) => (s.k[i] - s.d[i]) / 100 },
+  { key: 'macd', label: 'MACD 柱體', plain: '上漲力道變強還是變弱（MACD）', get: (s, i) => s.macdHist[i] / s.closes[i] },
+  { key: 'volume', label: '量比', plain: '成交量比平常多還是少', get: (s, i) => Math.log(s.volumeRatio[i] ?? 1) },
 ]
 
 // 大盤特徵：用「同一天或之前最近的一天」的大盤資料（兩邊休市日可能不同）
 function contextFeatures(label) {
   return [
-    { key: 'mktRet5', label: `${label}近 5 日漲跌`, get: (s, i, c, j) => (j >= 5 ? c.closes[j] / c.closes[j - 5] - 1 : NaN) },
-    { key: 'mktDistMa20', label: `${label}與月線的距離`, get: (s, i, c, j) => (c.ma20[j] ? c.closes[j] / c.ma20[j] - 1 : NaN) },
+    { key: 'mktRet5', label: `${label}近 5 日漲跌`, plain: `${label}最近 5 天的漲跌`, get: (s, i, c, j) => (j >= 5 ? c.closes[j] / c.closes[j - 5] - 1 : NaN) },
+    { key: 'mktDistMa20', label: `${label}與月線的距離`, plain: `${label}比近 20 天平均高或低多少`, get: (s, i, c, j) => (c.ma20[j] ? c.closes[j] / c.ma20[j] - 1 : NaN) },
   ]
 }
 
@@ -142,6 +142,8 @@ function evaluate(series, features, { horizon, context, aligned }) {
       .map((feature, j) => ({
         key: feature.key,
         label: feature.label,
+        // 給沒學過技術指標的人看的名稱
+        plain: feature.plain,
         weight: round(finalModel.weights[j], 3),
         // 今天這個特徵把機率往哪邊推（標準化後的值 × 權重）
         contribution: todayRow ? round(allScaler.apply(todayRow)[j] * finalModel.weights[j], 3) : null,

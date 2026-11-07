@@ -10,6 +10,9 @@ const User = require('./models/User')
 const spreads = require('./data/spreads')
 const { createAuthMiddleware } = require('./middleware/auth')
 const { createAuthRouter } = require('./routes/auth')
+const PasswordReset = require('./models/PasswordReset')
+const { createMailer } = require('./services/mailer')
+const { createGoogleVerifier } = require('./services/googleAuth')
 const { createAdminRouter } = require('./routes/admin')
 const { createReadingsRouter } = require('./routes/readings')
 const { loadCardsInOrder } = require('./services/cardLoader')
@@ -57,6 +60,9 @@ const ORIENTATIONS = ['upright', 'reversed']
 mongoose.set('bufferCommands', false)
 
 const app = express()
+// Render 前面有一層代理：信任一層，req.ip 才是使用者的 IP；不設的話所有人共用代理的 IP，
+// 登入與忘記密碼的「同一 IP 限速」會變成全站共用一個額度
+app.set('trust proxy', 1)
 const port = Number.parseInt(process.env.PORT || '4000', 10)
 // CLIENT_URL 可以用逗號分隔多個來源（本機 5173、GitHub Pages、Render…）。
 // 只有列在裡面的網域，瀏覽器才打得到這個 API。
@@ -106,7 +112,19 @@ const { optionalAuth, requireAuth, requireAdmin, requireAiAccess, requireStockAc
   findUserById: (id) => (mongoose.isValidObjectId(id) ? User.findById(id) : null),
 })
 
-app.use('/api/auth', createAuthRouter({ ensureDatabase, requireAuth }))
+// 忘記密碼寄信（Gmail API）與 Google 登入；沒設定環境變數時兩者都回 503，不影響一般登入。
+// APP_URL：前端網址（含 GitHub Pages 的子路徑），沒設定時用 CLIENT_URL 的第一個（本機開發）
+app.use(
+  '/api/auth',
+  createAuthRouter({
+    ensureDatabase,
+    requireAuth,
+    PasswordResets: PasswordReset,
+    mailer: createMailer(),
+    google: createGoogleVerifier(),
+    appUrl: process.env.APP_URL || clientUrls[0] || '',
+  }),
+)
 app.use('/api/admin', createAdminRouter({ ensureDatabase, requireAdmin }))
 // 只定義 GET／DELETE，與下面公開的 POST /api/readings/draw 等端點不衝突
 // 股市諮詢只給 admin 與開通「金融股市」的會員。選單只是不顯示，真正的放行在這裡。

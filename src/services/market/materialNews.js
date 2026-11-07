@@ -3,6 +3,7 @@
 const crypto = require('crypto')
 
 const { rocDate } = require('./corporateEvents')
+const { digestMaterialNews, materialFields } = require('./materialDigest')
 
 const URLS = {
   twse: 'https://openapi.twse.com.tw/v1/opendata/t187ap04_L',
@@ -54,6 +55,11 @@ function parseNews(twseRows, tpexRows) {
   return rows
 }
 
+function rawFieldsOf(detail) {
+  const { fields, empty } = materialFields(detail)
+  return { fields, emptyFields: empty }
+}
+
 // MarketNews：Mongoose model；fetchJson：抓 JSON 的函式（測試可以注入）
 function createNewsSync({ MarketNews, fetchJson, now = () => new Date() }) {
   let lastSync = 0
@@ -91,7 +97,21 @@ function createNewsSync({ MarketNews, fetchJson, now = () => new Date() }) {
       .sort({ date: -1, time: -1 })
       .limit(limit)
       .lean()
-    return docs.map((d) => ({ id: String(d._id), code: d.code, exchange: d.exchange, name: d.name, date: d.date, time: d.time, title: d.title, detail: d.detail, clause: d.clause }))
+    // points：從說明挑出的重點欄位（讀取時才算，規則改了舊公告也跟著更新）
+    return docs.map((d) => ({
+      id: String(d._id),
+      code: d.code,
+      exchange: d.exchange,
+      name: d.name,
+      date: d.date,
+      time: d.time,
+      title: d.title,
+      detail: d.detail,
+      clause: d.clause,
+      points: digestMaterialNews(d.detail),
+      // 原文拆成欄位表（看原文時用）；不是編號格式的公告 fields 是空的，畫面直接顯示 detail
+      ...rawFieldsOf(d.detail),
+    }))
   }
 
   return { sync, listFor }

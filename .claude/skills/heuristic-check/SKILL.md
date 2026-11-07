@@ -1,6 +1,6 @@
 ---
 name: heuristic-check
-description: 改到「用規則判斷文字或資料」的程式之後、回報完成之前使用（verify 會要求跑）。範圍：新聞主題關鍵字（newsThemes.js）、新聞重點的切句與挑句（newsDigest.js）、個股與代號辨識、雜訊過濾、同事件合併、股市訊號與門檻、塔羅組合規則門檻、交給 AI 的資料組裝（financeNewsAnalysis.js 等）。用真實資料抽查誤判，並確認已存的資料會跟著新規則更新。
+description: 改到「用規則判斷文字或資料」的程式之後、回報完成之前使用（verify 會要求跑）。範圍：新聞主題關鍵字（newsThemes.js）、新聞重點的切句與挑句（newsDigest.js）、重大訊息的重點欄位（materialDigest.js）、個股與代號辨識、雜訊過濾、同事件合併、股市訊號與門檻、塔羅組合規則門檻、交給 AI 的資料組裝（financeNewsAnalysis.js 等）。用真實資料抽查誤判，並確認已存的資料會跟著新規則更新。
 ---
 
 # 規則判斷的改動檢查
@@ -40,7 +40,7 @@ description: 改到「用規則判斷文字或資料」的程式之後、回報�
 ## 3. 每個找到的誤判都補測試
 
 - 用真實句子，正例（應該算）和反例（不該算）各至少一個，例如「公債殖利率」仍要算利率、「毛利率」不算。
-- 寫進既有測試檔（`test/financeNews.test.js`、`test/newsDigest.test.js`、`test/combinationRules.test.js`）。
+- 寫進既有測試檔（`test/financeNews.test.js`、`test/newsDigest.test.js`、`test/materialDigest.test.js`、`test/combinationRules.test.js`）。
 
 ## 4. 已存的資料要跟著新規則走
 

@@ -242,6 +242,11 @@ test('市場：台股個股用即時報價更新最後一根 K 棒並計算指�
   // 最後一根被即時報價取代：MA5 = (165+166+167+168+180)/5
   assert.equal(item.indicators.ma5, 169.2)
   assert.equal(item.barCount, 70)
+  // 圖表最後一根用即時報價的開盤與成交量（證交所 5000 張 → 500 萬股）
+  const lastIndex = item.chart.dates.length - 1
+  assert.equal(item.chart.open[lastIndex], 170)
+  assert.equal(item.chart.close[lastIndex], 180)
+  assert.equal(item.chart.volume[lastIndex], 5000000)
   assert.deepEqual(snapshot.notes, [])
 })
 
