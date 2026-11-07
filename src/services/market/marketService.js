@@ -944,7 +944,9 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     if (macroItems.status === 'rejected') console.error('美國經濟數據失敗：', macroItems.reason?.message)
     // 線上卡住時從 log 看是哪一塊慢
     console.log(`大盤概況完成（${Date.now() - started} ms）`)
-    cache.set('overview', overview, OVERVIEW_TTL)
+    // 有區塊失敗或逾時就只快取 1 分鐘：逾時的請求還在背景跑、會填進各自的快取，下次更新就補得上；
+    // 不然一次逾時會讓「美股指數暫時取不到」掛 10 分鐘，按更新也沒用（2026-11-07 線上）
+    cache.set('overview', overview, notes.length ? FAILURE_TTL : OVERVIEW_TTL)
     return overview
   }
 
