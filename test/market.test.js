@@ -341,3 +341,22 @@ test('市場：有市場資料時才附加股市規則與 market_data 區塊', (
   assert.doesNotMatch(buildUserMessage({ reading, cards: [] }), /<market_data>/)
   assert.match(buildUserMessage({ reading, cards: [], market: SAMPLE_SNAPSHOT }), /<market_data>\n查詢時間/)
 })
+
+test('大盤概況：外部來源一直沒回應時，各區塊逾時後照樣回傳（2026-11-07 線上卡住）', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // 不理會 AbortSignal、永遠不結束的請求（模擬線上卡住的連線）
+  const service = createMarketService({ fetchImpl: () => new Promise(() => {}) })
+  const errors = t.mock.method(console, 'error', () => {})
+  t.mock.method(console, 'log', () => {})
+  const pending = service.getMarketOverview()
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(15000)
+  }
+  const overview = await pending
+  assert.deepEqual(overview.tw, [])
+  assert.deepEqual(overview.macro, [])
+  assert.equal(overview.futures.night, null)
+  assert.ok(overview.notes.some((note) => note.includes('台股指數')))
+  assert.ok(errors.mock.calls.some((call) => String(call.arguments[1]).includes('逾時')))
+})

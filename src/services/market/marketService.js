@@ -91,7 +91,19 @@ const TTL = {
 }
 
 const REQUEST_TIMEOUT_MS = 8000
+// 大盤概況每個區塊最多等這麼久，超過就先不放那一塊（還在跑的請求照樣跑完、填進快取）。
+// 2026-11-07 線上（Render）的大盤概況卡住超過 2 分鐘、本機正常：單一來源在 Render 上沒回應時不能拖住整個概況
+const OVERVIEW_SECTION_TIMEOUT_MS = 15000
 const TW_TIMEZONE = 'Asia/Taipei'
+
+// promise 超過 ms 還沒結束就以逾時失敗（不取消原本的工作）
+function withDeadline(promise, ms, label) {
+  let timer
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}逾時（${ms / 1000} 秒）`)), ms)
+  })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
 
 // 清單裡只收股票與 ETF 的代號格式，排除權證、債券這類
 const CODE_PATTERN = /^\d{4,6}[A-Z]?$/
@@ -844,20 +856,27 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
 
   async function buildOverview() {
     const notes = []
-    const [twIndices, usIndices, quotes, sectors, twiiHistory, nightFutures, macroItems] = await Promise.allSettled([
-      getWatchSummaries(OVERVIEW_TARGETS.tw),
-      getWatchSummaries(OVERVIEW_TARGETS.us),
-      loadDailyQuotes(),
-      loadSectors(),
-      loadHistory('^TWII'),
+    const started = Date.now()
+    const sections = [
+      ['台股指數', getWatchSummaries(OVERVIEW_TARGETS.tw)],
+      ['美股指數', getWatchSummaries(OVERVIEW_TARGETS.us)],
+      ['漲跌家數', loadDailyQuotes()],
+      ['類股漲跌', loadSectors()],
+      ['加權指數歷史資料', loadHistory('^TWII')],
       // 台指期夜盤（期交所即時行情）；抓不到只少這一張卡
-      fetchJson(taifex.QUOTE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: taifex.requestBody('night'),
-      }).then((payload) => taifex.nearMonthQuote(payload, 'night')),
-      loadMacro(),
-    ])
+      [
+        '台指期夜盤',
+        fetchJson(taifex.QUOTE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: taifex.requestBody('night'),
+        }).then((payload) => taifex.nearMonthQuote(payload, 'night')),
+      ],
+      ['美國經濟數據', loadMacro()],
+    ]
+    const [twIndices, usIndices, quotes, sectors, twiiHistory, nightFutures, macroItems] = await Promise.allSettled(
+      sections.map(([label, promise]) => withDeadline(promise, OVERVIEW_SECTION_TIMEOUT_MS, label)),
+    )
     const pick = (result, label) => {
       if (result.status === 'fulfilled') return result.value
       console.error(`大盤概況（${label}）失敗：`, result.reason?.message)
@@ -900,7 +919,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     if (history) {
       try {
         const dates = history.bars.map((bar) => bar.date)
-        const chips = await getTwseData().getChips(OVERVIEW_TARGETS.tw[0], dates)
+        const chips = await withDeadline(getTwseData().getChips(OVERVIEW_TARGETS.tw[0], dates), OVERVIEW_SECTION_TIMEOUT_MS, '三大法人')
         institutional = chips ? { ...chips, summary: describeChips(chips, null) } : null
       } catch (error) {
         console.error('大盤三大法人失敗：', error.message)
@@ -922,6 +941,9 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       notes,
     }
     if (nightFutures.status === 'rejected') console.error('台指期夜盤失敗：', nightFutures.reason?.message)
+    if (macroItems.status === 'rejected') console.error('美國經濟數據失敗：', macroItems.reason?.message)
+    // 線上卡住時從 log 看是哪一塊慢
+    console.log(`大盤概況完成（${Date.now() - started} ms）`)
     cache.set('overview', overview, OVERVIEW_TTL)
     return overview
   }
