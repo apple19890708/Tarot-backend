@@ -1,4 +1,6 @@
 // 個股分析（v17 規格 F）：追蹤卡片的「個股分析」彈窗、AI 深度分析，以及「我的紀錄」的「股票分析」。
+// v19 起任何一檔台股都能分析（/stock/:code/...，股市總覽的推薦／熱門卡片）：有追蹤的自動用追蹤項目（看得到持股），
+// 沒追蹤的沒有持股，AI 紀錄的 watch 是 null。
 // 分析本身不呼叫 AI；只有 POST /watchlist/:id/analysis/ai 會呼叫（要 AI 權限、有次數限制）。
 // 依賴以參數注入，測試時不必連資料庫、外部 API 或 AI。
 const express = require('express')
@@ -106,6 +108,29 @@ function createMarketAnalysisRouter({
     return watch
   }
 
+  // 分析的對象：追蹤項目（/watchlist/:id/...）或任何一檔台股（/stock/:code/...）。
+  // 回傳 { watch, target, key }（key：冷卻與「這檔最近一次分析」用）；找不到時已回 404、回傳 null
+  async function subjectOf(req, res) {
+    if (req.params.id !== undefined) {
+      const watch = await findWatch(req, res)
+      return watch ? { watch, target: watch.target, key: String(watch._id) } : null
+    }
+    const code = String(req.params.code || '')
+    if (!/^\d{4,6}[A-Z]?$/.test(code)) {
+      res.status(404).json({ message: '找不到這檔台股。' })
+      return null
+    }
+    const tracked = await MarketWatch.findOne({ user: req.auth.userId, 'target.market': 'tw', 'target.code': code })
+    if (tracked) return { watch: tracked, target: tracked.target, key: String(tracked._id) }
+    const found = marketService.resolveTarget ? await marketService.resolveTarget(code, 'tw') : null
+    if (!found || found.code !== code) {
+      res.status(404).json({ message: '找不到這檔台股。' })
+      return null
+    }
+    const { symbol = null, exchange = null, market, kind, name = '' } = found
+    return { watch: null, target: { symbol, code, exchange, market, kind, name }, key: `stock:${code}` }
+  }
+
   async function newsOf(target) {
     if (!news || target.market !== 'tw' || target.kind !== 'stock' || !target.code) return []
     try {
@@ -122,7 +147,7 @@ function createMarketAnalysisRouter({
   }
 
   // 今天用了幾次、上限（admin 為 null）、這一檔什麼時候可以再跑
-  async function quotaOf(req, watchId) {
+  async function quotaOf(req, subject) {
     const userId = req.auth.userId
     const [usedToday, latest] = await Promise.all([
       (MarketAiUsage || MarketAnalysis).countDocuments({
@@ -130,9 +155,12 @@ function createMarketAnalysisRouter({
         ...(MarketAiUsage ? { kind: 'stock' } : {}),
         createdAt: { $gte: startOfTaipeiDay(now()) },
       }),
-      MarketAnalysis.findOne({ user: userId, watch: watchId }).sort({ createdAt: -1 }),
+      // 沒追蹤的台股：看同一個代號、沒連到追蹤項目的紀錄
+      MarketAnalysis.findOne(
+        subject.watch ? { user: userId, watch: subject.watch._id } : { user: userId, watch: null, 'target.code': subject.target.code },
+      ).sort({ createdAt: -1 }),
     ])
-    const lastStart = Math.max(latest ? new Date(latest.createdAt).getTime() : 0, startedAt.get(`${userId}:${watchId}`) || 0)
+    const lastStart = Math.max(latest ? new Date(latest.createdAt).getTime() : 0, startedAt.get(`${userId}:${subject.key}`) || 0)
     const retryAt = lastStart && lastStart + COOLDOWN_MS > now() ? new Date(lastStart + COOLDOWN_MS).toISOString() : null
     return {
       quota: { dailyLimit: req.auth.role === 'admin' ? null : DAILY_LIMIT, usedToday, retryAt },
@@ -142,16 +170,16 @@ function createMarketAnalysisRouter({
 
   // ---- 個股分析彈窗（不呼叫 AI）----
 
-  router.get('/watchlist/:id/analysis', requireStockAccess, async (req, res, next) => {
+  router.get(['/watchlist/:id/analysis', '/stock/:code/analysis'], requireStockAccess, async (req, res, next) => {
     try {
       if (!ensureDatabase(res)) return
-      const watch = await findWatch(req, res)
-      if (!watch) return
+      const subject = await subjectOf(req, res)
+      if (!subject) return
       const [snapshot, fees, newsList, { quota, latest }] = await Promise.all([
-        marketService.buildTargetSnapshot(watch.target),
+        marketService.buildTargetSnapshot(subject.target),
         feesOf(req.auth.userId),
-        newsOf(watch.target),
-        quotaOf(req, watch._id),
+        newsOf(subject.target),
+        quotaOf(req, subject),
       ])
       const item = snapshot.items[0] || null
       res.json({
@@ -161,7 +189,9 @@ function createMarketAnalysisRouter({
           notes: snapshot.notes,
           events: snapshot.events || null,
           news: newsList,
-          holding: holdingOf(watch, item, fees),
+          holding: subject.watch ? holdingOf(subject.watch, item, fees) : null,
+          // 有沒有在追蹤（沒追蹤的前端可以顯示「加入追蹤」）
+          watchId: subject.watch ? String(subject.watch._id) : null,
           quota,
           // 這檔最近一次的 AI 分析（重新打開彈窗先顯示，不必再付費）
           latest: latest ? { ...latest.toSummaryJSON(), text: latest.text } : null,
@@ -174,7 +204,7 @@ function createMarketAnalysisRouter({
 
   // ---- AI 深度分析（會計費）----
 
-  router.post('/watchlist/:id/analysis/ai', requireStockAccess, requireAiAccess, async (req, res, next) => {
+  router.post(['/watchlist/:id/analysis/ai', '/stock/:code/analysis/ai'], requireStockAccess, requireAiAccess, async (req, res, next) => {
     const userId = req.auth.userId
     let lockKey = null
     let locked = false
@@ -184,8 +214,8 @@ function createMarketAnalysisRouter({
         return
       }
       if (!ensureDatabase(res)) return
-      const watch = await findWatch(req, res)
-      if (!watch) return
+      const subject = await subjectOf(req, res)
+      if (!subject) return
 
       if (running.has(userId)) {
         res.status(409).json({ message: '上一個 AI 分析還在進行，請等它完成。' })
@@ -199,7 +229,7 @@ function createMarketAnalysisRouter({
       res.on('close', () => {
         if (!res.writableFinished) controller.abort()
       })
-      const { quota } = await quotaOf(req, watch._id)
+      const { quota } = await quotaOf(req, subject)
       if (quota.retryAt) {
         res.status(429).json({ message: '這檔股票剛分析過，請稍後再試。', retryAt: quota.retryAt })
         return
@@ -209,14 +239,14 @@ function createMarketAnalysisRouter({
         return
       }
 
-      lockKey = `${userId}:${watch._id}`
+      lockKey = `${userId}:${subject.key}`
       startedAt.set(lockKey, now())
 
       // 不信任前端的數字：重新查一次（有 10 分鐘快取）
       const [snapshot, fees, newsList] = await Promise.all([
-        marketService.buildTargetSnapshot(watch.target),
+        marketService.buildTargetSnapshot(subject.target),
         feesOf(userId),
-        newsOf(watch.target),
+        newsOf(subject.target),
       ])
       const item = snapshot.items[0] || null
       if (!item) {
@@ -224,7 +254,7 @@ function createMarketAnalysisRouter({
         res.status(502).json({ message: '這檔的行情暫時取不到，無法分析，稍後再試。' })
         return
       }
-      const holding = holdingOf(watch, item, fees)
+      const holding = subject.watch ? holdingOf(subject.watch, item, fees) : null
       // 還沒呼叫 AI 就斷線：不計費，也不算冷卻
       if (controller.signal.aborted) {
         startedAt.delete(lockKey)
@@ -254,8 +284,8 @@ function createMarketAnalysisRouter({
         try {
           const record = await MarketAnalysis.create({
             user: userId,
-            watch: watch._id,
-            target: watch.target,
+            watch: subject.watch?._id ?? null,
+            target: subject.target,
             quote: { price: item.quote.price, change: item.quote.change, changePct: item.quote.changePct, date: item.quote.date },
             text,
             model: model || '',

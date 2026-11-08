@@ -639,10 +639,16 @@ function fakeGroupModel() {
   }
 }
 
-test('自選清單：新增、重複名稱與上限、改名、排序；刪除清單時股票移到未分類；股票可以換清單與排序', async () => {
+test('自選清單：新增、重複名稱與上限、改名、排序；一檔可以放進多個清單；刪除清單只從各檔拿掉；舊格式 group 照樣讀得到', async () => {
   const MarketWatch = fakeWatchModel()
   MarketWatch.updateMany = async (query, update) => {
-    for (const d of MarketWatch.docs) if (d.user === query.user && String(d.group) === String(query.group)) Object.assign(d, update.$set)
+    for (const d of MarketWatch.docs) {
+      if (d.user !== query.user) continue
+      if ('groups' in query && (d.groups || []).map(String).includes(String(query.groups)) && update.$pull) {
+        d.groups = d.groups.filter((id) => String(id) !== String(update.$pull.groups))
+      }
+      if ('group' in query && String(d.group) === String(query.group) && update.$set) Object.assign(d, update.$set)
+    }
   }
   MarketWatch.updateOne = async (query, update) => {
     const d = MarketWatch.docs.find((x) => x._id === query._id && x.user === query.user)
@@ -682,15 +688,46 @@ test('自選清單：新增、重複名稱與上限、改名、排序；刪除�
     // 新增股票到清單；別人的或不存在的清單擋下
     const nvda = (await (await send2(base, '/api/market/watchlist', 'POST', { market: 'us', query: 'NVDA', group: longTerm.id })).json()).item
     assert.equal(nvda.group, longTerm.id)
+    assert.deepEqual(nvda.groups, [longTerm.id])
     assert.equal((await send2(base, '/api/market/watchlist', 'POST', { market: 'us', query: 'AAPL', group: 'bbbbbbbbbbbbbbbbbbbbbbbb' })).status, 400)
     const aapl = (await (await send2(base, '/api/market/watchlist', 'POST', { market: 'us', query: 'AAPL' })).json()).item
     assert.equal(aapl.group, null)
+    assert.deepEqual(aapl.groups, [])
+
+    // 已經在追蹤的從新增表單再加一次、選另一個清單：把清單加上去，持股不動（不記第二次買進）
+    const again = await send2(base, '/api/market/watchlist', 'POST', {
+      market: 'us',
+      query: 'NVDA',
+      group: shortTerm.id,
+      trades: [{ side: 'buy', quantity: 1, price: 100 }],
+    })
+    assert.equal(again.status, 200)
+    const againBody = await again.json()
+    assert.equal(againBody.existing, true)
+    assert.equal(againBody.tradesIgnored, true)
+    assert.deepEqual(againBody.item.groups, [longTerm.id, shortTerm.id])
+    assert.equal(MarketWatch.docs[0].trades.length, 0)
+    assert.equal(MarketWatch.docs.length, 2)
+    // 已經在選的清單裡、或沒選清單：照舊 409，並說在哪些清單
+    const dup = await send2(base, '/api/market/watchlist', 'POST', { market: 'us', query: 'NVDA', group: shortTerm.id })
+    assert.equal(dup.status, 409)
+    assert.match((await dup.json()).message, /已經在「長期存股」、「短線」清單裡/)
+    assert.equal((await send2(base, '/api/market/watchlist', 'POST', { market: 'us', query: 'NVDA' })).status, 409)
+    // 還原成只在長期存股，後面的步驟照原本的假設
+    assert.equal((await send2(base, `/api/market/watchlist/${MarketWatch.docs[0]._id}`, 'PATCH', { groups: [longTerm.id] })).status, 200)
     assert.ok(aapl.order > nvda.order)
 
-    // 換清單
+    // 舊版前端換清單（送單一 group）：寫成 groups，舊欄位清成 null
     const moved = await send2(base, `/api/market/watchlist/${MarketWatch.docs[1]._id}`, 'PATCH', { group: shortTerm.id })
     assert.equal(moved.status, 200)
-    assert.equal(String(MarketWatch.docs[1].group), shortTerm.id)
+    assert.deepEqual(MarketWatch.docs[1].groups.map(String), [shortTerm.id])
+    assert.equal(MarketWatch.docs[1].group, null)
+
+    // 一檔放進兩個清單；重複的 id 去掉；有一個不是自己的清單就整個擋下；空陣列＝未分類
+    const both = await send2(base, `/api/market/watchlist/${MarketWatch.docs[0]._id}`, 'PATCH', { groups: [longTerm.id, shortTerm.id, longTerm.id] })
+    assert.deepEqual((await both.json()).item.groups, [longTerm.id, shortTerm.id])
+    assert.equal((await send2(base, `/api/market/watchlist/${MarketWatch.docs[0]._id}`, 'PATCH', { groups: [longTerm.id, 'bbbbbbbbbbbbbbbbbbbbbbbb'] })).status, 400)
+    assert.equal((await send2(base, `/api/market/watchlist/${MarketWatch.docs[0]._id}`, 'PATCH', { groups: 'nope' })).status, 400)
 
     // 改名與排序
     assert.equal((await (await send2(base, `/api/market/groups/${shortTerm.id}`, 'PATCH', { name: '短線觀察' })).json()).group.name, '短線觀察')
@@ -706,12 +743,18 @@ test('自選清單：新增、重複名稱與上限、改名、排序；刪除�
     assert.equal(MarketWatch.docs[0].order, 2)
     assert.equal((await send2(base, '/api/market/watchlist/order', 'PUT', { ids: ['nope'] })).status, 400)
 
-    // 刪掉清單：股票移到未分類
+    // 刪掉清單：只從各檔拿掉，NVDA 還留在短線觀察；只在被刪清單的舊格式資料變成未分類
+    MarketWatch.docs.push({ _id: 'cccccccccccccccccccccccc', user: 'u1', key: 'TSM', target: { symbol: 'TSM', market: 'us', kind: 'stock', name: 'TSM' }, trades: [], group: longTerm.id, order: 9 })
     const afterDelete = await (await send2(base, `/api/market/groups/${longTerm.id}`, 'DELETE')).json()
     assert.deepEqual(afterDelete.groups.map((g) => g.name), ['短線觀察'])
-    assert.equal(MarketWatch.docs[0].group, null)
+    assert.deepEqual(MarketWatch.docs[0].groups.map(String), [shortTerm.id])
+    assert.equal(MarketWatch.docs[2].group, null)
 
     const list = await (await fetch(`${base}/api/market/watchlist`)).json()
     assert.deepEqual(list.groups.map((g) => g.name), ['短線觀察'])
+    // 舊格式（只有 group、沒有 groups）讀出來也是陣列
+    MarketWatch.docs[2].group = shortTerm.id
+    const legacy = (await (await fetch(`${base}/api/market/watchlist`)).json()).items.find((item) => item.target.symbol === 'TSM')
+    assert.deepEqual(legacy.groups, [shortTerm.id])
   })
 })

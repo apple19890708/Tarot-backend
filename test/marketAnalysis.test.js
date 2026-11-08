@@ -52,7 +52,9 @@ function fakeAnalysisModel() {
     Object.entries(filter).every(([key, value]) => {
       if (key === 'createdAt') return doc.createdAt >= value.$gte
       if (key === '_id' && value?.$in) return value.$in.some((id) => String(id) === String(doc._id))
-      return String(doc[key]) === String(value)
+      // 'target.code' 這種巢狀欄位
+      const actual = key.split('.').reduce((v, k) => (v == null ? v : v[k]), doc)
+      return String(actual) === String(value)
     })
   const sorted = (list) => [...list].sort((a, b) => b.createdAt - a.createdAt || String(b._id).localeCompare(String(a._id)))
   return {
@@ -115,9 +117,19 @@ function makeApp({ watches, MarketAnalysisModel = fakeAnalysisModel(), role = 'm
       requireStockAccess: auth,
       requireAiAccess: (req, res, next) => (aiAllowed ? auth(req, res, next) : res.status(403).json({ message: 'AI 解讀需要管理者開通，請聯絡管理者。' })),
       ensureDatabase: () => true,
-      marketService: { buildTargetSnapshot: async () => SNAPSHOT },
+      marketService: {
+        buildTargetSnapshot: async () => SNAPSHOT,
+        // 任何台股的分析（v19）：只認得 2330 與 2317
+        resolveTarget: async (code) =>
+          ({ 2330: TARGET, 2317: { symbol: '2317.TW', code: '2317', exchange: 'tse', market: 'tw', kind: 'stock', name: '鴻海' } })[code] || null,
+      },
       MarketWatch: {
-        findOne: async (filter) => watches.find((w) => String(w._id) === String(filter._id) && w.user === filter.user) || null,
+        findOne: async (filter) =>
+          watches.find((w) =>
+            filter._id !== undefined
+              ? String(w._id) === String(filter._id) && w.user === filter.user
+              : w.user === filter.user && w.target.market === filter['target.market'] && w.target.code === filter['target.code'],
+          ) || null,
       },
       MarketAnalysis: MarketAnalysisModel,
       ai: {
@@ -295,4 +307,32 @@ test('AI 分析的提示：附上行情、持股、事件與重大訊息，並�
 test('每日次數以台北時間的一天計算', () => {
   // 台北 11/05 07:00 = UTC 11/04 23:00
   assert.equal(startOfTaipeiDay(Date.parse('2026-11-04T23:00:00Z')).toISOString(), '2026-11-04T16:00:00.000Z')
+})
+
+test('任何台股的個股分析：沒追蹤的沒有持股、watchId 是 null；有追蹤的自動用追蹤項目；查不到的 404', async () => {
+  const watch = makeWatch(USER, { trades: [{ side: 'buy', quantity: 2, price: 900, date: '2026-10-01' }] })
+  const { app, MarketAnalysisModel } = makeApp({ watches: [watch] })
+  await withServer(app, async (base) => {
+    // 2317 沒追蹤
+    const plain = (await (await fetch(`${base}/api/market/stock/2317/analysis`)).json()).analysis
+    assert.equal(plain.holding, null)
+    assert.equal(plain.watchId, null)
+    // 2330 有追蹤：看得到持股
+    const tracked = (await (await fetch(`${base}/api/market/stock/2330/analysis`)).json()).analysis
+    assert.equal(tracked.holding.quantity, 2)
+    assert.equal(tracked.watchId, String(watch._id))
+    assert.equal((await fetch(`${base}/api/market/stock/9999/analysis`)).status, 404)
+    assert.equal((await fetch(`${base}/api/market/stock/abc/analysis`)).status, 404)
+
+    // 沒追蹤的 AI 分析：存的紀錄 watch 是 null、target 是那檔；冷卻照代號算
+    const ai = await fetch(`${base}/api/market/stock/2317/analysis/ai`, { method: 'POST' })
+    assert.equal(ai.status, 200)
+    await readEvents(ai)
+    assert.equal(MarketAnalysisModel.docs.length, 1)
+    assert.equal(MarketAnalysisModel.docs[0].watch, null)
+    assert.equal(MarketAnalysisModel.docs[0].target.code, '2317')
+    assert.equal((await fetch(`${base}/api/market/stock/2317/analysis/ai`, { method: 'POST' })).status, 429)
+    const again = (await (await fetch(`${base}/api/market/stock/2317/analysis`)).json()).analysis
+    assert.equal(again.latest.text, '## 現況\n偏多。')
+  })
 })

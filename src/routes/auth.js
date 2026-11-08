@@ -306,9 +306,23 @@ function createAuthRouter({
       }
 
       user.passwordHash = await hashPassword(password)
+      // 改了密碼，之前所有裝置上的登入一起失效（帳號可能是被盜才來重設的）
+      user.tokenVersion = (Number.isInteger(user.tokenVersion) ? user.tokenVersion : 0) + 1
       await user.save()
       // 用過就作廢，同帳號其他還沒用的也一起刪
       await PasswordResets.deleteMany({ user: user._id })
+      res.json({ ok: true })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // 登出所有裝置：帳號的憑證版本號加 1，所有已發出的 token（含這一個）立刻失效。
+  // 懷疑帳號被盜、或在別人的電腦登入忘了登出時用
+  router.post('/logout-all', requireAuth, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) return
+      await Users.updateOne({ _id: req.auth.userId }, { $inc: { tokenVersion: 1 } })
       res.json({ ok: true })
     } catch (error) {
       next(error)

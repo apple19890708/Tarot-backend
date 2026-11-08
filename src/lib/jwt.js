@@ -14,11 +14,12 @@ function getSecret(override) {
   return secret
 }
 
-// payload 只放最小集合：使用者 id 與角色
+// payload 只放最小集合：使用者 id、角色、憑證版本號（帳號的 tokenVersion 加 1 時這個 token 就失效）
 function signToken(user, options = {}) {
   const payload = {
     sub: String(user.id || user._id),
     role: user.role,
+    ver: Number.isInteger(user.tokenVersion) ? user.tokenVersion : 0,
   }
   return jwt.sign(payload, getSecret(options.secret), {
     expiresIn: options.expiresIn || DEFAULT_TTL,

@@ -1,7 +1,7 @@
 const mongoose = require('mongoose')
 
-// 自選清單（例如「長期存股」「短線觀察」）。一檔股票只屬於一個清單（MarketWatch.group），
-// 沒有清單的是「未分類」。持股總覽與資產走勢不分清單
+// 自選清單（例如「長期存股」「短線觀察」）。一檔股票可以同時放在好幾個清單（MarketWatch.groups），
+// 一個都沒有的是「未分類」。持股總覽與資產走勢不分清單
 const MAX_GROUPS_PER_USER = 10
 
 const marketWatchGroupSchema = new mongoose.Schema(

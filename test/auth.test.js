@@ -283,3 +283,79 @@ test('金融股市權限：admin 一律可用，member 要開通，和 AI 權限
     assert.strictEqual((await get('ai-id')).status, 403)
   })
 })
+
+test('登入憑證版本號：帳號的 tokenVersion 加 1 後舊 token 回 401；沒有 ver 的舊 token 對沒有版本號的帳號照樣有效', async () => {
+  const users = new Map([
+    ['u1', { role: 'member', tokenVersion: 1 }],
+    ['legacy', { role: 'member' }],
+  ])
+  const { requireAuth, optionalAuth, requireAdmin } = createAuthMiddleware({
+    findUserById: async (id) => users.get(id) || null,
+    secret: SECRET,
+  })
+  const app = express()
+  app.get('/private', requireAuth, (req, res) => res.json({ userId: req.auth.userId }))
+  app.get('/optional', optionalAuth, (req, res) => res.json({ auth: req.auth }))
+  app.get('/admin', requireAdmin, (_req, res) => res.json({ ok: true }))
+
+  const current = signToken({ _id: 'u1', role: 'member', tokenVersion: 1 }, { secret: SECRET })
+  const stale = signToken({ _id: 'u1', role: 'member', tokenVersion: 0 }, { secret: SECRET })
+  // 上線前發的 token 沒有 ver
+  const jwt = require('jsonwebtoken')
+  const legacy = jwt.sign({ sub: 'legacy', role: 'member' }, SECRET, { expiresIn: '7d' })
+  const gone = signToken({ _id: 'deleted', role: 'member' }, { secret: SECRET })
+
+  await withServer(app, async (base) => {
+    const get = (path, token) => fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+    assert.strictEqual((await get('/private', current)).status, 200)
+    assert.strictEqual((await get('/private', stale)).status, 401)
+    assert.strictEqual((await get('/private', legacy)).status, 200)
+    assert.strictEqual((await get('/private', gone)).status, 401)
+    // 被登出的 token 在選填登入的端點當成訪客，在權限端點是 401（請先登入）而不是 403
+    assert.deepStrictEqual(await (await get('/optional', stale)).json(), { auth: null })
+    assert.strictEqual((await get('/admin', stale)).status, 401)
+  })
+})
+
+test('登入憑證版本號：資料庫查詢失敗時，選填登入當成訪客、必須登入的回 500', async () => {
+  const { requireAuth, optionalAuth } = createAuthMiddleware({
+    findUserById: () => {
+      throw new Error('資料庫尚未連線。')
+    },
+    secret: SECRET,
+  })
+  const app = express()
+  app.get('/private', requireAuth, (_req, res) => res.json({ ok: true }))
+  app.get('/optional', optionalAuth, (req, res) => res.json({ auth: req.auth }))
+  app.use((_error, _req, res, _next) => res.status(500).json({ message: 'error' }))
+  const token = signToken({ _id: 'u1', role: 'member' }, { secret: SECRET })
+  await withServer(app, async (base) => {
+    const get = (path) => fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+    assert.strictEqual((await get('/private')).status, 500)
+    assert.deepStrictEqual(await (await get('/optional')).json(), { auth: null })
+  })
+})
+
+test('POST /logout-all：帳號的版本號加 1，之後同一個 token 回 401', async () => {
+  const user = { _id: 'u1', role: 'member', tokenVersion: 0 }
+  const Users = {
+    updateOne: async (filter, update) => {
+      if (filter._id === 'u1') user.tokenVersion += update.$inc.tokenVersion
+    },
+  }
+  const { requireAuth } = createAuthMiddleware({ findUserById: async (id) => (id === 'u1' ? user : null), secret: SECRET })
+  const app = express()
+  app.use(express.json())
+  app.use('/api/auth', createAuthRouter({ ensureDatabase: () => true, requireAuth, Users }))
+  app.get('/private', requireAuth, (_req, res) => res.json({ ok: true }))
+  const token = signToken(user, { secret: SECRET })
+  await withServer(app, async (base) => {
+    const auth = { Authorization: `Bearer ${token}` }
+    assert.strictEqual((await fetch(`${base}/private`, { headers: auth })).status, 200)
+    assert.strictEqual((await fetch(`${base}/api/auth/logout-all`, { method: 'POST', headers: auth })).status, 200)
+    assert.strictEqual(user.tokenVersion, 1)
+    assert.strictEqual((await fetch(`${base}/private`, { headers: auth })).status, 401)
+    // 已經失效的 token 不能再呼叫一次
+    assert.strictEqual((await fetch(`${base}/api/auth/logout-all`, { method: 'POST', headers: auth })).status, 401)
+  })
+})

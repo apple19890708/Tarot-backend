@@ -1,6 +1,6 @@
 const mongoose = require('mongoose')
 
-// 股市追蹤的個人設定：推播通知（Discord Webhook）、交易成本設定。一個使用者一筆，沒有就用預設值
+// 股市追蹤的個人設定：推播通知（Discord Webhook）、交易成本設定、股市總覽的版面。一個使用者一筆，沒有就用預設值
 const marketProfileSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
@@ -16,6 +16,9 @@ const marketProfileSchema = new mongoose.Schema(
       twMinFee: { type: Number, default: 20, min: 0, max: 1000 },
       usFee: { type: Number, default: 0, min: 0, max: 100 },
     },
+    // 股市總覽的版面（v19）：{ version, blocks: [{ type, visible, options }] }，由 services/market/dashboard.js 驗證；
+    // null＝沒自訂過，前端用預設版面
+    dashboard: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true },
 )

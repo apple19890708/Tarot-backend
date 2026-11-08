@@ -28,6 +28,8 @@ const userSchema = new mongoose.Schema(
     aiAccess: { type: Boolean, default: false },
     // 金融股市（股市諮詢、股市追蹤）也要由管理者逐一開通，和 AI 權限分開；admin 一律放行
     stockAccess: { type: Boolean, default: false },
+    // 登入憑證的版本號：重設密碼、登出所有裝置時加 1，之前發出的 token 全部失效（見 middleware/auth.js）
+    tokenVersion: { type: Number, default: 0 },
   },
   {
     timestamps: true,

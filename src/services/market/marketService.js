@@ -33,6 +33,7 @@ const corporateEvents = require('./corporateEvents')
 const taifex = require('./taifex')
 const macro = require('./macro')
 const tpexIndex = require('./tpexIndex')
+const dailyPicks = require('./dailyPicks')
 const screener = require('./screener')
 // 大盤概況與選股用的全市場收盤資料、類股指數：一天只變一次，快取 30 分鐘
 const DAILY_TTL = 30 * 60 * 1000
@@ -429,6 +430,8 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
         low: round(realtime?.low ?? last?.low ?? null),
         time: realtime?.time || history?.time || null,
         date: last?.date || realtime?.date || null,
+        // 最新一根的成交量（股；台股畫面上換成張）。股市總覽的表格檢視用
+        volume: Number.isFinite(last?.volume) ? last.volume : null,
       },
       // 少於 20 根 K 棒的指標沒有意義（例如櫃買指數只有即時報價）
       indicators,
@@ -676,7 +679,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return [...local, ...remote.filter((t) => !seen.has(t.symbol))].slice(0, SEARCH_LIMIT)
   }
 
-  // 全市場最新一日收盤（上市 STOCK_DAY_ALL、上櫃收盤行情）：Map<代號, { code, name, exchange, close, change, changePct, volume（張）, date }>
+  // 全市場最新一日收盤（上市 STOCK_DAY_ALL、上櫃收盤行情）：Map<代號, { code, name, exchange, open, high, low, close, change, changePct, volume（張）, date }>
   async function loadDailyQuotes() {
     const cached = cache.get('daily-quotes')
     if (cached) return cached
@@ -702,12 +705,12 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     }
     if (twse.status === 'fulfilled') {
       for (const r of twse.value || []) {
-        add({ code: r.Code, name: (r.Name || '').trim(), exchange: 'tse', close: toNumber(r.ClosingPrice), change: toNumber(r.Change), volume: toNumber(r.TradeVolume) === null ? null : Math.round(toNumber(r.TradeVolume) / 1000), date: corporateEvents.rocDate(r.Date) })
+        add({ code: r.Code, name: (r.Name || '').trim(), exchange: 'tse', open: toNumber(r.OpeningPrice), high: toNumber(r.HighestPrice), low: toNumber(r.LowestPrice), close: toNumber(r.ClosingPrice), change: toNumber(r.Change), volume: toNumber(r.TradeVolume) === null ? null : Math.round(toNumber(r.TradeVolume) / 1000), date: corporateEvents.rocDate(r.Date) })
       }
     } else console.error('上市收盤資料失敗：', twse.reason?.message)
     if (tpex.status === 'fulfilled') {
       for (const r of tpex.value || []) {
-        add({ code: r.SecuritiesCompanyCode, name: (r.CompanyName || '').trim(), exchange: 'otc', close: toNumber(r.Close), change: toNumber(String(r.Change || '').trim()), volume: toNumber(r.TradingShares) === null ? null : Math.round(toNumber(r.TradingShares) / 1000), date: corporateEvents.rocDate(r.Date) })
+        add({ code: r.SecuritiesCompanyCode, name: (r.CompanyName || '').trim(), exchange: 'otc', open: toNumber(r.Open), high: toNumber(r.High), low: toNumber(r.Low), close: toNumber(r.Close), change: toNumber(String(r.Change || '').trim()), volume: toNumber(r.TradingShares) === null ? null : Math.round(toNumber(r.TradingShares) / 1000), date: corporateEvents.rocDate(r.Date) })
       }
     } else console.error('上櫃收盤資料失敗：', tpex.reason?.message)
     if (map.size === 0) throw new Error('全市場收盤資料暫時取不到')
@@ -820,9 +823,11 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     return tpexIndex.buildChart(bars, realtime, useRange, today)
   }
 
-  async function getIndexChart(symbol, range) {
+  // options.name：不在大盤概況清單裡、但路由已確認是使用者自己追蹤的個股（股市總覽的重點卡，v19）時傳名稱進來
+  async function getIndexChart(symbol, range, options = {}) {
     if (symbol === tpexIndex.CHART_SYMBOL && INDEX_CHART_RANGES[range]) return getTpexIndexChart(range)
-    if (!INDEX_CHART_SYMBOLS.has(symbol) || !INDEX_CHART_RANGES[range]) return null
+    const name = INDEX_CHART_SYMBOLS.get(symbol) ?? options.name
+    if (!name || !INDEX_CHART_RANGES[range]) return null
     // 線圖用指定範圍；今天的開盤、最高、最低、上次收盤價一律看 1 天的資料
     const [chart, today] = await Promise.all([loadYahooChart(symbol, range), range === '1d' ? null : loadYahooChart(symbol, '1d')])
     const day = today || chart
@@ -835,7 +840,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     const pct = (from, to) => (from ? round(((to - from) / from) * 100) : null)
     return {
       symbol,
-      name: INDEX_CHART_SYMBOLS.get(symbol),
+      name,
       range,
       currency: meta.currency || null,
       timezone: meta.exchangeTimezoneName || null,
@@ -1067,6 +1072,50 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     }
   }
 
+  // 當日推薦個股（v19）：所有人共用一份，跟著全市場收盤資料（快取到資料更新）；資料不完整時 5 分鐘後再試
+  // type：推薦類型（dailyPicks.PRESETS 的 key：growth、dividend、revenue、value、hot），不認得的用預設
+  async function getDailyPicks(type = dailyPicks.DEFAULT_PICK_TYPE) {
+    const pickType = dailyPicks.PICK_TYPES.includes(type) ? type : dailyPicks.DEFAULT_PICK_TYPE
+    const key = `daily-picks:${pickType}`
+    const cached = cache.get(key)
+    if (cached) return cached
+    return once(key, async () => {
+      const preset = dailyPicks.PRESETS[pickType]
+      const universe = await loadScreenUniverse()
+      // 要看 20 日均線的類型才逐檔抓 K 線（並行、有快取）；其他直接取前幾檔
+      const candidates = dailyPicks.baseCandidates(universe.rows, pickType).slice(0, preset.needsMa20 ? dailyPicks.TECH_CANDIDATES : dailyPicks.PICK_LIMIT)
+      const signals = preset.needsMa20
+        ? (
+            await settleLimited(candidates, WATCH_CONCURRENCY, (row) => screenSignals(`${row.code}.${row.exchange === 'otc' ? 'TWO' : 'TW'}`))
+          ).map((r) => (r.status === 'fulfilled' ? r.value : null))
+        : []
+      const result = {
+        asOf: new Date(now()).toISOString(),
+        quoteDate: universe.quoteDate,
+        type: pickType,
+        label: preset.label,
+        // 規則寫給人看（畫面顯示），和 dailyPicks.js 一致
+        rule: `上市櫃一般股票；${preset.rule}，取前 ${dailyPicks.PICK_LIMIT} 檔`,
+        items: dailyPicks.selectPicks(candidates, signals, universe.chipDays, pickType),
+        // 可以選的類型（前端的切換按鈕）
+        types: dailyPicks.PICK_TYPES.map((t) => ({ type: t, label: dailyPicks.PRESETS[t].label })),
+        notes: universe.notes,
+      }
+      cache.set(key, result, universe.notes.length ? 5 * 60 * 1000 : DAILY_TTL)
+      return result
+    })
+  }
+
+  // 任何一檔台股的卡片資料（股市總覽的推薦／熱門卡片，v19）：報價摘要＋日 K 與判讀。不是台股一般股票、或查不到回 null
+  async function getStockCard(code) {
+    if (typeof code !== 'string' || !/^\d{4,6}[A-Z]?$/.test(code)) return null
+    const target = await resolveTarget(code, 'tw')
+    if (!target || target.code !== code) return null
+    const [summaries, detail] = await Promise.all([getWatchSummaries([target]).catch(() => [null]), getWatchDetail(target)])
+    if (!detail) return null
+    return { target, summary: summaries[0] ?? null, chart: detail.chart, analysis: detail.analysis }
+  }
+
   // 台股除權息預告與月營收（上市＋上櫃，整個市場一份）。各來源失敗只少一塊；全部失敗回傳 null
   async function loadCorporateEvents() {
     const cached = cache.get('corporate-events')
@@ -1224,6 +1273,8 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     getAlertSignals,
     getMarketOverview,
     getIndexChart,
+    getDailyPicks,
+    getStockCard,
     getFuturesNightChart,
     loadDailyQuotes,
     screenStocks,

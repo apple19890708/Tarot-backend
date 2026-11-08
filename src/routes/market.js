@@ -9,6 +9,7 @@ const { recordCalls, summarizeCalls } = require('../services/market/tracking')
 const { evaluateAlerts, describeAlert, checkCondition } = require('../services/market/alertChecker')
 const { nextRevenueDeadline } = require('../services/market/corporateEvents')
 const { parseFilters } = require('../services/market/screener')
+const { parseDashboard } = require('../services/market/dashboard')
 const { taipeiNow } = require('../services/market/snapshots')
 const { computePosition, validateSequence, normalizeFees, tradesOf, DEFAULT_FEES } = require('../services/market/portfolio')
 
@@ -214,6 +215,12 @@ function createSearchLimiter(max = SEARCH_MAX_PER_WINDOW, message = '搜尋太�
 }
 
 // position：依買賣紀錄、股利、交易成本與目前報價算出的損益（沒有任何紀錄時為 null）
+// 這一檔所在的清單 id：新格式看 groups；舊資料只有 group（一檔一個清單）時當成唯一一個
+function watchGroupIds(watch) {
+  if (Array.isArray(watch.groups) && watch.groups.length) return watch.groups.map(String)
+  return watch.group ? [String(watch.group)] : []
+}
+
 function watchJSON(watch, summary = null, fees = DEFAULT_FEES) {
   const trades = tradesOf(watch)
   const dividends = (watch.dividends || []).map((d) => ({ amount: d.amount, date: d.date || null }))
@@ -233,7 +240,9 @@ function watchJSON(watch, summary = null, fees = DEFAULT_FEES) {
     trades,
     dividends,
     position,
-    group: watch.group ? String(watch.group) : null,
+    groups: watchGroupIds(watch),
+    // 舊版前端只認單一清單：給第一個
+    group: watchGroupIds(watch)[0] ?? null,
     order: watch.order ?? 0,
     createdAt: watch.createdAt,
     summary,
@@ -267,13 +276,19 @@ function createMarketRouter({
     return groups.map((g) => ({ id: String(g._id), name: g.name, order: g.order ?? 0 }))
   }
 
-  // 清單 id：null／空字串＝未分類；不是自己的清單回傳 undefined（呼叫端回 400）
-  async function resolveGroup(userId, raw) {
-    if (raw === undefined || raw === null || raw === '') return null
-    if (!MarketWatchGroup || typeof raw !== 'string' || !mongoose.isValidObjectId(raw)) return undefined
-    const group = await MarketWatchGroup.findOne({ _id: raw, user: userId })
-    return group ? group._id : undefined
+  // 清單 id 陣列（去掉重複）；空陣列＝未分類。有任何一個不是自己的清單就回 undefined（呼叫端回 400）
+  async function resolveGroups(userId, raw) {
+    if (raw === undefined || raw === null) return []
+    if (!Array.isArray(raw) || raw.length > 50) return undefined
+    const ids = [...new Set(raw.filter((id) => id !== '' && id !== null))]
+    if (ids.length === 0) return []
+    if (!MarketWatchGroup || !ids.every((id) => typeof id === 'string' && mongoose.isValidObjectId(id))) return undefined
+    const owned = await MarketWatchGroup.find({ user: userId })
+    const byId = new Map(owned.map((g) => [String(g._id), g._id]))
+    return ids.every((id) => byId.has(id)) ? ids.map((id) => byId.get(id)) : undefined
   }
+  // 請求裡的清單：新版送 groups（陣列），舊版前端送 group（單一 id，null／空字串＝未分類）
+  const requestedGroups = (body) => ('groups' in body ? body.groups : body.group ? [body.group] : [])
 
   async function feesOf(userId) {
     if (!MarketProfile) return DEFAULT_FEES
@@ -508,6 +523,39 @@ function createMarketRouter({
     }
   })
 
+  // ---- 當日推薦個股（股市總覽的區塊，v19）：固定規則挑的，不是投資建議 ----
+
+  router.get('/daily-picks', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!marketService.getDailyPicks) {
+        res.status(503).json({ message: '當日推薦個股尚未啟用。' })
+        return
+      }
+      const type = typeof req.query.type === 'string' ? req.query.type : undefined
+      res.json({ picks: await marketService.getDailyPicks(type) })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // 任何一檔台股的卡片（推薦／熱門股票用）：報價摘要＋日 K
+  router.get('/stock/:code/card', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!marketService.getStockCard) {
+        res.status(503).json({ message: '股票卡片尚未啟用。' })
+        return
+      }
+      const card = await marketService.getStockCard(req.params.code)
+      if (!card) {
+        res.status(404).json({ message: '找不到這檔台股，或行情暫時取不到。' })
+        return
+      }
+      res.json({ card })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   // ---- 大盤概況 ----
 
   router.get('/overview', requireStockAccess, async (req, res, next) => {
@@ -531,9 +579,14 @@ function createMarketRouter({
       }
       const symbol = typeof req.query.symbol === 'string' ? req.query.symbol : ''
       const range = typeof req.query.range === 'string' ? req.query.range : '1d'
-      const chart = await marketService.getIndexChart(symbol, range)
+      let chart = await marketService.getIndexChart(symbol, range)
+      // 股市總覽的重點卡可以放自己追蹤的個股（v19）：只限自己追蹤清單裡的，不能拿來查任意代號
+      if (!chart && symbol && MarketWatch?.findOne) {
+        const watch = await MarketWatch.findOne({ user: req.auth.userId, 'target.symbol': symbol })
+        if (watch) chart = await marketService.getIndexChart(symbol, range, { name: watch.target.name || symbol })
+      }
       if (!chart) {
-        res.status(404).json({ message: '只能查大盤概況裡的指數與匯率。' })
+        res.status(404).json({ message: '只能查大盤概況裡的指數與匯率，或自己追蹤的股票。' })
         return
       }
       res.json({ chart })
@@ -580,7 +633,9 @@ function createMarketRouter({
   router.get('/settings', requireStockAccess, async (req, res, next) => {
     try {
       if (!ensureDatabase(res)) return
-      res.json({ fees: await feesOf(req.auth.userId) })
+      const profile = MarketProfile ? await MarketProfile.findOne({ user: req.auth.userId }) : null
+      // dashboard：股市總覽的版面（v19）；沒自訂過是 null
+      res.json({ fees: await feesOf(req.auth.userId), dashboard: profile?.dashboard ?? null })
     } catch (error) {
       next(error)
     }
@@ -604,6 +659,31 @@ function createMarketRouter({
         { upsert: true, new: true, setDefaultsOnInsert: true },
       )
       res.json({ fees })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // ---- 股市總覽的版面（v19）：整份替換；null＝恢復預設 ----
+
+  router.put('/dashboard', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) return
+      if (!MarketProfile) {
+        res.status(503).json({ message: '設定功能尚未啟用。' })
+        return
+      }
+      const { dashboard, error } = parseDashboard(req.body?.dashboard)
+      if (error) {
+        res.status(400).json({ message: error })
+        return
+      }
+      await MarketProfile.findOneAndUpdate(
+        { user: req.auth.userId },
+        { $set: { dashboard } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      )
+      res.json({ dashboard })
     } catch (error) {
       next(error)
     }
@@ -782,8 +862,33 @@ function createMarketRouter({
       }
       const key = targetKey(target)
 
-      if (await MarketWatch.findOne({ user: req.auth.userId, key })) {
-        res.status(409).json({ message: `${target.name} 已經在追蹤清單裡。` })
+      // 已經在追蹤：新增表單選了它還沒在的清單，就把清單加上去（一檔可以在好幾個清單）；
+      // 持股不動，免得同一筆買進記兩次（existing: true、tradesIgnored 讓前端說明）
+      const existing = await MarketWatch.findOne({ user: req.auth.userId, key })
+      if (existing) {
+        const wanted = await resolveGroups(req.auth.userId, requestedGroups(req.body))
+        if (wanted === undefined) {
+          res.status(400).json({ message: '找不到這個清單。' })
+          return
+        }
+        const current = watchGroupIds(existing)
+        const added = wanted.filter((id) => !current.includes(String(id)))
+        if (added.length === 0) {
+          const names = (await groupsOf(req.auth.userId)).filter((g) => current.includes(g.id)).map((g) => `「${g.name}」`)
+          const where = wanted.length && names.length ? `，而且已經在${names.join('、')}清單裡` : names.length ? `（在${names.join('、')}清單）` : ''
+          res.status(409).json({ message: `${target.name} 已經在追蹤清單裡${where}。` })
+          return
+        }
+        const watch = await MarketWatch.findOneAndUpdate(
+          { _id: existing._id, user: req.auth.userId },
+          { $set: { groups: [...current, ...added.map(String)], group: null } },
+          { new: true },
+        )
+        const [summaries, fees] = await Promise.all([
+          marketService.getWatchSummaries([watch.target]).catch(() => [null]),
+          feesOf(req.auth.userId),
+        ])
+        res.json({ item: watchJSON(watch, summaries[0] ?? null, fees), existing: true, tradesIgnored: trades.length > 0 })
         return
       }
       const count = await MarketWatch.countDocuments({ user: req.auth.userId })
@@ -794,13 +899,13 @@ function createMarketRouter({
 
       let watch
       try {
-        const group = await resolveGroup(req.auth.userId, req.body.group)
-        if (group === undefined) {
+        const groups = await resolveGroups(req.auth.userId, requestedGroups(req.body))
+        if (groups === undefined) {
           res.status(400).json({ message: '找不到這個清單。' })
           return
         }
         const last = await MarketWatch.findOne({ user: req.auth.userId }).sort({ order: -1 })
-        watch = await MarketWatch.create({ user: req.auth.userId, key, target, trades, group, order: (last?.order ?? 0) + 1 })
+        watch = await MarketWatch.create({ user: req.auth.userId, key, target, trades, groups, group: null, order: (last?.order ?? 0) + 1 })
       } catch (error) {
         // 同時送出兩次時由唯一索引擋下
         if (error?.code === 11000) {
@@ -854,19 +959,20 @@ function createMarketRouter({
       }
       const hasTrades = Boolean(req.body) && 'trades' in req.body
       const hasDividends = Boolean(req.body) && 'dividends' in req.body
-      const hasGroup = Boolean(req.body) && 'group' in req.body
+      const hasGroup = Boolean(req.body) && ('groups' in req.body || 'group' in req.body)
       if (!hasTrades && !hasDividends && !hasGroup) {
         res.status(400).json({ message: '沒有要更新的內容。' })
         return
       }
       const update = {}
       if (hasGroup) {
-        const group = await resolveGroup(req.auth.userId, req.body.group)
-        if (group === undefined) {
+        const groups = await resolveGroups(req.auth.userId, requestedGroups(req.body))
+        if (groups === undefined) {
           res.status(400).json({ message: '找不到這個清單。' })
           return
         }
-        update.group = group
+        // 舊格式的單一清單一併清掉，之後只看 groups
+        Object.assign(update, { groups, group: null })
       }
       if (hasTrades) {
         const { trades, error } = resolveTrades(req.body.trades, MarketWatch.MAX_TRADES_PER_WATCH)
@@ -1020,6 +1126,8 @@ function createMarketRouter({
         res.status(404).json({ message: '找不到這個清單。' })
         return
       }
+      // 只把這個清單從各檔拿掉；同時在別的清單的照樣留著，一個都不剩的就是未分類
+      await MarketWatch.updateMany({ user: req.auth.userId, groups: req.params.id }, { $pull: { groups: req.params.id } })
       await MarketWatch.updateMany({ user: req.auth.userId, group: req.params.id }, { $set: { group: null } })
       res.json({ groups: await groupsOf(req.auth.userId) })
     } catch (error) {

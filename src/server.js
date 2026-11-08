@@ -108,8 +108,12 @@ function ensureDatabase(res) {
 }
 
 const { optionalAuth, requireAuth, requireAdmin, requireAiAccess, requireStockAccess, hasStockAccess } = createAuthMiddleware({
-  // token 裡的 sub 不一定是合法的 ObjectId（偽造或舊資料），先擋掉避免 CastError
-  findUserById: (id) => (mongoose.isValidObjectId(id) ? User.findById(id) : null),
+  // token 裡的 sub 不一定是合法的 ObjectId（偽造或舊資料），先擋掉避免 CastError。
+  // 每個需要登入的請求都會查一次（比對憑證版本號）；資料庫沒連上時直接失敗，不要等 mongoose 緩衝 10 秒
+  findUserById: (id) => {
+    if (mongoose.connection.readyState !== 1) throw new Error('資料庫尚未連線。')
+    return mongoose.isValidObjectId(id) ? User.findById(id) : null
+  },
 })
 
 // 忘記密碼寄信（Gmail API）與 Google 登入；沒設定環境變數時兩者都回 503，不影響一般登入。

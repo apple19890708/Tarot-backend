@@ -157,6 +157,8 @@ test('重設密碼：有效連結可以設新密碼且只能用一次；過期�
     const done = await post('/reset-password', { token, password: 'brand-new-password' })
     assert.equal(done.status, 200)
     assert.equal(await comparePassword('brand-new-password', Users.rows[0].passwordHash), true)
+    // 改了密碼，之前發出的登入憑證全部失效（版本號加 1）
+    assert.equal(Users.rows[0].tokenVersion, 1)
     // 用過就失效
     assert.equal((await post('/reset-password', { token, password: 'another-password' })).status, 400)
     assert.deepEqual(await (await fetch(`${base}/reset-password/${token}`)).json(), { valid: false })
