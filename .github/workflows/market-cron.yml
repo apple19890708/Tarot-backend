@@ -32,6 +32,7 @@ jobs:
             echo "BACKEND_URL 或 CRON_SECRET 沒有設定，略過"
             exit 0
           fi
+          # --data ''：送出 Content-Length: 0。Cloud Run（Google 前端）拒絕沒有長度的 POST（411）
           curl -fsS -m 120 --retry 2 --retry-delay 20 \
-            -X POST -H "x-cron-secret: $CRON_SECRET" \
+            -X POST --data '' -H "x-cron-secret: $CRON_SECRET" \
             "$BACKEND_URL/api/cron/market"

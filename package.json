@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Tarot divination API server",
   "main": "src/server.js",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
