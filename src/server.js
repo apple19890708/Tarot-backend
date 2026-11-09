@@ -20,6 +20,7 @@ const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
 const { isNarrationAvailable, streamNarration, streamChat, NarrationRefusedError } = require('./services/narrationService')
 const { startNdjson } = require('./lib/ndjsonStream')
+const { jsonCompression } = require('./lib/jsonCompression')
 const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./services/market/marketService')
 const { recordCalls } = require('./services/market/tracking')
 const { createMarketRouter } = require('./routes/market')
@@ -87,9 +88,12 @@ app.use(
 // 這個 parser 先解析過，後面的全域 express.json() 就會略過
 app.post('/api/readings', express.json({ limit: '300kb' }))
 app.use(express.json())
+// JSON 回應 gzip（Cloud Run 不會替回應壓縮；傳出流量是唯一可能超過免費額度的項目）。串流與圖片不經過，見 lib/jsonCompression.js
+app.use(jsonCompression())
 
-// 牌卡圖片（公共領域 RWS 1909），放在 public/cards/
-app.use('/cards', express.static(path.join(__dirname, '..', 'public', 'cards')))
+// 牌卡圖片（公共領域 RWS 1909），放在 public/cards/。每張約 200KB、內容不會變：
+// 讓瀏覽器快取 7 天，期間不再回來問（原本 max-age=0 每次都要跨太平洋問一次 304）
+app.use('/cards', express.static(path.join(__dirname, '..', 'public', 'cards'), { maxAge: '7d' }))
 
 function isDatabaseReady() {
   return mongoose.connection.readyState === 1

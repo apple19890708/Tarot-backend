@@ -62,6 +62,7 @@
 - **權限**：AI 解讀（`/api/readings/narrate`）限 admin 與 `aiAccess` 被開通的會員；`/api/admin/*` 限管理者。新增需要身分的路由時用 `src/middleware/auth.js` 的三個中介層，不要自己解 token。
 - **密碼與 token**：`passwordHash` 絕不出現在任何回應；`JWT_SECRET` 沒設定時伺服器直接不啟動，不要給預設值。
 - **記憶體（線上只有 512MB～1GiB）**：不要直接 `new Intl.DateTimeFormat`，用 `src/lib/intlFormat.js` 的 `dateTimeFormat()`（每 new 一個約 27KB 原生記憶體，K 線每根都 new 曾讓高峰衝到 490MB、Cloud Run 把主機砍掉）；多個請求會同時要的全市場資料，快取要合併「下載中」的請求（`twseData.js` 的 `cached()`、`marketService` 的 `inFlight`），否則 N 檔股票就下載 N 次。新增大量資料處理時，用 `process.memoryUsage().rss` 量一次高峰。
+- **傳出流量（Cloud Run 北美免費 1 GB／月）**：JSON 回應一律用 `res.json()`，會經過 `src/lib/jsonCompression.js` 自動 gzip；不要自己 `res.send(JSON.stringify(...))` 繞過它。串流用 `startNdjson` + `res.write`（不壓縮、逐段送）。內容不會變的靜態檔（牌卡圖片）要設瀏覽器快取。
 - **AI 串流**：開始送資料時用 `src/lib/ndjsonStream.js` 的 `startNdjson(res)`（送標頭＋每 15 秒心跳，前端靠它判斷斷線）；呼叫 AI 走 `streamChat`（90 秒沒資料會主動中止）。伺服器或 AI 出錯的退還次數、不進冷卻，使用者自己停止的才算。
 - **向下相容**：保留既有回傳欄位（`overview`、`guidance`、`cards`），新增欄位用加的，不改名、不刪除。
 - **不信任前端資料**：需要分析或 AI 解讀時，由後端依牌 id 與正逆位重新計算，不直接使用前端傳來的分析文字。使用者輸入要驗證格式與長度。

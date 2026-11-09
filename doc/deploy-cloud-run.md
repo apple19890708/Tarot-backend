@@ -12,21 +12,21 @@
 | 項目 | 值 |
 | --- | --- |
 | GCP 專案 | `orangetarot`（帳號 apple19890708@gmail.com） |
-| 區域 | `asia-east1`（台灣彰化） |
+| 區域 | `us-west1`（美國奧勒岡）。2026-11-09 從 `asia-east1`（台灣）搬過去，原因與代價見第十節 |
 | Cloud Run 服務 | `tarot-backend` |
-| 網址 | `https://tarot-backend-755135442588.asia-east1.run.app`（另一個寫法 `https://tarot-backend-3knzbiyejq-de.a.run.app` 指向同一個服務） |
-| 自動部署 | Cloud Build 觸發條件 `cloudrun-tarot-backend-git-asia-east1-apple19890708-Tarot-badbg`：GitHub `apple19890708/Tarot-backend` 的 `main` 有新 commit 就建置並部署 |
-| 資源上限 | 最多 1 台、沒流量縮到 0、1 vCPU／512Mi、請求上限 900 秒、只在處理請求時計費 |
+| 網址 | `https://tarot-backend-755135442588.us-west1.run.app` |
+| 自動部署 | Cloud Build 觸發條件 `tarot-backend-us-west1`（id `f8ffa608-2349-4678-9c09-49f16464598e`，區域 us-west1，GitHub 連線 `Orange-us`）：GitHub `apple19890708/Tarot-backend` 的 `main` 有新 commit 就在 us-west1 建置、映像存 us-west1 的 `cloud-run-source-deploy`、部署到 us-west1，全程不跨區 |
+| 資源上限 | 最多 1 台、沒流量縮到 0、1 vCPU／1GiB、請求上限 900 秒、只在處理請求時計費 |
 | 環境變數 | 14 個，存在 Cloud Run 服務上；本機的來源檔是 `env.yaml`（不進版控） |
 | 資料庫 | MongoDB Atlas（白名單 `0.0.0.0/0`，因為 Cloud Run 對外 IP 不固定） |
-| 清理規則 | 映像檔保留最近 5 版、超過 30 天刪除；上傳原始碼的 bucket `run-sources-orangetarot-asia-east1` 30 天刪除 |
+| 清理規則 | 映像檔保留最近 3 版（每版約 170 MB，3 版約 0.5 GB 免費額度內）、超過 30 天刪除（us-west1 的 `cloud-run-source-deploy`）；手動 `--source` 部署用的 bucket `run-sources-orangetarot-us-west1` |
 | 誰會呼叫它 | 前端（GitHub Pages）、GitHub Actions 的 `market-cron`（每 10 分鐘，開盤時段） |
 
 常用網頁：
 
-- Cloud Run 服務：<https://console.cloud.google.com/run/detail/asia-east1/tarot-backend?project=orangetarot>
-- 記錄（logs）：<https://console.cloud.google.com/run/detail/asia-east1/tarot-backend/logs?project=orangetarot>
-- 建置紀錄：<https://console.cloud.google.com/cloud-build/builds;region=asia-east1?project=orangetarot>
+- Cloud Run 服務：<https://console.cloud.google.com/run/detail/us-west1/tarot-backend?project=orangetarot>
+- 記錄（logs）：<https://console.cloud.google.com/run/detail/us-west1/tarot-backend/logs?project=orangetarot>
+- 建置紀錄：<https://console.cloud.google.com/cloud-build/builds;region=us-west1?project=orangetarot>
 - 觸發條件：<https://console.cloud.google.com/cloud-build/triggers?project=orangetarot>
 - 帳單報表：<https://console.cloud.google.com/billing>
 
@@ -52,13 +52,19 @@
 
 ### 手動部署（自動部署壞掉、或想部署還沒 push 的程式時）
 
-在 Tbackend 根目錄：
+**部署 GitHub 上 `main` 的最新版**（最穩，和自動部署走同一條路）：
 
 ```powershell
-gcloud run deploy tarot-backend --source . --region asia-east1
+gcloud builds triggers run f8ffa608-2349-4678-9c09-49f16464598e --region us-west1 --branch main
 ```
 
-既有的環境變數與資源上限都會沿用，不用重打。注意這會部署**本機目前的檔案**（包含還沒 commit 的改動），之後 push 時自動部署會再蓋過去。
+**部署本機目前的檔案**（包含還沒 commit 的改動），在 Tbackend 根目錄：
+
+```powershell
+gcloud run deploy tarot-backend --source . --region us-west1
+```
+
+既有的環境變數與資源上限都會沿用，不用重打；之後 push 時自動部署會再蓋過去。（2026-11-09 第一次在 us-west1 用 `--source` 時出現過「Container import failed」，見第八節第 6 點；遇到就改用上面的觸發條件，或先 push。）
 
 > 若 PowerShell 找不到 `gcloud`：關掉終端機重開一個；還是不行就用完整路徑 `& "$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"`。
 
@@ -73,7 +79,7 @@ gcloud run deploy tarot-backend --source . --region asia-east1
 **指令（一次改很多時）**：改本機的 `env.yaml`，然後：
 
 ```powershell
-gcloud run services update tarot-backend --region asia-east1 --env-vars-file env.yaml
+gcloud run services update tarot-backend --region us-west1 --env-vars-file env.yaml
 ```
 
 注意：
@@ -145,6 +151,9 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
   - 最多 1 台：最壞情況（被一直打、全天都在忙）約 USD 60／月，不會無限增加。
   - 只在處理請求時計費：**不要**在服務設定開「CPU 一律分配」，也不要把「執行個體數量下限」設成大於 0（設成 1 就是整個月 24 小時計費）。
 - 每月免費額度（以官網為準）：200 萬次請求、18 萬 vCPU 秒、36 萬 GiB 秒；Cloud Build 也有免費建置時間。排程每月約 1,900 次加上自己使用，預估在額度內。
+- 傳出流量：免費的 1 GB／月只給**北美區域**。後端的 JSON 回應用 gzip 壓縮（`src/lib/jsonCompression.js`，約剩 20～30%），牌卡圖片讓瀏覽器快取 7 天，都是為了把流量壓在額度內。
+- 11/8（還在台灣時）一天被收了約 USD 0.0145。原本以為是傳出流量，但監控顯示台灣那段只傳出約 12 MB（約 USD 0.0015），大部分是別的項目；要看是哪一項，到帳單報表把「分組依據」改成 SKU。
+- Artifact Registry：只留 us-west1 的 `cloud-run-source-deploy`（自動部署建置、存放、部署都在 us-west1），超過 0.5 GB 才收費，已設清理政策。
 - 預算通知：帳單 → 預算與快訊，設 USD 1、到 50%／90%／100% 寄信（只通知、不會停機）。收到信就到帳單報表看是哪個服務。
 - 不要順手啟用其他服務（Cloud SQL、負載平衡器、固定對外 IP、Cloud Run 的「直接 VPC 輸出」等），那些才會真的收費。
 - 每月看一次帳單報表，確認還是 0 元。
@@ -162,7 +171,7 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
    ```powershell
    gcloud auth login
    gcloud config set project <專案ID>
-   gcloud config set run/region asia-east1
+   gcloud config set run/region us-west1
    ```
 
 4. **MongoDB Atlas**：Network Access 加 `0.0.0.0/0`。
@@ -178,15 +187,15 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 7. **第一次部署**：
 
    ```powershell
-   gcloud run deploy tarot-backend --source . --region asia-east1 --allow-unauthenticated --max-instances 1 --min-instances 0 --cpu 1 --memory 512Mi --timeout 900 --env-vars-file env.yaml
+   gcloud run deploy tarot-backend --source . --region us-west1 --allow-unauthenticated --max-instances 1 --min-instances 0 --cpu 1 --memory 1Gi --timeout 900 --env-vars-file env.yaml
    ```
 
    第一次會問要不要建立 Artifact Registry 儲存庫 `cloud-run-source-deploy`，回答 Y。
 
 8. **驗證**：`/api/health`、`/api/spreads`、`/api/cards` 有回 JSON；帶 `x-cron-secret` 的 `POST /api/cron/market` 回 200（curl 要加 `--data ''`，見第八節）。
 9. **清理規則**：
-   - Artifact Registry → `cloud-run-source-deploy` → 清理政策：「保留最近 5 個版本」＋「刪除超過 30 天的版本」。
-   - Cloud Storage → `run-sources-<專案ID>-asia-east1` → 生命週期：物件超過 30 天刪除。
+   - Artifact Registry → `cloud-run-source-deploy` → 清理政策：「保留最近 3 個版本」＋「刪除超過 30 天的版本」。
+   - Cloud Storage → `run-sources-<專案ID>-us-west1` → 生命週期：物件超過 30 天刪除。
 10. **自動部署**：Cloud Run → 點**既有的** `tarot-backend` 服務 → **連結存放區**（設定持續部署）→ GitHub 授權 → 選 `Tarot-backend`、分支 `^main$`、建構類型選 **Buildpacks**。
     - **不要**從 Cloud Run 列表頁按「建立服務 → 從存放區持續部署」，那會建出另一個空的服務（見第八節）。
     - 設好後到觸發條件確認替代變數 `_SERVICE_NAME` 是 `tarot-backend`。
@@ -204,6 +213,8 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 3. **設定自動部署時多建了一個服務 `tarot-backend-git`**：用「建立服務」的精靈接 GitHub，會新建一個沒有環境變數、沒有上限的空服務，觸發條件也指向它，部署時因為缺 `JWT_SECRET` 啟動失敗。修正：觸發條件的 `_SERVICE_NAME` 改成 `tarot-backend`，再刪掉多出來的服務。
 4. **剛連好 GitHub 的第一次建置出現 `fetchReadToken … denied`**：權限是精靈加的，但還沒生效。等幾分鐘重跑就好。
 5. **切換後可能被要求重新登入**：Render 與 Cloud Run 的 `JWT_SECRET` 若不同，舊的登入憑證會失效，重新登入即可。
+6. **us-west1 第一次部署出現「Container import failed」**：在 us-west1 剛建好儲存庫時，用 `--source` 打包的映像建立修訂版本失敗兩次，日誌沒有更多原因；當下改用 asia-east1 儲存庫的映像先上線。之後刪掉那個儲存庫重建、改用 us-west1 的觸發條件建置部署，一次就成功，判斷是剛建立儲存庫時的暫時性問題。再遇到就等幾分鐘重跑。
+7. **改觸發條件的替代變數**：`gcloud builds triggers update github ... --update-substitutions` 會回 `INVALID_ARGUMENT`（這個觸發條件是 Developer Connect 連的）。改法：`gcloud builds triggers describe <id> --region <區域> --format=yaml > trigger.yaml`，改頂層 `substitutions` 底下的值，再 `gcloud builds triggers import --region <區域> --source trigger.yaml`。也可以直接在主控台的觸發條件頁改。
 
 ---
 
@@ -217,3 +228,16 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 ### 停用 Render
 
 切換完成、穩定幾天後：Render 服務 → Settings → **Suspend Web Service**（設定保留、可以 Resume）。再用一兩週沒問題就 **Delete**。Render 留著不刪的話，它仍是一個連著同一個資料庫、帶著所有密鑰的完整後端，而且每次 push 都會跟著部署。
+
+---
+
+## 十、區域：為什麼是 us-west1（2026-11-09）
+
+- **原因**：傳出流量的免費 1 GB／月只給北美區域；放在台灣（asia-east1）從第一個位元組就算錢。三個北美免費區域裡，us-west1（奧勒岡）離台灣最近。
+- **代價（台灣實測，各 5 次）**：純網路來回約 36 ms → 200 ms；`/api/health`（查一次資料庫）約 65 ms → 350 ms。多出來的部分代表 MongoDB Atlas 在亞洲，後端每查一次資料庫都要跨太平洋，股市頁、自選清單這類一次查很多筆的頁面最有感。
+- **台灣那台**：`tarot-backend`（asia-east1）先保留、不接流量（沒請求就不計費）。決定不換回來後刪除：
+  ```powershell
+  gcloud run services delete tarot-backend --region asia-east1
+  ```
+- **換回台灣**：需要台灣區域的 GitHub 連線與觸發條件（台灣原本那一套已停用／刪除，要重建，見第七節第 10 步）；前端 `.env` 的 `VITE_API_BASE_URL`、後端 repo 的 secret `BACKEND_URL` 改回 `https://tarot-backend-755135442588.asia-east1.run.app`。
+- 如果之後覺得太慢又不想付流量費：把 Atlas 也搬到美國（例如 AWS `us-west-2`）會把資料庫那段延遲拿掉，但要搬資料，另外評估。
