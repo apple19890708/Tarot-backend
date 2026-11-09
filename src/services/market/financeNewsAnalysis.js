@@ -1,5 +1,6 @@
 // 財經新聞的 AI 影響分析（v17 規格 G）：系統指示與交給 AI 的資料。
 // 只做文字組裝，不呼叫 AI；串流由 narrationService.streamChat 負責。
+const { dateTimeFormat } = require('../../lib/intlFormat')
 const { NEWS_THEMES } = require('../../data/newsThemes')
 
 const FINANCE_NEWS_PROMPT = `你是一位熟悉台股與美股產業鏈的總經與產業分析師，替使用者解讀最近的財經新聞會對哪些族群、哪些股票造成影響。你會收到 <news>（編號過的新聞標題、來源、時間與摘要），可能還有 <watchlist>（使用者追蹤的股票）。
@@ -41,7 +42,7 @@ const WEEKDAYS = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', F
 // 台北時間「11/06（週五）14:30」；withYear 時前面加年份。星期要明寫，交給 AI 自己推算常常算錯
 function taipeiTime(iso, { withYear = false } = {}) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', {
+    dateTimeFormat('en-US', {
       timeZone: 'Asia/Taipei',
       year: 'numeric',
       month: '2-digit',

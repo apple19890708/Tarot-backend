@@ -33,12 +33,22 @@ const diff = (a, b) => (a === null || b === null ? null : a - b)
 const lots = (shares) => (shares === null ? null : round(shares / 1000, 0))
 
 function createTwseData({ fetchJson, cache, today }) {
-  async function cached(key, ttl, load) {
+  // 同一份資料正在下載時，後來的呼叫直接等同一個結果。
+  // 以前快取要等第一次下載完才寫入，自選清單 N 檔股票同時查籌碼，就會把同一天的全市場三大法人
+  // 下載 N 次（8 檔 × 7 天 = 56 次，應該只要 7 次）：記憶體瞬間衝過 512MB 被 Cloud Run 砍掉，也可能被證交所限流
+  const pending = new Map()
+  function cached(key, ttl, load) {
     const hit = cache.get(key)
-    if (hit !== undefined) return hit
-    const value = await load()
-    cache.set(key, value, ttl)
-    return value
+    if (hit !== undefined) return Promise.resolve(hit)
+    if (pending.has(key)) return pending.get(key)
+    const promise = load()
+      .then((value) => {
+        cache.set(key, value, ttl)
+        return value
+      })
+      .finally(() => pending.delete(key))
+    pending.set(key, promise)
+    return promise
   }
 
   const ttlFor = (date) => (date >= today() ? TTL_TODAY : TTL_PAST)

@@ -3,6 +3,7 @@
 // 沒追蹤的沒有持股，AI 紀錄的 watch 是 null。
 // 分析本身不呼叫 AI；只有 POST /watchlist/:id/analysis/ai 會呼叫（要 AI 權限、有次數限制）。
 // 依賴以參數注入，測試時不必連資料庫、外部 API 或 AI。
+const { dateTimeFormat } = require('../lib/intlFormat')
 const express = require('express')
 const mongoose = require('mongoose')
 
@@ -20,7 +21,7 @@ const TW_TIMEZONE = 'Asia/Taipei'
 
 // 台北時間今天 00:00 的 Date（每日次數以台北的一天計算）
 function startOfTaipeiDay(nowMs) {
-  const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: TW_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(
+  const ymd = dateTimeFormat('en-CA', { timeZone: TW_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(
     new Date(nowMs),
   )
   return new Date(`${ymd}T00:00:00+08:00`)

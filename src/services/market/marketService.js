@@ -6,6 +6,7 @@
 // - 證交所 OpenAPI、櫃買中心 OpenAPI：上市／上櫃股票清單，用來把公司名稱對應到代號
 //
 // 任何一個來源失敗都只會少一部分資料，不會讓 AI 解讀失敗；全部失敗時 snapshot 會帶 notes 說明。
+const { dateTimeFormat } = require('../../lib/intlFormat')
 const { computeIndicators, round } = require('./indicators')
 const { buildSignals } = require('./signals')
 const { computeSeries, aggregateSeries } = require('./series')
@@ -121,7 +122,7 @@ function toNumber(value) {
 
 // 某個時間點在指定時區的日期（YYYY-MM-DD）
 function dateIn(timeZone, date) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
+  return dateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
 
 // 快取最多這麼多筆；超過時先清掉過期的，還是太多就丟最舊的（Map 依插入順序）
@@ -1587,7 +1588,7 @@ function formatMarketForPrompt(snapshot) {
   if (!snapshot) {
     return ''
   }
-  const time = new Intl.DateTimeFormat('zh-TW', {
+  const time = dateTimeFormat('zh-TW', {
     timeZone: TW_TIMEZONE,
     year: 'numeric',
     month: '2-digit',

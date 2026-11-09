@@ -4,13 +4,15 @@
 // 資金進出 = 成本變化 − 已實現變化（買進時成本增加＝投入；賣出時拿回的錢＝成本減少＋已實現增加）。
 // 這樣加碼或賣出不會被誤算成賺賠，才能和大盤指數的漲跌直接比較。
 
+const { dateTimeFormat } = require('../../lib/intlFormat')
+
 const TW_TIMEZONE = 'Asia/Taipei'
 // 台股 13:30 收盤，收盤價約 14:00 前定案
 const SNAPSHOT_AFTER_MINUTES = 14 * 60
 
 function taipeiNow(date = new Date()) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', {
+    dateTimeFormat('en-US', {
       timeZone: TW_TIMEZONE,
       year: 'numeric',
       month: '2-digit',

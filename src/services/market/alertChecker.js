@@ -9,6 +9,8 @@
 // - rsi：RSI(14) ≥ X 或 ≤ X（params.direction above／below、params.value）
 // - volume：量比（當日量 ÷ 20 日均量）≥ X 倍（params.value）
 
+const { dateTimeFormat } = require('../../lib/intlFormat')
+
 const keyOf = (target) => target.symbol || `${target.exchange}_${target.code}`
 
 const ALERT_KINDS = ['price', 'changePct', 'ma', 'kd', 'rsi', 'volume']
@@ -27,7 +29,7 @@ const SESSIONS = {
 
 function localClock(timeZone, date) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    dateTimeFormat('en-US', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
       .formatToParts(date)
       .map((p) => [p.type, p.value]),
   )
