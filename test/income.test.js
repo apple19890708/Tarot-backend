@@ -86,6 +86,21 @@ test('應收股利：依除息前一天的持股算；健保補充保費達門�
   assert.equal(cash2025.matchIndex, null)
   assert.equal(result.unrecordedCash, 0)
 
+  // 使用者刪掉的那一次：照樣算（標 dismissed），但不算進還沒記錄的合計
+  const noRecords = income.computeEntitlements({ target: TW, trades, dividends: [], history, today: '2026-11-10', unit: 1000 })
+  const dismissedOne = income.computeEntitlements({
+    target: TW,
+    trades,
+    dividends: [],
+    dismissed: [{ type: 'cash', exDate: noRecords.events[2].exDate }],
+    history,
+    today: '2026-11-10',
+    unit: 1000,
+  })
+  assert.deepEqual(dismissedOne.events.map((e) => e.dismissed), [false, false, true])
+  assert.equal(dismissedOne.events[2].net, noRecords.events[2].net)
+  assert.equal(dismissedOne.unrecordedCash, Math.round((noRecords.unrecordedCash - noRecords.events[2].net) * 100) / 100)
+
   // 有一筆沒有日期：整檔不算
   const missing = income.computeEntitlements({
     target: TW,
@@ -272,6 +287,41 @@ test('填息：除息後收盤回到除息前收盤就算填息（天數含除�
   assert.equal(open.avgDays, null)
 })
 
+test('除權息分頁：同一天的現金與配股合併成一列、配股換算成元、殖利率用除息前實際收盤、新到舊', () => {
+  // 玉山金 2025-07-22 除權息（實測）：現金 1.2 元（Yahoo 已調整成 1.188）、配股 0.1 元（Yahoo 的比例 1.0101514 有雜訊，取 2 位小數）
+  const history = {
+    cash: [
+      { date: '2024-11-20', amount: 1.188 },
+      { date: '2025-07-22', amount: 1.2 },
+    ],
+    splits: [{ date: '2025-07-22', ratio: 1.0101514, kind: 'stockDividend' }],
+  }
+  const bars = [
+    { date: '2024-11-19', close: 27.723 },
+    { date: '2024-11-20', close: 27 },
+    { date: '2025-07-21', close: 33.861 },
+    { date: '2025-07-22', close: 33.2 },
+    { date: '2025-07-23', close: 34.2 },
+  ]
+  const rows = income.buildDividendRecords({ history, bars, market: 'tw', today: '2026-11-10' })
+  assert.deepEqual(rows.map((r) => [r.year, r.exDate]), [[2025, '2025-07-22'], [2024, '2024-11-20']])
+  assert.equal(rows[0].cash, 1.2)
+  assert.equal(rows[0].stock, 0.1)
+  assert.equal(rows[0].preClose, 34.2)
+  assert.equal(rows[0].yieldPct, 3.51)
+  assert.deepEqual([rows[0].fill.filledOn, rows[0].fill.days], ['2025-07-23', 2])
+  // 2024 年的現金股利乘回之後的配股：1.188 × 1.0101514 ≒ 1.2；前收也還原（27.723 × 1.0101514 ≒ 28.0）
+  assert.equal(Math.round(rows[1].cash * 100) / 100, 1.2)
+  assert.equal(rows[1].preClose, 28)
+  assert.deepEqual([rows[1].fill.filledOn, rows[1].fill.days], ['2025-07-21', 2])
+
+  // 美股沒有配股欄；抓不到股利歷史是 null、沒配過息是空陣列
+  const us = income.buildDividendRecords({ history: { cash: [{ date: '2026-08-01', amount: 0.25 }], splits: [{ date: '2024-06-10', ratio: 10, kind: 'split' }] }, bars: [], market: 'us', today: '2026-11-10' })
+  assert.deepEqual([us.length, us[0].stock, us[0].yieldPct, us[0].fill], [1, null, null, null])
+  assert.equal(income.buildDividendRecords({ history: null, bars, market: 'tw', today: '2026-11-10' }), null)
+  assert.deepEqual(income.buildDividendRecords({ history: { cash: [], splits: [] }, bars, market: 'tw', today: '2026-11-10' }), [])
+})
+
 test('報酬拆解：價差＋股利−手續費−稅−預估賣出成本＝總報酬（用真的 computePosition 算）', () => {
   const position = computePosition({
     target: TW,
@@ -447,13 +497,25 @@ async function withServer(app, run) {
 test('API：獲利與股利依清單篩選，別人的清單回 404；扣款設定可以單獨存', async () => {
   const groupId = '507f1f77bcf86cd799439021'
   const watches = [
-    { _id: 'w1', user: 'u1', target: TW, trades: [{ side: 'buy', quantity: 1, price: 30, date: '2026-01-02' }], dividends: [], groups: [groupId] },
+    {
+      _id: 'w1',
+      user: 'u1',
+      target: TW,
+      trades: [{ side: 'buy', quantity: 1, price: 30, date: '2026-01-02' }],
+      dividends: [],
+      dismissedEntitlements: [{ type: 'cash', exDate: '2026-07-01' }],
+      groups: [groupId],
+    },
     { _id: 'w2', user: 'u1', target: US, trades: [], dividends: [], groups: [] },
   ]
   const app = makeApp({ watches, groups: [{ _id: groupId, name: '存股', order: 0 }] })
   await withServer(app, async (base) => {
     const all = await (await fetch(`${base}/api/market/income`)).json()
     assert.equal(all.items.length, 2)
+    // 刪掉的應收股利要帶回去：前端再刪一筆時以它為基底，少了會把之前刪的蓋掉（審查抓到）
+    assert.deepEqual(all.items[0].dismissedEntitlements, [{ type: 'cash', exDate: '2026-07-01' }])
+    assert.deepEqual(all.items[1].dismissedEntitlements, [])
+    assert.ok(all.concentration)
     assert.equal(all.usdTwd, 32)
     assert.equal(all.months.length, 12)
     const one = await (await fetch(`${base}/api/market/income?group=${groupId}`)).json()
@@ -480,6 +542,13 @@ test('API：獲利與股利依清單篩選，別人的清單回 404；扣款設�
     assert.equal((await put({ reminders: { exDividend: 'yes' } })).status, 400)
     assert.equal((await put({ reminders: { exDividend: true } })).status, 200)
     assert.equal((await (await fetch(`${base}/api/market/settings`)).json()).reminders.exDividend, true)
+    // 集中度門檻（v20 2.9.8）：預設 30／50，5～100 之外與字串回 400
+    assert.deepEqual(settings.concentration, { holding: 30, industry: 50 })
+    assert.equal((await put({ concentration: { holding: 4, industry: 50 } })).status, 400)
+    assert.equal((await put({ concentration: { holding: 30, industry: 101 } })).status, 400)
+    assert.equal((await put({ concentration: { holding: '30', industry: 50 } })).status, 400)
+    assert.equal((await put({ concentration: { holding: 20, industry: 60 } })).status, 200)
+    assert.deepEqual((await (await fetch(`${base}/api/market/settings`)).json()).concentration, { holding: 20, industry: 60 })
   })
 })
 
@@ -542,4 +611,60 @@ test('API：編輯持股時前端沒送 exDate，金額與入帳日相同的股�
       ['2025-07-22', null, null],
     )
   })
+})
+
+test('股利成長：近 5 年每年合計（現金乘回之後的配股、配股換算成元），今年不判斷減少，比前一年少的標出來', () => {
+  const history = {
+    cash: [
+      { date: '2022-07-20', amount: 1.5 },
+      { date: '2023-07-20', amount: 1.0 },
+      { date: '2023-12-20', amount: 0.5 },
+      { date: '2024-07-20', amount: 1.188 },
+      { date: '2025-07-22', amount: 1.2 },
+      { date: '2026-07-01', amount: 0.3 },
+    ],
+    splits: [{ date: '2025-07-22', ratio: 1.0101514, kind: 'stockDividend' }],
+  }
+  const growth = income.dividendGrowthOf(history, 'tw', '2026-11-10')
+  assert.deepEqual(growth.years.map((y) => y.year), [2022, 2023, 2024, 2025, 2026])
+  // 2023 兩次加起來 1.5 和 2022 一樣，不算減少；2024 實際 1.2 比 1.5 少；2025 一樣 1.2 不算減少（浮點雜訊）；今年 0.3 還沒過完不判斷
+  assert.deepEqual(growth.years.map((y) => y.decreased), [false, false, true, false, false])
+  assert.deepEqual(growth.decreasedYears, [2024])
+  assert.equal(growth.years[1].count, 2)
+  assert.equal(growth.years[3].stock, 0.1)
+  assert.equal(growth.years[4].partial, true)
+  assert.equal(income.dividendGrowthOf({ cash: [], splits: [] }, 'tw', '2026-11-10'), null)
+  assert.equal(income.dividendGrowthOf(null, 'tw', '2026-11-10'), null)
+})
+
+test('集中度：單一持股、單一產業超過門檻才提醒；ETF 不算產業；美股沒匯率不算；只有一檔不提醒', () => {
+  const row = (id, market, code, value, name = code) => ({ id, target: { market, code, symbol: code, name }, quantity: 1, position: { marketValue: value } })
+  const rows = [
+    row('a', 'tw', '2330', 400, '台積電'),
+    row('b', 'tw', '2454', 200, '聯發科'),
+    row('c', 'tw', '0056', 400, '元大高股息'),
+    row('d', 'us', 'KO', 10, 'Coca-Cola'),
+    { id: 'e', target: { market: 'tw', code: '2884', name: '玉山金' }, quantity: 0, position: { marketValue: 0 } },
+  ]
+  const industries = new Map([
+    ['2330', { code: '24', label: '半導體業' }],
+    ['2454', { code: '24', label: '半導體業' }],
+  ])
+  const result = income.concentrationOf({ rows, usdTwd: null, industries, thresholds: { holding: 30, industry: 50 } })
+  assert.equal(result.excludedUs, 1)
+  assert.equal(result.total, 1000)
+  assert.deepEqual(result.holdings.map((h) => [h.code, h.pct]), [['2330', 40], ['0056', 40], ['2454', 20]])
+  assert.deepEqual(result.industries.map((g) => [g.label, g.pct]), [['半導體業', 60]])
+  assert.equal(result.unclassifiedPct, 40)
+  assert.deepEqual(result.warnings.map((w) => [w.type, w.key]), [['holding', 'a'], ['holding', 'c'], ['industry', '24']])
+
+  // 有匯率：美股換成台幣算進去；門檻用預設（30／50）
+  const withFx = income.concentrationOf({ rows, usdTwd: 30, industries })
+  assert.equal(withFx.total, 1300)
+  assert.deepEqual(withFx.thresholds, { holding: 30, industry: 50 })
+
+  // 只有一檔：100% 但不提醒
+  const single = income.concentrationOf({ rows: [rows[0]], industries })
+  assert.equal(single.holdings[0].pct, 100)
+  assert.deepEqual(single.warnings, [])
 })

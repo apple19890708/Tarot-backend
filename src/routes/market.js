@@ -13,7 +13,7 @@ const { parseFilters } = require('../services/market/screener')
 const { parseDashboard } = require('../services/market/dashboard')
 const { taipeiNow } = require('../services/market/snapshots')
 const { computePosition, validateSequence, normalizeFees, tradesOf, DEFAULT_FEES } = require('../services/market/portfolio')
-const { buildIncomeReport, normalizeIncomeSettings } = require('../services/market/income')
+const { buildIncomeReport, normalizeConcentration, normalizeIncomeSettings } = require('../services/market/income')
 const { attachPastEstimates } = require('../services/market/forecastLog')
 
 // 美元兌台幣（獲利與股利合併成台幣用）
@@ -171,6 +171,24 @@ function resolveTrades(raw, max) {
   return sequenceError ? { error: sequenceError } : { trades }
 }
 
+// 刪掉的應收股利：[{ type: 'cash'|'stock', exDate }]，整批替換；重複的只留一筆
+function resolveDismissed(raw, max) {
+  if (!Array.isArray(raw)) return { error: '刪除的應收股利格式不正確。' }
+  if (raw.length > max) return { error: `同一檔最多刪除 ${max} 筆應收股利。` }
+  const seen = new Set()
+  const dismissed = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || !['cash', 'stock'].includes(item.type)) return { error: '刪除的應收股利格式不正確。' }
+    const exDate = resolveDate(item.exDate)
+    if (!exDate) return { error: '刪除的應收股利要有除息日。' }
+    const key = `${item.type}:${exDate}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    dismissed.push({ type: item.type, exDate })
+  }
+  return { dismissed }
+}
+
 function resolveDividends(raw, max) {
   if (!Array.isArray(raw)) return { error: '股利紀錄格式不正確。' }
   if (raw.length > max) return { error: `同一檔最多記錄 ${max} 筆股利。` }
@@ -267,6 +285,8 @@ function watchJSON(watch, summary = null, fees = DEFAULT_FEES) {
     target: watch.target,
     trades,
     dividends,
+    // 應收股利裡刪掉、不想帶入的那幾次（2026-11-10；舊資料沒有）
+    dismissedEntitlements: (watch.dismissedEntitlements || []).map((d) => ({ type: d.type, exDate: d.exDate })),
     position,
     groups: watchGroupIds(watch),
     // 舊版前端只認單一清單：給第一個
@@ -330,6 +350,12 @@ function createMarketRouter({
     if (!MarketProfile) return normalizeIncomeSettings(null)
     const profile = await MarketProfile.findOne({ user: userId })
     return normalizeIncomeSettings(profile?.income)
+  }
+
+  async function concentrationSettingsOf(userId) {
+    if (!MarketProfile) return normalizeConcentration(null)
+    const profile = await MarketProfile.findOne({ user: userId })
+    return normalizeConcentration(profile?.concentration)
   }
 
   // 行情快照：股市諮詢的結果頁一進來就顯示。查完順便記下這次的操作建議（自動對答案用）
@@ -678,6 +704,8 @@ function createMarketRouter({
         income: normalizeIncomeSettings(profile?.income),
         // 提醒（v20）
         reminders: { exDividend: Boolean(profile?.reminders?.exDividend) },
+        // 集中度提醒的門檻（v20 2.9.8，%）
+        concentration: normalizeConcentration(profile?.concentration),
         dashboard: profile?.dashboard ?? null,
       })
     } catch (error) {
@@ -694,7 +722,7 @@ function createMarketRouter({
       }
       // fees（交易成本）與 income（股利扣款，v20）可以只送其中一個；舊版前端只送 fees
       const body = req.body || {}
-      if (body.fees === undefined && body.income === undefined && body.reminders === undefined) {
+      if (body.fees === undefined && body.income === undefined && body.reminders === undefined && body.concentration === undefined) {
         res.status(400).json({ message: '設定格式不正確。' })
         return
       }
@@ -714,6 +742,15 @@ function createMarketRouter({
         }
         $set.reminders = { exDividend: body.reminders.exDividend }
       }
+      if (body.concentration !== undefined) {
+        const raw = body.concentration
+        const valid = (value) => Number.isFinite(value) && value >= 5 && value <= 100
+        if (!raw || !valid(raw.holding) || !valid(raw.industry)) {
+          res.status(400).json({ message: '集中度門檻要在 5～100% 之間。' })
+          return
+        }
+        $set.concentration = { holding: raw.holding, industry: raw.industry }
+      }
       if (body.income !== undefined) {
         const { income, error } = resolveIncomeSettings(body.income)
         if (error) {
@@ -731,6 +768,7 @@ function createMarketRouter({
         fees: normalizeFees(profile?.fees),
         income: normalizeIncomeSettings(profile?.income),
         reminders: { exDividend: Boolean(profile?.reminders?.exDividend) },
+        concentration: normalizeConcentration(profile?.concentration),
       })
     } catch (error) {
       next(error)
@@ -922,7 +960,8 @@ function createMarketRouter({
       const all = await MarketWatch.find({ user: userId }).sort({ order: 1, createdAt: 1 })
       const watches = groupId ? all.filter((w) => watchGroupIds(w).includes(groupId)) : all
       const targets = watches.map((w) => w.target)
-      const [summaries, fees, settings, histories, notices, usdTwd] = await Promise.all([
+      const twCodes = targets.filter((t) => t.market === 'tw' && t.kind === 'stock' && t.code).map((t) => t.code)
+      const [summaries, fees, settings, histories, notices, usdTwd, industries, concentration] = await Promise.all([
         // 報價抓不到也照樣回應（市值相關顯示「—」），不讓整頁 500
         targets.length ? marketService.getWatchSummaries(targets).catch(() => targets.map(() => null)) : [],
         feesOf(userId),
@@ -935,6 +974,9 @@ function createMarketRouter({
               .then((quote) => quote?.price ?? null)
               .catch(() => null)
           : null,
+        // 集中度提醒（v20 2.9.8）：台股個股的產業別、使用者設的門檻
+        marketService.getIndustryMap ? marketService.getIndustryMap(twCodes).catch(() => new Map()) : new Map(),
+        concentrationSettingsOf(userId),
       ])
       const items = watches.map((watch, index) => watchJSON(watch, summaries[index] ?? null, fees))
       // 填息追蹤用的日 K：摘要剛抓過（5 分鐘快取），這裡多半直接命中；抓不到的那一檔不算填息
@@ -952,6 +994,8 @@ function createMarketRouter({
         notices,
         settings,
         usdTwd,
+        industries,
+        concentration,
         today: taipeiNow().date,
       })
       // 預估準不準：先查已經有實際數字的比較，再把這次的推估記下來（不等寫完，失敗也不影響回應）
@@ -1093,7 +1137,7 @@ function createMarketRouter({
     }
   })
 
-  // 更新持股：trades（買賣紀錄）與 dividends（股利）各自整批替換，可以只送其中一個；空陣列代表清除
+  // 更新持股：trades（買賣紀錄）、dividends（股利）、dismissedEntitlements（刪掉的應收股利）各自整批替換，可以只送其中一個；空陣列代表清除
   router.patch('/watchlist/:id', requireStockAccess, async (req, res, next) => {
     try {
       if (!ensureDatabase(res)) return
@@ -1104,7 +1148,8 @@ function createMarketRouter({
       const hasTrades = Boolean(req.body) && 'trades' in req.body
       const hasDividends = Boolean(req.body) && 'dividends' in req.body
       const hasGroup = Boolean(req.body) && ('groups' in req.body || 'group' in req.body)
-      if (!hasTrades && !hasDividends && !hasGroup) {
+      const hasDismissed = Boolean(req.body) && 'dismissedEntitlements' in req.body
+      if (!hasTrades && !hasDividends && !hasGroup && !hasDismissed) {
         res.status(400).json({ message: '沒有要更新的內容。' })
         return
       }
@@ -1145,6 +1190,14 @@ function createMarketRouter({
           }
         }
         update.dividends = dividends
+      }
+      if (hasDismissed) {
+        const { dismissed, error } = resolveDismissed(req.body.dismissedEntitlements, MarketWatch.MAX_DISMISSED_PER_WATCH)
+        if (error) {
+          res.status(400).json({ message: error })
+          return
+        }
+        update.dismissedEntitlements = dismissed
       }
       const watch = await MarketWatch.findOneAndUpdate(
         { _id: req.params.id, user: req.auth.userId },

@@ -24,6 +24,11 @@ const marketProfileSchema = new mongoose.Schema(
       nhiThreshold: { type: Number, default: 20000, min: 0, max: 1000000 },
       usWithholding: { type: Number, default: 0.3, min: 0, max: 0.5 },
     },
+    // 集中度提醒（v20 2.9.8）：單一持股超過 holding%、單一產業超過 industry% 的總市值時，在獲利與股利頁提醒
+    concentration: {
+      holding: { type: Number, default: 30, min: 5, max: 100 },
+      industry: { type: Number, default: 50, min: 5, max: 100 },
+    },
     // 提醒（v20）：exDividend＝追蹤的台股除息（除權）前一個交易日推播「今天收盤前持有才領得到」；預設關閉
     reminders: {
       exDividend: { type: Boolean, default: false },

@@ -202,6 +202,8 @@ function createTwseData({ fetchJson, cache, today }) {
           if (row.SecuritiesCompanyCode && row.SecuritiesIndustryCode) map.set(row.SecuritiesCompanyCode, String(row.SecuritiesIndustryCode).trim())
         }
       }
+      // 上市、上櫃都抓不到：丟錯不快取（否則空表會存一整天，集中度一整天都沒有產業提醒），呼叫端都有接住當成空表
+      if (!map.size) throw new Error('產業別資料取不到')
       return map
     })
   }
@@ -352,7 +354,18 @@ function createTwseData({ fetchJson, cache, today }) {
     return { streaks: result, days: days.length }
   }
 
-  return { getChips, getValuation, getValuationMap, getChipStreaks }
+  // 代號 → { code, label }（集中度提醒用，v20 2.9.8）；ETF 與查不到的不在表裡。抓不到回傳空的 Map
+  async function getIndustryMap(codes) {
+    const industries = await loadIndustries().catch(() => new Map())
+    const result = new Map()
+    for (const code of codes) {
+      const industryCode = industries.get(code)
+      if (industryCode && INDUSTRY_LABELS[industryCode]) result.set(code, { code: industryCode, label: INDUSTRY_LABELS[industryCode] })
+    }
+    return result
+  }
+
+  return { getChips, getValuation, getValuationMap, getChipStreaks, getIndustryMap }
 }
 
 // ---- 判讀（純函式）----

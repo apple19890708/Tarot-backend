@@ -607,13 +607,27 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     if (cached !== undefined) return cached
     return once(key, async () => {
       const isTwStock = target.market === 'tw' && target.kind === 'stock' && target.code
-      const [snapshot, events] = await Promise.all([
+      const isStock = target.kind === 'stock' && target.symbol
+      const [snapshot, events, dividendHistory] = await Promise.all([
         snapshotOf([target]),
         isTwStock ? loadCorporateEvents().catch(() => null) : null,
+        isStock ? loadDividendHistory(target.symbol, target.market) : null,
       ])
       const today = dateIn(TW_TIMEZONE, new Date(now()))
+      // 除權息分頁：歷年除權息、殖利率、填息（日 K 在 snapshotOf 已經快取過）
+      let dividendRecords = null
+      if (isStock && dividendHistory) {
+        const bars = await loadHistory(target.symbol).then((h) => h.bars).catch(() => null)
+        // 附加資訊：算失敗（資料格式異常）只是沒有這個分頁，不能讓整個個股分析 500
+        try {
+          dividendRecords = income.buildDividendRecords({ history: dividendHistory, bars, market: target.market, today })
+        } catch (error) {
+          console.error(`除權息紀錄失敗（${target.symbol}）：`, error.message)
+        }
+      }
       const result = {
         ...snapshot,
+        items: snapshot.items.map((item, index) => (index === 0 && isStock ? { ...item, dividendRecords } : item)),
         events: events && isTwStock ? corporateEvents.eventsFor(target.code, events, today) : null,
       }
       // 完全查不到報價時只快取 1 分鐘，稍後可以重試
@@ -1344,9 +1358,18 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     }
   }
 
+  // 台股代號 → 產業別（集中度提醒，v20 2.9.8）；抓不到是空的 Map（只算單一持股的集中度）
+  async function getIndustryMap(codes) {
+    if (!codes.length) return new Map()
+    return getTwseData()
+      .getIndustryMap(codes)
+      .catch(() => new Map())
+  }
+
   return {
     buildMarketSnapshot,
     buildTargetSnapshot,
+    getIndustryMap,
     getQuote,
     getHistoryBars,
     resolveTarget,

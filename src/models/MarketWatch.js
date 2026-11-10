@@ -5,6 +5,7 @@ const mongoose = require('mongoose')
 const MAX_WATCHES_PER_USER = 30
 const MAX_TRADES_PER_WATCH = 100
 const MAX_DIVIDENDS_PER_WATCH = 100
+const MAX_DISMISSED_PER_WATCH = 300
 
 const marketWatchSchema = new mongoose.Schema(
   {
@@ -50,6 +51,20 @@ const marketWatchSchema = new mongoose.Schema(
       ],
       default: [],
     },
+    // 應收股利裡使用者刪掉、不想帶入的那幾次（2026-11-10）：之後不再列在「還沒記錄」，要記請自己在持股手動加。
+    // 只是隱藏提醒，過去月份的實際應收、預估準不準照樣用這幾次計算
+    dismissedEntitlements: {
+      type: [
+        new mongoose.Schema(
+          {
+            type: { type: String, enum: ['cash', 'stock'], required: true },
+            exDate: { type: String, required: true },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
     // 自選清單（MarketWatchGroup）：一檔可以同時放在好幾個清單（2026-11-08 起），空陣列＝「未分類」
     groups: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'MarketWatchGroup' }], default: [] },
     // 舊格式：一檔只屬於一個清單。讀取時當成 groups 的唯一一個（routes/market.js 的 watchGroupIds）；
@@ -81,3 +96,4 @@ module.exports = mongoose.model('MarketWatch', marketWatchSchema)
 module.exports.MAX_WATCHES_PER_USER = MAX_WATCHES_PER_USER
 module.exports.MAX_TRADES_PER_WATCH = MAX_TRADES_PER_WATCH
 module.exports.MAX_DIVIDENDS_PER_WATCH = MAX_DIVIDENDS_PER_WATCH
+module.exports.MAX_DISMISSED_PER_WATCH = MAX_DISMISSED_PER_WATCH

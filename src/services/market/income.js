@@ -88,7 +88,9 @@ function recordedStatus(exDate, dividends) {
 
 // 持有期間的應收股利（現金與配股），和已記錄的對照。
 // 有任何一筆買賣沒有日期就判斷不出當時有沒有持有，整檔不算（available: false），不猜
-function computeEntitlements({ target, trades = [], dividends = [], history, settings: rawSettings, today, unit }) {
+// dismissed：使用者刪掉的那幾次（[{ type, exDate }]）。照樣算、標 dismissed: true（過去月份的實際應收、預估準不準還要用），
+// 只是不算進「還沒記錄」的合計，畫面也不再列出來
+function computeEntitlements({ target, trades = [], dividends = [], dismissed = [], history, settings: rawSettings, today, unit }) {
   const settings = normalizeIncomeSettings(rawSettings)
   if (!trades.length) return { available: false, reason: 'noTrades', events: [] }
   if (trades.some((t) => !t.date)) return { available: false, reason: 'missingDates', events: [] }
@@ -138,10 +140,12 @@ function computeEntitlements({ target, trades = [], dividends = [], history, set
     })
   }
   events.sort((a, b) => a.exDate.localeCompare(b.exDate))
+  const dismissedKeys = new Set(dismissed.map((d) => `${d.type}:${d.exDate}`))
+  for (const event of events) event.dismissed = dismissedKeys.has(`${event.type}:${event.exDate}`)
 
   // 持有期間做過真正的分割：使用者記的張數多半是分割前的，提醒要手動調整
   const splitDuring = history.splits.find((s) => s.kind === 'split' && inRange(s.date))
-  const unrecorded = events.filter((e) => e.recorded === 'no')
+  const unrecorded = events.filter((e) => e.recorded === 'no' && !e.dismissed)
   return {
     available: true,
     events,
@@ -351,28 +355,34 @@ function pastEventsOf(history, today) {
 // 所以每根 K 棒都乘回「之後的」分割、配股比例，還原成當天的實際價格再比，填息發生在下一次配股之後也不會算錯
 const FILL_EVENTS = 8
 const FILL_TOLERANCE = 0.0005
+// 日 K 還原成當天的實際收盤價（乘回之後的分割、配股比例）
+function realClosesOf(history, bars) {
+  const factor = (date) => history.splits.filter((s) => s.date > date).reduce((product, s) => product * s.ratio, 1)
+  return bars.map((bar) => ({ date: bar.date, close: bar.close * factor(bar.date) }))
+}
+
+// 某個除權息日的填息狀況；日 K 不夠（除息前或除息後沒有資料）回傳 null。配股（填權）也適用：還原後的除權當天價格本來就是除權後的實際價
+function fillOf(real, exDate) {
+  const preIndex = real.findLastIndex((bar) => bar.date < exDate)
+  const start = real.findIndex((bar) => bar.date >= exDate)
+  if (preIndex < 0 || start < 0) return null
+  const target = real[preIndex].close
+  // 容許萬分之五：Yahoo 的調整價只到小數 3 位，還原回去會比實際前收多一點點（33.861 × 1.0101514 ＝ 34.2047，實際 34.20），
+  // 不容許的話收盤回到 34.20 也判成沒填。萬分之五比台股一檔跳動還小，不會把沒填的判成填了
+  const filledAt = real.findIndex((bar, i) => i >= start && bar.close >= target * (1 - FILL_TOLERANCE))
+  if (filledAt >= 0) return { preClose: round2(target), filledOn: real[filledAt].date, days: filledAt - start + 1, gap: null, gapPct: null, daysSince: null }
+  const gap = target - real[real.length - 1].close
+  return { preClose: round2(target), filledOn: null, days: null, gap: round2(gap), gapPct: round2((gap / target) * 100), daysSince: real.length - start }
+}
+
 function computeFills({ history, bars, today }) {
   if (!history || !bars?.length) return null
   const from = `${Number(today.slice(0, 4)) - PAST_YEARS}${today.slice(4, 7)}-01`
-  const factor = (date) => history.splits.filter((s) => s.date > date).reduce((product, s) => product * s.ratio, 1)
-  const real = bars.map((bar) => ({ date: bar.date, close: bar.close * factor(bar.date) }))
+  const real = realClosesOf(history, bars)
   const events = []
   for (const event of history.cash.filter((e) => e.date >= from && e.date <= today)) {
-    const preIndex = real.findLastIndex((bar) => bar.date < event.date)
-    const start = real.findIndex((bar) => bar.date >= event.date)
-    if (preIndex < 0 || start < 0) continue
-    const target = real[preIndex].close
-    // 容許萬分之五：Yahoo 的調整價只到小數 3 位，還原回去會比實際前收多一點點（33.861 × 1.0101514 ＝ 34.2047，實際 34.20），
-    // 不容許的話收盤回到 34.20 也判成沒填。萬分之五比台股一檔跳動還小，不會把沒填的判成填了
-    const filledAt = real.findIndex((bar, i) => i >= start && bar.close >= target * (1 - FILL_TOLERANCE))
-    const base = { exDate: event.date, perShare: round6(actualPerShare(event, history.splits)), preClose: round2(target) }
-    if (filledAt >= 0) {
-      events.push({ ...base, filledOn: real[filledAt].date, days: filledAt - start + 1, gap: null, gapPct: null, daysSince: null })
-    } else {
-      const last = real[real.length - 1]
-      const gap = target - last.close
-      events.push({ ...base, filledOn: null, days: null, gap: round2(gap), gapPct: round2((gap / target) * 100), daysSince: real.length - start })
-    }
+    const fill = fillOf(real, event.date)
+    if (fill) events.push({ exDate: event.date, perShare: round6(actualPerShare(event, history.splits)), ...fill })
   }
   const filled = events.filter((e) => e.days !== null)
   return {
@@ -381,6 +391,133 @@ function computeFills({ history, bars, today }) {
     total: events.length,
     filledCount: filled.length,
     avgDays: filled.length ? Math.round((filled.reduce((sum, e) => sum + e.days, 0) / filled.length) * 10) / 10 : null,
+  }
+}
+
+// ---- 個股分析的除權息分頁 ----
+// 歷年每一次除權息一列（同一天的現金與配股合併）：當年實際的每股現金股利、配股（台股換算成「元」：每股配 0.02 股＝面額 10 元 × 0.02 ＝ 0.2 元）、
+// 殖利率（現金股利 ÷ 除息前一個交易日的實際收盤價）、填息狀況。新到舊；history 抓不到回傳 null，沒配過息回傳空陣列
+const TW_PAR_VALUE = 10
+function buildDividendRecords({ history, bars, market, today }) {
+  if (!history) return null
+  const real = bars?.length ? realClosesOf(history, bars) : []
+  const byDate = new Map()
+  const rowOf = (date) => {
+    if (!byDate.has(date)) byDate.set(date, { year: Number(date.slice(0, 4)), exDate: date, cash: null, stock: null })
+    return byDate.get(date)
+  }
+  for (const event of history.cash.filter((e) => e.date <= today)) {
+    const row = rowOf(event.date)
+    row.cash = round6((row.cash ?? 0) + actualPerShare(event, history.splits))
+  }
+  if (market === 'tw') {
+    for (const split of history.splits.filter((s) => s.kind === 'stockDividend' && s.date <= today)) {
+      // Yahoo 的配股比例有雜訊（玉山金 2025 年 0.1 元算出 0.10015），台股配股公告都是到「角」左右，取到小數 2 位
+      rowOf(split.date).stock = round2((split.ratio - 1) * TW_PAR_VALUE)
+    }
+  }
+  return [...byDate.values()]
+    .sort((a, b) => b.exDate.localeCompare(a.exDate))
+    .map((row) => {
+      const fill = real.length ? fillOf(real, row.exDate) : null
+      return {
+        ...row,
+        preClose: fill?.preClose ?? null,
+        yieldPct: row.cash !== null && fill?.preClose ? round2((row.cash / fill.preClose) * 100) : null,
+        fill: fill ? { filledOn: fill.filledOn, days: fill.days, gapPct: fill.gapPct, daysSince: fill.daysSince } : null,
+      }
+    })
+}
+
+// ---- 股利成長（v20 2.9.7）----
+// 近 5 年每年的每股股利合計：現金用當年實際的金額（乘回之後的配股、分割），配股換算成元（台股，面額 10 元）。
+// 今年還沒過完（partial），不判斷減少；其他年份現金股利比前一年少就標 decreased。
+// Yahoo 抓 5 年，最早那一年只抓到一部分，所以只列今年往前 4 年＋今年。沒有股利資料或 5 年都沒配過是 null
+const GROWTH_YEARS = 5
+const GROWTH_TOLERANCE = 0.005
+function dividendGrowthOf(history, market, today) {
+  if (!history) return null
+  const thisYear = Number(today.slice(0, 4))
+  const years = Array.from({ length: GROWTH_YEARS }, (_, i) => thisYear - GROWTH_YEARS + 1 + i)
+  const rows = years.map((year) => {
+    const inYear = (date) => date.startsWith(String(year)) && date <= today
+    const cashEvents = history.cash.filter((e) => inYear(e.date))
+    const stockEvents = market === 'tw' ? history.splits.filter((s) => s.kind === 'stockDividend' && inYear(s.date)) : []
+    return {
+      year,
+      cash: cashEvents.length ? round6(cashEvents.reduce((sum, e) => sum + actualPerShare(e, history.splits), 0)) : 0,
+      stock: stockEvents.length ? round2(stockEvents.reduce((sum, s) => sum + (s.ratio - 1) * TW_PAR_VALUE, 0)) : 0,
+      count: cashEvents.length,
+      partial: year === thisYear,
+      decreased: false,
+    }
+  })
+  if (rows.every((row) => !row.cash && !row.stock)) return null
+  for (let i = 1; i < rows.length; i += 1) {
+    const prev = rows[i - 1]
+    const row = rows[i]
+    // 少不到 0.5% 不算：Yahoo 的調整價還原回去有誤差（玉山金 2024 年 1.188 × 1.0101514 ＝ 1.20006，實際 1.2），
+    // 一樣的股利不要被判成減少
+    row.decreased = !row.partial && prev.cash > 0 && row.cash < prev.cash * (1 - GROWTH_TOLERANCE)
+  }
+  return { years: rows, decreasedYears: rows.filter((row) => row.decreased).map((row) => row.year) }
+}
+
+// ---- 集中度提醒（v20 2.9.8）----
+// 有持股、有市值的才算；美股換成台幣（取不到匯率時美股不算，excludedUs 記幾檔）。
+// 單一持股超過 thresholds.holding%、單一產業超過 thresholds.industry% 就提醒。產業別只有台股個股有（ETF 沒有產業，不算進任何產業）。
+// 至少要有 2 檔持股才提醒（只有一檔一定是 100%，提醒沒有意義）。提醒文字在這裡產生，前端直接顯示
+const DEFAULT_CONCENTRATION = Object.freeze({ holding: 30, industry: 50 })
+const CONCENTRATION_LIST = 10
+function normalizeConcentration(raw) {
+  const pick = (key) => (Number.isFinite(raw?.[key]) && raw[key] >= 5 && raw[key] <= 100 ? raw[key] : DEFAULT_CONCENTRATION[key])
+  return { holding: pick('holding'), industry: pick('industry') }
+}
+function concentrationOf({ rows, usdTwd = null, industries = new Map(), thresholds: rawThresholds }) {
+  const thresholds = normalizeConcentration(rawThresholds)
+  const fx = Number.isFinite(usdTwd) && usdTwd > 0 ? usdTwd : null
+  const held = rows.filter((row) => row.quantity > 0 && row.position?.marketValue > 0)
+  const usable = held.filter((row) => row.target.market === 'tw' || fx !== null)
+  const valueOf = (row) => row.position.marketValue * (row.target.market === 'us' ? fx : 1)
+  const total = usable.reduce((sum, row) => sum + valueOf(row), 0)
+  const base = { thresholds, total: round2(total), count: usable.length, excludedUs: held.length - usable.length }
+  if (!usable.length || total <= 0) return { ...base, holdings: [], industries: [], unclassifiedPct: null, warnings: [] }
+
+  const nameOf = (row) => row.target.name || row.target.code || row.target.symbol
+  const holdings = usable
+    .map((row) => ({ id: row.id, name: nameOf(row), code: row.target.code || row.target.symbol, pct: round2((valueOf(row) / total) * 100) }))
+    .sort((a, b) => b.pct - a.pct)
+  const groups = new Map()
+  let classified = 0
+  for (const row of usable) {
+    const industry = row.target.market === 'tw' && row.target.code ? industries.get(row.target.code) : null
+    if (!industry) continue
+    classified += valueOf(row)
+    if (!groups.has(industry.code)) groups.set(industry.code, { code: industry.code, label: industry.label, value: 0, names: [] })
+    const group = groups.get(industry.code)
+    group.value += valueOf(row)
+    group.names.push(nameOf(row))
+  }
+  const industryList = [...groups.values()]
+    .map((g) => ({ code: g.code, label: g.label, pct: round2((g.value / total) * 100), names: g.names }))
+    .sort((a, b) => b.pct - a.pct)
+
+  const warnings = []
+  if (usable.length >= 2) {
+    for (const h of holdings.filter((h) => h.pct > thresholds.holding)) {
+      warnings.push({ type: 'holding', key: h.id, pct: h.pct, text: `${h.name} 佔持股市值 ${h.pct}%，超過你設的 ${thresholds.holding}%：這一檔大跌時，整體資產會跟著受很大影響。` })
+    }
+    for (const g of industryList.filter((g) => g.pct > thresholds.industry)) {
+      warnings.push({ type: 'industry', key: g.code, pct: g.pct, text: `${g.label}（${g.names.join('、')}）合計佔持股市值 ${g.pct}%，超過你設的 ${thresholds.industry}%：同一個產業不景氣時會一起跌。` })
+    }
+  }
+  return {
+    ...base,
+    holdings: holdings.slice(0, CONCENTRATION_LIST),
+    industries: industryList,
+    // 沒有產業別的（ETF、美股、查不到的）佔多少
+    unclassifiedPct: round2(((total - classified) / total) * 100),
+    warnings,
   }
 }
 
@@ -431,7 +568,8 @@ function breakdownOf(position) {
 // 「獲利與股利」頁的整份資料。items 是 routes/market.js 的 watchJSON（含 position、summary）；
 // histories、notices 與 items 同順序／以代號查；usdTwd 取不到時美股不併入台幣合計
 // barsList：每檔的日 K（填息追蹤用，與 items 同順序；沒有就不算）
-function buildIncomeReport({ items, histories = [], barsList = [], notices = null, settings: rawSettings, usdTwd = null, today }) {
+// industries：台股代號 → { code, label }（集中度用）；concentration：集中度門檻（使用者設定）
+function buildIncomeReport({ items, histories = [], barsList = [], notices = null, settings: rawSettings, usdTwd = null, industries = new Map(), concentration = null, today }) {
   const settings = normalizeIncomeSettings(rawSettings)
   const months = nextMonths(today)
   // 過去 24 個月（不含本月；本月在 months 裡，含本月已除息的）
@@ -452,7 +590,7 @@ function buildIncomeReport({ items, histories = [], barsList = [], notices = nul
 
     const dividendStatus = !isStock ? 'notStock' : history ? 'ok' : announced.length ? 'noticeOnly' : 'failed'
     const entitlement = isStock
-      ? computeEntitlements({ target, trades: item.trades, dividends: item.dividends, history, settings, today, unit })
+      ? computeEntitlements({ target, trades: item.trades, dividends: item.dividends, dismissed: item.dismissedEntitlements ?? [], history, settings, today, unit })
       : null
     const projection =
       isStock && (history || announced.length)
@@ -513,10 +651,14 @@ function buildIncomeReport({ items, histories = [], barsList = [], notices = nul
       // 頁內編輯持股（沿用自訂追蹤的 MarketHoldings）要用原始紀錄
       trades: item.trades ?? [],
       dividends: item.dividends ?? [],
+      // 刪掉的應收股利：前端再刪一筆時要用這份當基底（PATCH 是整批替換，少了它會把之前刪的蓋掉）
+      dismissedEntitlements: item.dismissedEntitlements ?? [],
       // 股利月曆往前看（近 2 年的實際除息；2026-11-10 使用者要求月曆能看過去）
       pastEvents: isStock ? pastEventsOf(history, today) : [],
       // 填息追蹤（近 2 年每次除息後幾天填息、這次還差多少）；沒有日 K 或股利資料時是 null
       fills: isStock ? computeFills({ history, bars: barsList[index] ?? null, today }) : null,
+      // 股利成長：近 5 年每年的每股股利，比前一年少的年份標出來；沒配過息是 null
+      growth: isStock ? dividendGrowthOf(history, target.market, today) : null,
       dividendStatus,
       entitlement,
       projection,
@@ -572,7 +714,16 @@ function buildIncomeReport({ items, histories = [], barsList = [], notices = nul
       ? { pct: null, reason: 'noFx' }
       : totalAnnualized([...marketFlows.tw, ...marketFlows.us.map((f) => ({ ...f, amount: f.amount * (fx ?? 0) }))], flowBlocked.tw + flowBlocked.us)
 
-  return { today, months, pastMonths, settings, usdTwd: fx, items: rows, totals: { ...totals, twd } }
+  return {
+    today,
+    months,
+    pastMonths,
+    settings,
+    usdTwd: fx,
+    items: rows,
+    totals: { ...totals, twd },
+    concentration: concentrationOf({ rows, usdTwd: fx, industries, thresholds: concentration }),
+  }
 }
 
 module.exports = {
@@ -588,6 +739,11 @@ module.exports = {
   buildIncomeReport,
   xirr,
   computeFills,
+  buildDividendRecords,
+  dividendGrowthOf,
+  concentrationOf,
+  normalizeConcentration,
+  DEFAULT_CONCENTRATION,
   nextMonths,
   frequencyOf,
 }
