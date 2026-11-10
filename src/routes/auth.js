@@ -16,6 +16,8 @@ const {
 // 登入失敗一律用同一句，不透露帳號存不存在
 const LOGIN_FAILED = 'email 或密碼不正確。'
 const GOOGLE_ONLY = '這個帳號是用 Google 註冊的，請按「使用 Google 登入」，或用「忘記密碼」設定一組密碼。'
+// 被管理者停用：密碼對了才說（密碼錯一律 LOGIN_FAILED，不透露帳號狀態）
+const ACCOUNT_DISABLED = '這個帳號已被停用，請聯絡管理者。'
 
 // 忘記密碼：重設連結的有效時間；同一個帳號多久才能再寄一封（避免被拿來轟炸別人的信箱）
 const RESET_TTL_MS = 30 * 60 * 1000
@@ -93,6 +95,16 @@ function createAuthRouter({
   const forgotRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5 })
   const resetRateLimit = createRateLimiter()
 
+  // 記下最後登入的時間與方式（管理頁用）；寫入失敗不影響登入
+  async function recordLogin(user, method) {
+    const at = new Date(now())
+    try {
+      await Users.updateOne({ _id: user._id }, { $set: { lastLoginAt: at, lastLoginMethod: method, lastActiveAt: at } })
+    } catch (error) {
+      console.error('記錄登入時間失敗：', error.message)
+    }
+  }
+
   router.post('/register', async (req, res, next) => {
     try {
       if (!ensureDatabase(res)) {
@@ -126,6 +138,7 @@ function createAuthRouter({
       })
 
       // 註冊完直接給 token，不必再登入一次
+      await recordLogin(user, 'register')
       res.status(201).json({ token: signToken(user), user: user.toPublicJSON() })
     } catch (error) {
       // unique index 撞到時也回 409，避免兩個請求同時註冊同一個 email
@@ -164,6 +177,12 @@ function createAuthRouter({
         return
       }
 
+      if (user.disabled) {
+        res.status(403).json({ message: ACCOUNT_DISABLED })
+        return
+      }
+
+      await recordLogin(user, 'password')
       res.json({ token: signToken(user), user: user.toPublicJSON() })
     } catch (error) {
       next(error)
@@ -194,6 +213,11 @@ function createAuthRouter({
       let user = await Users.findOne({ googleId: profile.googleId })
       if (!user) {
         user = await Users.findOne({ email: profile.email })
+        // 停用的帳號先擋，不要在停用期間替它綁上 googleId（恢復後登入方式會被改掉）
+        if (user?.disabled) {
+          res.status(403).json({ message: ACCOUNT_DISABLED })
+          return
+        }
         if (user) {
           user.googleId = profile.googleId
           await user.save()
@@ -204,10 +228,16 @@ function createAuthRouter({
             displayName: (profile.name || profile.email.split('@')[0]).slice(0, 40),
             role: 'member',
           })
+          await recordLogin(user, 'register')
           res.status(201).json({ token: signToken(user), user: user.toPublicJSON(), created: true })
           return
         }
       }
+      if (user.disabled) {
+        res.status(403).json({ message: ACCOUNT_DISABLED })
+        return
+      }
+      await recordLogin(user, 'google')
       res.json({ token: signToken(user), user: user.toPublicJSON() })
     } catch (error) {
       next(error)
@@ -353,4 +383,4 @@ function createAuthRouter({
   return router
 }
 
-module.exports = { createAuthRouter, createRateLimiter, LOGIN_FAILED, GOOGLE_ONLY, maskEmail }
+module.exports = { createAuthRouter, createRateLimiter, LOGIN_FAILED, GOOGLE_ONLY, ACCOUNT_DISABLED, maskEmail }

@@ -303,3 +303,17 @@ JWT_SECRET=
 - **相容**：上線前的 token 沒有 `ver`、舊帳號沒有 `tokenVersion`，都當 0，上線時不會把人登出。
 - **代價**：每個需要登入的請求多一次查資料庫（原本只有看權限的才查）；資料庫沒連上時直接失敗，不等 mongoose 緩衝。
 - **還沒做**：token 改放 httpOnly cookie（前後端不同網域，改動大）、同帳號連續登入失敗的暫停。
+
+## 補充：會員管理（2026-11-10）
+
+使用者要求會員管理「更完整」，照建議的順序做前三步；第四步（每人 AI 上限、升降管理者、刪除帳號）等有實際需要再做。
+
+- **User 新欄位**：`lastLoginAt`、`lastLoginMethod`（password／google／register）、`lastActiveAt`、`disabled`、`disabledAt`；`toAdminJSON()` 多回這些與 `loginMethods`（有沒有密碼、有沒有綁 Google，只回布林）
+- **最後活動**：`middleware/auth.js` 驗證 token 成功時更新，同一小時內只寫一次（不等寫完、失敗不影響請求）；只看登入時間看不出活不活躍（token 有效 7 天）
+- **停用**：`PATCH /api/admin/users/:id/disabled`。停用時 `tokenVersion` 加 1（所有裝置立刻登出），middleware 也把停用帳號當成沒登入；登入時密碼對了才回「帳號已被停用」（403），密碼錯照舊回同一句，不透露帳號狀態。不能停用自己與其他管理者（避免管理者全被鎖在外面）
+- **強制登出**：`POST /api/admin/users/:id/logout-all`（`tokenVersion` 加 1）；不能從這裡登出自己
+- **列表**：`GET /api/admin/users` 加 `q`（Email、名稱，跳脫正規式特殊字元）、`filter`（all／admin／ai／stock／inactive／disabled，白名單）、`sort`（created／active／login），另回 `stats`（全部、近 7 天活動、本月新註冊、AI／股市開通人數、停用）
+- **詳細**：`GET /api/admin/users/:id`：占卜數（全部／近 30 天）、今天的 AI 次數與上限、AI 分析紀錄數、追蹤、啟用中的提醒、推播裝置數、最近 10 筆管理操作
+- **管理操作紀錄**：新 collection `AdminLog`（admin、target、action、value），開通／收回權限（有變化才記）、停用、恢復、強制登出；`GET /api/admin/logs` 分頁。資料很小，不設保留期限
+- 舊帳號沒有登入、活動紀錄，畫面寫「沒有紀錄」，「30 天沒有活動」的篩選也算進去
+- 審查後補強：停用帳號在 `canUseAi()`／`canUseStock()` 一律 false（背景排程只靠這兩個方法）；版本號一律用 `$inc` 原子更新；Google 登入在綁定 googleId 前先擋停用帳號

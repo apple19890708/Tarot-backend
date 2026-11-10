@@ -19,6 +19,8 @@ const marketCallSchema = new mongoose.Schema(
     confidence: { type: String, enum: ['high', 'medium', 'low'], required: true },
     stopLoss: { type: Number, default: null },
     targets: { type: [Number], default: [] },
+    // 產生這筆建議的規則版本（advice.js 的 RULE_VERSION）；舊紀錄沒有這個欄位，視為 1
+    ruleVersion: { type: Number, default: 1 },
   },
   { timestamps: true },
 )

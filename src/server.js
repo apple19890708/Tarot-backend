@@ -37,11 +37,16 @@ const MarketAlert = require('./models/MarketAlert')
 const MarketWatch = require('./models/MarketWatch')
 const MarketWatchGroup = require('./models/MarketWatchGroup')
 const MarketProfile = require('./models/MarketProfile')
+const MarketReminder = require('./models/MarketReminder')
+const DividendForecast = require('./models/DividendForecast')
+const { createForecastLog } = require('./services/market/forecastLog')
 const MarketSnapshot = require('./models/MarketSnapshot')
 const MarketNews = require('./models/MarketNews')
 const { createNewsSync } = require('./services/market/materialNews')
 const { createSnapshotRecorder } = require('./services/market/snapshotRecorder')
 const { createCronRouter } = require('./routes/cron')
+const { createExDividendReminder } = require('./services/market/exDividendReminder')
+const { isMarketOpen } = require('./services/market/alertChecker')
 const { createDiscord } = require('./services/discord')
 const { createWebPush } = require('./services/webPush')
 const PushSubscription = require('./models/PushSubscription')
@@ -118,6 +123,8 @@ const { optionalAuth, requireAuth, requireAdmin, requireAiAccess, requireStockAc
     if (mongoose.connection.readyState !== 1) throw new Error('資料庫尚未連線。')
     return mongoose.isValidObjectId(id) ? User.findById(id) : null
   },
+  // 最後活動時間（管理頁用），同一小時內只寫一次
+  touchUser: (id, at) => User.updateOne({ _id: id }, { $set: { lastActiveAt: at } }),
 })
 
 // 忘記密碼寄信（Gmail API）與 Google 登入；沒設定環境變數時兩者都回 503，不影響一般登入。
@@ -435,6 +442,17 @@ const snapshotRecorder = createSnapshotRecorder({
   marketService: defaultMarketService,
 })
 
+// 除息前推播（v20 階段 6）：由同一個盤中排程觸發，開了提醒的會員在除息前最後一個交易日收到通知
+const exDividendReminder = createExDividendReminder({
+  MarketProfile,
+  MarketWatch,
+  MarketReminder,
+  User,
+  notifier,
+  marketService: defaultMarketService,
+  isMarketOpen,
+})
+
 // 股市諮詢：行情快照、建議追蹤、價位提醒、自訂追蹤（限金融股市權限，不呼叫 AI、不產生費用）
 app.use(
   '/api/market',
@@ -450,6 +468,7 @@ app.use(
     notifier,
     snapshots: snapshotRecorder,
     news: newsSync,
+    forecastLog: createForecastLog({ DividendForecast }),
   }),
 )
 
@@ -498,6 +517,7 @@ app.use(
     recordSnapshots: () => snapshotRecorder.recordAll(),
     syncNews: () => newsSync.sync(),
     syncFinanceNews: () => financeNewsSync.sync(),
+    remindExDividends: () => exDividendReminder.run(),
   }),
 )
 

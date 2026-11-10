@@ -6,12 +6,18 @@ const mongoose = require('mongoose')
 
 const { validateQuestion } = require('../services/manualDraw')
 const { recordCalls, summarizeCalls } = require('../services/market/tracking')
+const { RULE_VERSION } = require('../services/market/advice')
 const { evaluateAlerts, describeAlert, checkCondition } = require('../services/market/alertChecker')
 const { nextRevenueDeadline } = require('../services/market/corporateEvents')
 const { parseFilters } = require('../services/market/screener')
 const { parseDashboard } = require('../services/market/dashboard')
 const { taipeiNow } = require('../services/market/snapshots')
 const { computePosition, validateSequence, normalizeFees, tradesOf, DEFAULT_FEES } = require('../services/market/portfolio')
+const { buildIncomeReport, normalizeIncomeSettings } = require('../services/market/income')
+const { attachPastEstimates } = require('../services/market/forecastLog')
+
+// 美元兌台幣（獲利與股利合併成台幣用）
+const FX_TARGET = { symbol: 'TWD=X', market: 'us', kind: 'index', name: '美元兌台幣' }
 
 // 追蹤只看最近這麼多筆建議
 const TRACK_LIMIT = 300
@@ -133,11 +139,17 @@ function resolveDate(raw) {
 function resolveTrade(raw, index) {
   const at = `第 ${index + 1} 筆`
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `${at}的格式不正確。` }
-  if (!['buy', 'sell'].includes(raw.side)) return { error: `${at}要選買進或賣出。` }
+  if (!['buy', 'sell', 'stockDividend'].includes(raw.side)) return { error: `${at}要選買進、賣出或配股。` }
   const quantity = toPositive(raw.quantity)
-  const price = toPositive(raw.price)
   if (!Number.isFinite(quantity) || quantity <= 0) return { error: `${at}的數量要大於 0。` }
   if (quantity > MAX_HOLDING_QUANTITY) return { error: `${at}的數量太大，請確認單位（台股是張、美股是股）。` }
+  // 配股沒有成交價（成本 0），一定要有除權日：應收股利靠日期判斷是不是同一次
+  if (raw.side === 'stockDividend') {
+    const date = resolveDate(raw.date)
+    if (!date) return { error: `${at}配股要填除權日。` }
+    return { trade: { side: 'stockDividend', quantity, price: 0, date } }
+  }
+  const price = toPositive(raw.price)
   if (!Number.isFinite(price) || price <= 0) return { error: `${at}的成交價要大於 0。` }
   if (price > MAX_HOLDING_PRICE) return { error: `${at}的成交價太大，請確認輸入是否正確。` }
   const date = resolveDate(raw.date)
@@ -170,7 +182,10 @@ function resolveDividends(raw, max) {
     if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_DIVIDEND_AMOUNT) return { error: `${at}的金額要大於 0。` }
     const date = resolveDate(item.date)
     if (date === undefined) return { error: `${at}的日期格式不正確。` }
-    dividends.push({ amount, date })
+    // exDate：從應收股利帶入的那一次除息（v20）；舊版前端不會送，手動記的沒有
+    const exDate = resolveDate(item.exDate)
+    if (exDate === undefined) return { error: `${at}的除息日格式不正確。` }
+    dividends.push({ amount, date, exDate })
   }
   return { dividends }
 }
@@ -185,6 +200,19 @@ function resolveFees(raw) {
   if (!Number.isFinite(twMinFee) || twMinFee < 0 || twMinFee > 1000) return { error: '最低手續費要在 0～1000 元之間。' }
   if (!Number.isFinite(usFee) || usFee < 0 || usFee > 100) return { error: '美股手續費要在 0～100 美元之間。' }
   return { fees: { twDiscount, twMinFee, usFee } }
+}
+
+// 領股利時的扣款設定（v20）：比例用小數（2.11% 填 0.0211）
+function resolveIncomeSettings(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '股利扣款設定格式不正確。' }
+  if (typeof raw.nhi !== 'boolean') return { error: '要選擇是否扣二代健保補充保費。' }
+  const nhiRate = toPositive(raw.nhiRate)
+  const nhiThreshold = raw.nhiThreshold === 0 || raw.nhiThreshold === '0' ? 0 : toPositive(raw.nhiThreshold)
+  const usWithholding = raw.usWithholding === 0 || raw.usWithholding === '0' ? 0 : toPositive(raw.usWithholding)
+  if (!Number.isFinite(nhiRate) || nhiRate < 0 || nhiRate > 0.1) return { error: '健保補充保費率要在 0～10% 之間。' }
+  if (!Number.isFinite(nhiThreshold) || nhiThreshold < 0 || nhiThreshold > 1_000_000) return { error: '健保補充保費的門檻要在 0～100 萬元之間。' }
+  if (!Number.isFinite(usWithholding) || usWithholding < 0 || usWithholding > 0.5) return { error: '美股預扣稅率要在 0～50% 之間。' }
+  return { income: { nhi: raw.nhi, nhiRate, nhiThreshold, usWithholding } }
 }
 
 // 每個使用者每分鐘最多這麼多次：下拉搜尋 60 次（前端有 250ms 防抖，正常打字遠低於這個量）、選股 10 次
@@ -223,7 +251,7 @@ function watchGroupIds(watch) {
 
 function watchJSON(watch, summary = null, fees = DEFAULT_FEES) {
   const trades = tradesOf(watch)
-  const dividends = (watch.dividends || []).map((d) => ({ amount: d.amount, date: d.date || null }))
+  const dividends = (watch.dividends || []).map((d) => ({ amount: d.amount, date: d.date || null, exDate: d.exDate || null }))
   const position =
     trades.length || dividends.length
       ? computePosition({
@@ -265,6 +293,8 @@ function createMarketRouter({
   snapshots = null,
   // 重大訊息（v17 階段 4）；測試可以不傳，端點回 503
   news = null,
+  // 股利預估的紀錄與驗證（v20）；測試可以不傳，就不記也不比
+  forecastLog = null,
 }) {
   const router = express.Router()
   const searchLimit = createSearchLimiter()
@@ -294,6 +324,12 @@ function createMarketRouter({
     if (!MarketProfile) return DEFAULT_FEES
     const profile = await MarketProfile.findOne({ user: userId })
     return normalizeFees(profile?.fees)
+  }
+
+  async function incomeSettingsOf(userId) {
+    if (!MarketProfile) return normalizeIncomeSettings(null)
+    const profile = await MarketProfile.findOne({ user: userId })
+    return normalizeIncomeSettings(profile?.income)
   }
 
   // 行情快照：股市諮詢的結果頁一進來就顯示。查完順便記下這次的操作建議（自動對答案用）
@@ -332,7 +368,8 @@ function createMarketRouter({
           }
         }),
       )
-      res.json(summarizeCalls(calls, barsBySymbol))
+      // ?version=current：只統計目前規則版本的紀錄
+      res.json(summarizeCalls(calls, barsBySymbol, { ruleVersion: RULE_VERSION, onlyCurrent: req.query.version === 'current' }))
     } catch (error) {
       next(error)
     }
@@ -635,7 +672,14 @@ function createMarketRouter({
       if (!ensureDatabase(res)) return
       const profile = MarketProfile ? await MarketProfile.findOne({ user: req.auth.userId }) : null
       // dashboard：股市總覽的版面（v19）；沒自訂過是 null
-      res.json({ fees: await feesOf(req.auth.userId), dashboard: profile?.dashboard ?? null })
+      res.json({
+        fees: normalizeFees(profile?.fees),
+        // 領股利時的扣款（v20）
+        income: normalizeIncomeSettings(profile?.income),
+        // 提醒（v20）
+        reminders: { exDividend: Boolean(profile?.reminders?.exDividend) },
+        dashboard: profile?.dashboard ?? null,
+      })
     } catch (error) {
       next(error)
     }
@@ -648,17 +692,46 @@ function createMarketRouter({
         res.status(503).json({ message: '設定功能尚未啟用。' })
         return
       }
-      const { fees, error } = resolveFees(req.body?.fees)
-      if (error) {
-        res.status(400).json({ message: error })
+      // fees（交易成本）與 income（股利扣款，v20）可以只送其中一個；舊版前端只送 fees
+      const body = req.body || {}
+      if (body.fees === undefined && body.income === undefined && body.reminders === undefined) {
+        res.status(400).json({ message: '設定格式不正確。' })
         return
       }
-      await MarketProfile.findOneAndUpdate(
+      const $set = {}
+      if (body.fees !== undefined) {
+        const { fees, error } = resolveFees(body.fees)
+        if (error) {
+          res.status(400).json({ message: error })
+          return
+        }
+        $set.fees = fees
+      }
+      if (body.reminders !== undefined) {
+        if (!body.reminders || typeof body.reminders.exDividend !== 'boolean') {
+          res.status(400).json({ message: '提醒設定格式不正確。' })
+          return
+        }
+        $set.reminders = { exDividend: body.reminders.exDividend }
+      }
+      if (body.income !== undefined) {
+        const { income, error } = resolveIncomeSettings(body.income)
+        if (error) {
+          res.status(400).json({ message: error })
+          return
+        }
+        $set.income = income
+      }
+      const profile = await MarketProfile.findOneAndUpdate(
         { user: req.auth.userId },
-        { $set: { fees } },
+        { $set },
         { upsert: true, new: true, setDefaultsOnInsert: true },
       )
-      res.json({ fees })
+      res.json({
+        fees: normalizeFees(profile?.fees),
+        income: normalizeIncomeSettings(profile?.income),
+        reminders: { exDividend: Boolean(profile?.reminders?.exDividend) },
+      })
     } catch (error) {
       next(error)
     }
@@ -830,6 +903,77 @@ function createMarketRouter({
     }
   })
 
+  // 獲利與股利（v20）：持股損益、持有期間的應收股利、未來 12 個月的股利預估。
+  // group：只看某個自選清單（不帶是全部追蹤）。外部資料（股利歷史、預告、匯率）抓不到時照樣回應，在各檔標示
+  router.get('/income', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) return
+      const userId = req.auth.userId
+      if (req.query.group !== undefined && typeof req.query.group !== 'string') {
+        res.status(400).json({ message: '一次只能看一個清單。' })
+        return
+      }
+      const groupId = req.query.group || null
+      const groups = await groupsOf(userId)
+      if (groupId && !groups.some((g) => g.id === groupId)) {
+        res.status(404).json({ message: '找不到這個清單。' })
+        return
+      }
+      const all = await MarketWatch.find({ user: userId }).sort({ order: 1, createdAt: 1 })
+      const watches = groupId ? all.filter((w) => watchGroupIds(w).includes(groupId)) : all
+      const targets = watches.map((w) => w.target)
+      const [summaries, fees, settings, histories, notices, usdTwd] = await Promise.all([
+        // 報價抓不到也照樣回應（市值相關顯示「—」），不讓整頁 500
+        targets.length ? marketService.getWatchSummaries(targets).catch(() => targets.map(() => null)) : [],
+        feesOf(userId),
+        incomeSettingsOf(userId),
+        targets.length ? marketService.getDividendHistories(targets) : [],
+        targets.some((t) => t.market === 'tw' && t.kind === 'stock') ? marketService.getExDividendNotices().catch(() => null) : null,
+        targets.some((t) => t.market === 'us')
+          ? marketService
+              .getQuote(FX_TARGET)
+              .then((quote) => quote?.price ?? null)
+              .catch(() => null)
+          : null,
+      ])
+      const items = watches.map((watch, index) => watchJSON(watch, summaries[index] ?? null, fees))
+      // 填息追蹤用的日 K：摘要剛抓過（5 分鐘快取），這裡多半直接命中；抓不到的那一檔不算填息
+      const barsList = await Promise.all(
+        targets.map((target) =>
+          target.kind === 'stock' && target.symbol && marketService.getHistoryBars
+            ? marketService.getHistoryBars(target.symbol).catch(() => null)
+            : null,
+        ),
+      )
+      const report = buildIncomeReport({
+        items,
+        histories,
+        barsList,
+        notices,
+        settings,
+        usdTwd,
+        today: taipeiNow().date,
+      })
+      // 預估準不準：先查已經有實際數字的比較，再把這次的推估記下來（不等寫完，失敗也不影響回應）
+      const forecastChecks = forecastLog ? await forecastLog.checks(report.items, report.today).catch(() => null) : null
+      if (forecastLog) void forecastLog.record(report)
+      if (forecastChecks) attachPastEstimates(report, forecastChecks)
+      res.json({
+        asOf: new Date().toISOString(),
+        group: groupId,
+        groups,
+        fees,
+        // 除權息預告有沒有抓到（台股「已公告」靠它）
+        noticesAvailable: notices !== null,
+        ...report,
+        // 預估 vs 實際（近 24 個月，有推估也有實際的）；沒有啟用時是 null
+        forecastChecks,
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   // 新增：market 指定台股或美股，query 是代號或名稱；可以同時帶持股
   router.post('/watchlist', requireStockAccess, async (req, res, next) => {
     try {
@@ -988,6 +1132,17 @@ function createMarketRouter({
         if (error) {
           res.status(400).json({ message: error })
           return
+        }
+        // 舊版（和目前的）前端編輯持股時只送 amount、date：金額與入帳日都和原本某一筆相同的，沿用原本的 exDate，
+        // 否則存一次持股就把「從應收股利帶入」的標記清掉，同一次股利會被要求再帶入一次（v20 審查）
+        if (dividends.some((d) => !d.exDate)) {
+          const existing = await MarketWatch.findOne({ _id: req.params.id, user: req.auth.userId })
+          const pool = (existing?.dividends || []).filter((d) => d.exDate)
+          for (const dividend of dividends) {
+            if (dividend.exDate) continue
+            const index = pool.findIndex((d) => d.amount === dividend.amount && (d.date || null) === dividend.date)
+            if (index >= 0) dividend.exDate = pool.splice(index, 1)[0].exDate
+          }
         }
         update.dividends = dividends
       }

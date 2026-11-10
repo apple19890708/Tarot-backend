@@ -26,6 +26,7 @@ async function recordCalls(MarketCall, userId, snapshot) {
             confidence: item.advice.confidence,
             stopLoss: item.advice.levels.stopLoss?.price ?? null,
             targets: item.advice.levels.targets.map((t) => t.price),
+            ruleVersion: item.advice.ruleVersion ?? 1,
           },
         },
         upsert: true,
@@ -75,8 +76,13 @@ function average(values) {
   return values.length > 0 ? round(values.reduce((sum, v) => sum + v, 0) / values.length) : null
 }
 
+const versionOf = (call) => call.ruleVersion ?? 1
+
 // calls：MarketCall 文件（plain object）；barsBySymbol：Map<symbol, bars>
-function summarizeCalls(calls, barsBySymbol) {
+// ruleVersion：目前的規則版本；onlyCurrent 為 true 時只統計目前版本的紀錄（規則改過，新舊混在一起看不出新規則準不準）
+function summarizeCalls(allCalls, barsBySymbol, { ruleVersion = null, onlyCurrent = false } = {}) {
+  const currentCount = ruleVersion === null ? allCalls.length : allCalls.filter((call) => versionOf(call) === ruleVersion).length
+  const calls = onlyCurrent && ruleVersion !== null ? allCalls.filter((call) => versionOf(call) === ruleVersion) : allCalls
   const evaluated = calls.map((call) => {
     const bars = barsBySymbol.get(call.symbol) || []
     return { call, ...evaluateCall(call, bars) }
@@ -103,6 +109,9 @@ function summarizeCalls(calls, barsBySymbol) {
       days,
       evaluated: directional.length,
       hitRate: rate(directional.filter((e) => e.outcomes[h].hit).length, directional.length),
+      // 對照組：同一批偏多／偏空的建議，如果每次都猜「會漲」的命中率。大盤在漲的期間這個數字本來就高，
+      // 規則的命中率要贏過它才代表有判斷力
+      alwaysUpRate: rate(directional.filter((e) => e.outcomes[h].return > 0).length, directional.length),
       bullish: stance('bullish'),
       bearish: stance('bearish'),
       neutral: stance('neutral'),
@@ -113,6 +122,10 @@ function summarizeCalls(calls, barsBySymbol) {
   const paths = evaluated.filter((e) => e.path && e.path !== 'open')
   return {
     total: calls.length,
+    ruleVersion,
+    onlyCurrent: onlyCurrent && ruleVersion !== null,
+    // 全部紀錄裡，目前規則版本與舊版本各幾筆（不受 onlyCurrent 影響，畫面用來決定要不要顯示切換）
+    versionCounts: { current: currentCount, older: allCalls.length - currentCount },
     pending: evaluated.filter((e) => !e.outcomes[0].ready).length,
     horizons: byHorizon,
     // 偏多建議 20 日內先到目標的比例
@@ -128,6 +141,7 @@ function summarizeCalls(calls, barsBySymbol) {
       price: call.price,
       stance: call.stance,
       confidence: call.confidence,
+      ruleVersion: versionOf(call),
       stopLoss: call.stopLoss,
       targets: call.targets,
       outcomes,

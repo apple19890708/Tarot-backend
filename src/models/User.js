@@ -30,11 +30,23 @@ const userSchema = new mongoose.Schema(
     stockAccess: { type: Boolean, default: false },
     // 登入憑證的版本號：重設密碼、登出所有裝置時加 1，之前發出的 token 全部失效（見 middleware/auth.js）
     tokenVersion: { type: Number, default: 0 },
+    // 最後一次登入（密碼、Google、註冊）的時間與方式；舊帳號沒有
+    lastLoginAt: { type: Date, default: null },
+    lastLoginMethod: { type: String, enum: ['password', 'google', 'register', null], default: null },
+    // 最後一次帶 token 呼叫 API 的時間（middleware/auth.js 更新，同一小時內只寫一次）。
+    // 只看登入時間看不出活不活躍：token 有效 7 天，這段期間一直在用也不會再登入
+    lastActiveAt: { type: Date, default: null },
+    // 管理者停用的帳號：不能登入，已發出的 token 也失效（停用時 tokenVersion 加 1，middleware 也會擋）
+    disabled: { type: Boolean, default: false },
+    disabledAt: { type: Date, default: null },
   },
   {
     timestamps: true,
   },
 )
+
+// 管理頁依最後活動排序、篩「30 天沒來」
+userSchema.index({ lastActiveAt: -1 })
 
 // 回給前端的形狀，永遠不含 passwordHash
 userSchema.methods.toPublicJSON = function toPublicJSON() {
@@ -49,13 +61,30 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
   }
 }
 
+// 管理頁用的形狀：多了登入、活動、停用狀態與登入方式。
+// 有沒有設密碼要查詢時帶 .select('+passwordHash') 才知道，這裡只回布林，雜湊本身永遠不出去
+userSchema.methods.toAdminJSON = function toAdminJSON() {
+  return {
+    ...this.toPublicJSON(),
+    lastLoginAt: this.lastLoginAt ?? null,
+    lastLoginMethod: this.lastLoginMethod ?? null,
+    lastActiveAt: this.lastActiveAt ?? null,
+    disabled: Boolean(this.disabled),
+    disabledAt: this.disabledAt ?? null,
+    loginMethods: { password: Boolean(this.passwordHash), google: Boolean(this.googleId) },
+  }
+}
+
 // 能不能用 AI 解析：admin 一律可以，member 要被開通
+// 停用的帳號一律不行：背景排程（到價推播、資產快照）不經過 middleware，只靠這兩個方法判斷
 userSchema.methods.canUseAi = function canUseAi() {
+  if (this.disabled) return false
   return this.role === 'admin' || Boolean(this.aiAccess)
 }
 
 // 能不能用金融股市功能：admin 一律可以，member 要被開通
 userSchema.methods.canUseStock = function canUseStock() {
+  if (this.disabled) return false
   return this.role === 'admin' || Boolean(this.stockAccess)
 }
 

@@ -3,6 +3,7 @@
 // 只用已經抓到的資料：5 年日 K（年線、半年線）、大盤序列、買進持有的年化報酬、估值排名、月營收。
 const { round } = require('./indicators')
 const { smaSeries } = require('./series')
+const { valuationBasis } = require('./twseData')
 
 // 年線、半年線（交易日）
 const YEAR_DAYS = 240
@@ -52,7 +53,8 @@ function trendEvidence(series, price) {
     label: price >= year ? '股價站在年線之上' : '股價跌破年線',
     detail: `年線（近 240 個交易日平均價）${fmt(round(year))}，現價 ${fmt(price)}`,
     direction: price >= year ? 1 : -1,
-    weight: 2,
+    // 年線位置、年線方向、半年線 vs 年線講的都是長期趨勢，三項合計最多 2 分（1＋0.5＋0.5），不讓趨勢單獨決定結論
+    weight: 1,
   })
 
   const slope = ((year / yearBefore) - 1) * 100
@@ -62,7 +64,7 @@ function trendEvidence(series, price) {
     label: slopeDirection > 0 ? '年線往上' : slopeDirection < 0 ? '年線往下' : '年線走平',
     detail: `年線和 ${SLOPE_LOOKBACK} 個交易日前比 ${signed(round(slope))}%${slopeDirection === 0 ? '，變化不大，不列入' : ''}`,
     direction: slopeDirection,
-    weight: slopeDirection === 0 ? 0 : 1,
+    weight: slopeDirection === 0 ? 0 : 0.5,
   })
 
   evidence.push({
@@ -70,7 +72,7 @@ function trendEvidence(series, price) {
     label: half >= year ? '半年線在年線之上' : '半年線在年線之下',
     detail: `半年線（近 120 個交易日平均價）${fmt(round(half))}，年線 ${fmt(round(year))}`,
     direction: half >= year ? 1 : -1,
-    weight: 1,
+    weight: 0.5,
   })
 
   return { evidence, yearLine: round(year) }
@@ -122,13 +124,15 @@ function holdReturnEvidence(strategies) {
 
 function valuationEvidence(valuation) {
   if (!valuation) return []
-  const { pe, pePercentile, dividendYield, yieldPercentile } = valuation
+  const { pe, dividendYield } = valuation
+  // 有同產業的百分位就用同產業（金融股本益比天生低、科技股天生高）
+  const { pePercentile, yieldPercentile, scope } = valuationBasis(valuation)
   if (pe !== null && pePercentile !== null && pePercentile >= EXPENSIVE_PE_PCT) {
     return [
       {
         group: '估值',
         label: `本益比 ${pe} 倍，偏貴`,
-        detail: `比 ${pePercentile}% 的上市櫃公司貴`,
+        detail: `比 ${pePercentile}% 的${scope}公司貴`,
         direction: -1,
         weight: 1,
       },
@@ -141,7 +145,7 @@ function valuationEvidence(valuation) {
       {
         group: '估值',
         label: cheapPe ? `本益比 ${pe} 倍，偏便宜` : `殖利率 ${dividendYield}%，屬於高殖利率`,
-        detail: cheapPe ? `比 ${100 - pePercentile}% 的上市櫃公司便宜` : `高於 ${yieldPercentile}% 的上市櫃公司`,
+        detail: cheapPe ? `比 ${100 - pePercentile}% 的${scope}公司便宜` : `高於 ${yieldPercentile}% 的${scope}公司`,
         direction: 1,
         weight: 1,
       },

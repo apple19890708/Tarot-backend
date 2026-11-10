@@ -110,6 +110,27 @@ function highLow(highs, lows, days) {
   return { high: Math.max(...highs.slice(-days)), low: Math.min(...lows.slice(-days)) }
 }
 
+// ATR（平均真實波幅，Wilder 平滑）：真實波幅取 高−低、|高−昨收|、|低−昨收| 三者最大（跳空也算）。
+// 和 series.js 的 atrSeries 同一個算法，這裡只回傳最後一天。高低缺值用收盤代替
+function atr(highs, lows, closes, period = 14) {
+  if (closes.length <= period) {
+    return null
+  }
+  const trueRange = (i) => {
+    const high = highs[i] ?? closes[i]
+    const low = lows[i] ?? closes[i]
+    const prev = closes[i - 1]
+    return Math.max(high - low, Math.abs(high - prev), Math.abs(low - prev))
+  }
+  let value = 0
+  for (let i = 1; i <= period; i += 1) value += trueRange(i)
+  value /= period
+  for (let i = period + 1; i < closes.length; i += 1) {
+    value = (value * (period - 1) + trueRange(i)) / period
+  }
+  return value
+}
+
 // 最後一天的成交量相對前 20 日均量的倍數
 function volumeRatio(volumes, period = 20) {
   const valid = volumes.filter((value) => Number.isFinite(value) && value > 0)
@@ -154,6 +175,7 @@ function computeIndicators(bars) {
     high60: range60 ? round(range60.high) : null,
     low60: range60 ? round(range60.low) : null,
     volumeRatio: round(volumeRatio(volumes), 2),
+    atr14: round(atr(highs, lows, closes, 14)),
   }
 }
 
@@ -167,5 +189,6 @@ module.exports = {
   changeOver,
   highLow,
   volumeRatio,
+  atr,
   computeIndicators,
 }

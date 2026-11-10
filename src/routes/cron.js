@@ -27,6 +27,8 @@ function createCronRouter({
   syncNews = null,
   // 財經新聞同步（v17 規格 G，自己有 15 分鐘的間隔限制）；沒傳就略過
   syncFinanceNews = null,
+  // 除息前推播（v20 階段 6，台股盤中才跑、自己去重）；沒傳就略過
+  remindExDividends = null,
 }) {
   const router = express.Router()
 
@@ -85,6 +87,15 @@ function createCronRouter({
           result.financeNews = await syncFinanceNews()
         } catch (error) {
           console.error('財經新聞同步失敗：', error.message)
+        }
+      }
+
+      // 2b. 除息前推播
+      if (remindExDividends) {
+        try {
+          result.exDividendReminders = await remindExDividends()
+        } catch (error) {
+          console.error('除息前推播失敗：', error.message)
         }
       }
 

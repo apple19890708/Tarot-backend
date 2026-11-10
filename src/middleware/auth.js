@@ -6,14 +6,31 @@ const { verifyToken, readBearerToken } = require('../lib/jwt')
 // 舊 token 沒有 ver、舊帳號沒有 tokenVersion，都當成 0，所以上線這個檢查不會把現有的人登出
 const versionOf = (value) => (Number.isInteger(value) ? value : 0)
 
-function createAuthMiddleware({ findUserById, secret } = {}) {
-  // 解析 token 並回資料庫確認：帳號還在、版本號一致。任何一項不符回 null（當成沒登入）
+// 最後活動時間同一小時內只寫一次：每個請求都寫資料庫太浪費，管理頁看「多久沒來」小時級就夠
+const ACTIVE_WRITE_MS = 60 * 60 * 1000
+
+// touchUser(id, date)：更新最後活動時間（可省略，測試不用連資料庫）
+function createAuthMiddleware({ findUserById, secret, touchUser = null, now = () => Date.now() } = {}) {
+  // 解析 token 並回資料庫確認：帳號還在、沒被停用、版本號一致。任何一項不符回 null（當成沒登入）
   async function resolveUser(req) {
     const payload = verifyToken(readBearerToken(req.headers.authorization), { secret })
     if (!payload) return null
     const user = await findUserById(payload.sub)
-    if (!user || versionOf(payload.ver) !== versionOf(user.tokenVersion)) return null
+    if (!user || user.disabled || versionOf(payload.ver) !== versionOf(user.tokenVersion)) return null
+    markActive(user)
     return { userId: payload.sub, user }
+  }
+
+  // 不等它寫完、失敗也不影響請求
+  function markActive(user) {
+    if (!touchUser) return
+    const last = user.lastActiveAt ? new Date(user.lastActiveAt).getTime() : 0
+    if (now() - last < ACTIVE_WRITE_MS) return
+    const at = new Date(now())
+    user.lastActiveAt = at
+    Promise.resolve()
+      .then(() => touchUser(user._id ?? user.id, at))
+      .catch((error) => console.error('更新最後活動時間失敗：', error.message))
   }
 
   // 有 token 就解析並掛上 req.auth，沒有、無效或已被登出也放行（當成訪客）；
@@ -92,4 +109,4 @@ function createAuthMiddleware({ findUserById, secret } = {}) {
   return { optionalAuth, requireAuth, requireAdmin, requireAiAccess, hasAiAccess, requireStockAccess, hasStockAccess }
 }
 
-module.exports = { createAuthMiddleware, versionOf }
+module.exports = { createAuthMiddleware, versionOf, ACTIVE_WRITE_MS }

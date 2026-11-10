@@ -8,6 +8,7 @@
 // 個股常跟著大盤走，所以可以傳入大盤的序列（context），多加兩個大盤特徵；
 // 同時也會算一次「不加大盤」的準確率，讓人看得出大盤特徵到底有沒有幫助。
 const { round } = require('./indicators')
+const { wilsonInterval } = require('./backtest')
 
 const HORIZON = 5
 const TRAIN_RATIO = 0.8
@@ -17,6 +18,13 @@ const L2 = 0.01
 // 樣本外準確率至少要比基準高這麼多（百分點），而且測試樣本夠多，才算有參考價值
 const MIN_EDGE = 3
 const MIN_TEST_SAMPLES = 100
+// 另外要求準確率的信賴區間整段高於基準（規則版本 3）。預測的是 N 天後漲跌，相鄰兩天的答案幾乎一樣
+// （今天和明天的 5 日報酬重疊 4 天），所以獨立樣本數只算「測試筆數 ÷ N」；約 230 筆測試其實只有約 46 筆獨立的，
+// 贏基準 3 個百分點完全在誤差內
+function accuracyInterval(accuracy, testSamples, horizon) {
+  const effective = Math.max(1, Math.floor(testSamples / horizon))
+  return { effective, interval: wilsonInterval(Math.round((accuracy / 100) * effective), effective) }
+}
 
 // 特徵：全部是相對值（比率、指標），不同價位的股票可以用同一套
 const FEATURES = [
@@ -174,6 +182,7 @@ function predictDirection(series, { horizon = HORIZON, context = null } = {}) {
   }
 
   const edge = result.accuracy - result.baselineAccuracy
+  const { effective, interval } = accuracyInterval(result.accuracy, result.testSamples, horizon)
   return {
     model: '邏輯迴歸',
     horizon,
@@ -186,7 +195,10 @@ function predictDirection(series, { horizon = HORIZON, context = null } = {}) {
     testSamples: result.testSamples,
     testFrom: result.testFrom,
     testTo: result.testTo,
-    reliable: edge >= MIN_EDGE && result.testSamples >= MIN_TEST_SAMPLES,
+    // 獨立樣本數與準確率的合理範圍（%）
+    effectiveSamples: effective,
+    accuracyInterval: interval,
+    reliable: edge >= MIN_EDGE && result.testSamples >= MIN_TEST_SAMPLES && interval !== null && interval.low > result.baselineAccuracy,
     // 有加大盤特徵時：大盤的名稱，以及不加大盤時的準確率（比較大盤特徵有沒有幫助）
     marketContext: withoutMarket === null ? null : { label: context.label, accuracyWithoutMarket: withoutMarket },
     factors: result.factors,

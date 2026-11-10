@@ -20,12 +20,12 @@ const marketWatchSchema = new mongoose.Schema(
       name: { type: String, default: '' },
     },
     // 持股的買賣紀錄（依陣列順序先進先出沖銷），空陣列代表沒有持股。損益由 services/market/portfolio.js 計算。
-    // date 是成交日期（選填，YYYY-MM-DD）
+    // date 是成交日期（選填，YYYY-MM-DD）。stockDividend（v20）是配股：price 為 0、date 是除權日
     trades: {
       type: [
         new mongoose.Schema(
           {
-            side: { type: String, enum: ['buy', 'sell'], required: true },
+            side: { type: String, enum: ['buy', 'sell', 'stockDividend'], required: true },
             quantity: { type: Number, required: true },
             price: { type: Number, required: true },
             date: { type: String, default: null },
@@ -42,6 +42,8 @@ const marketWatchSchema = new mongoose.Schema(
           {
             amount: { type: Number, required: true },
             date: { type: String, default: null },
+            // 從應收股利帶入的（v20）：記下是哪一次除息，同一次不會帶入兩次；手動記的沒有
+            exDate: { type: String, default: null },
           },
           { _id: false },
         ),

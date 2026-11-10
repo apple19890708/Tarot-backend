@@ -16,6 +16,18 @@ const marketProfileSchema = new mongoose.Schema(
       twMinFee: { type: Number, default: 20, min: 0, max: 1000 },
       usFee: { type: Number, default: 0, min: 0, max: 100 },
     },
+    // 獲利與股利（v20）：領股利時的扣款。台股單次股利達 nhiThreshold 元扣二代健保補充保費 nhiRate；
+    // 美股扣預扣稅 usWithholding。沒設定過就用 services/market/income.js 的預設值
+    income: {
+      nhi: { type: Boolean, default: true },
+      nhiRate: { type: Number, default: 0.0211, min: 0, max: 0.1 },
+      nhiThreshold: { type: Number, default: 20000, min: 0, max: 1000000 },
+      usWithholding: { type: Number, default: 0.3, min: 0, max: 0.5 },
+    },
+    // 提醒（v20）：exDividend＝追蹤的台股除息（除權）前一個交易日推播「今天收盤前持有才領得到」；預設關閉
+    reminders: {
+      exDividend: { type: Boolean, default: false },
+    },
     // 股市總覽的版面（v19）：{ version, blocks: [{ type, visible, options }] }，由 services/market/dashboard.js 驗證；
     // null＝沒自訂過，前端用預設版面
     dashboard: { type: mongoose.Schema.Types.Mixed, default: null },

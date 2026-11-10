@@ -147,7 +147,11 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
       PushSubscription.distinct('user'),
       MarketProfile.find({ 'discord.webhookUrl': { $ne: null } }),
     ])
-    const ids = new Map([...pushUsers, ...profiles.map((p) => p.user)].map((id) => [String(id), id]))
+    // Discord 只給 admin：被降級的人留著的 webhook 不算（不然排程每一輪都要白跑一次「送不出去」，v20 審查）
+    // 綁 Discord 的人很少（只有 admin 能綁），逐一用 isAdmin 確認即可
+    const discordUsers = profiles.map((p) => p.user)
+    const admins = (await Promise.all(discordUsers.map(async (id) => ((await isAdmin(id)) ? id : null)))).filter(Boolean)
+    const ids = new Map([...pushUsers, ...admins].map((id) => [String(id), id]))
     return [...ids.values()]
   }
 
@@ -189,7 +193,23 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
     return sent
   }
 
-  return { status, addDevice, removeDevice, linkDiscord, unlinkDiscord, sendTest, subscriberIds, notifyAlerts }
+  // 一則一般通知（v20 除息前推播）：瀏覽器推播＋admin 的 Discord。任一管道送出回 true
+  async function notifyUser(userId, { title, body, url }) {
+    let delivered = (await pushToUser(userId, { title, body, url })).sent > 0
+    const discordUrl = await discordUrlOf(userId)
+    if (discordUrl) {
+      try {
+        await discord.send(discordUrl, `${title}\n${body}`)
+        delivered = true
+      } catch (error) {
+        // 不印出網址
+        console.error('Discord 推播失敗：', error.message)
+      }
+    }
+    return delivered
+  }
+
+  return { status, addDevice, removeDevice, linkDiscord, unlinkDiscord, sendTest, subscriberIds, notifyAlerts, notifyUser }
 }
 
 module.exports = { createNotifier }

@@ -11,10 +11,29 @@ const URLS = {
   bfi82u: 'https://www.twse.com.tw/rwd/zh/fund/BFI82U',
   margin: 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN',
   twseValuation: 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL',
+  // 備援：同一份資料的網站版。2026-11-10 實測 OpenAPI 回「因為安全性考量，您所執行的頁面無法呈現」（HTML），上市股票的估值全部消失
+  twseValuationDaily: 'https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d',
   tpexValuation: 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis',
   tpexInsti: 'https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading',
   tpexMargin: 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance',
+  // 上市／上櫃公司基本資料（只取產業別）
+  twseCompanies: 'https://openapi.twse.com.tw/v1/opendata/t187ap03_L',
+  tpexCompanies: 'https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O',
 }
+
+// 證交所產業別代碼（上市、上櫃共用）
+const INDUSTRY_LABELS = {
+  '01': '水泥', '02': '食品', '03': '塑膠', '04': '紡織纖維', '05': '電機機械', '06': '電器電纜', '08': '玻璃陶瓷',
+  '09': '造紙', '10': '鋼鐵', '11': '橡膠', '12': '汽車', '14': '建材營造', '15': '航運', '16': '觀光餐旅',
+  '17': '金融保險', '18': '貿易百貨', '19': '綜合', '20': '其他', '21': '化學', '22': '生技醫療', '23': '油電燃氣',
+  '24': '半導體', '25': '電腦及週邊設備', '26': '光電', '27': '通信網路', '28': '電子零組件', '29': '電子通路',
+  '30': '資訊服務', '31': '其他電子', '32': '文化創意', '33': '農業科技', '34': '電子商務', '35': '綠能環保',
+  '36': '數位雲端', '37': '運動休閒', '38': '居家生活',
+}
+// 同產業至少要有這麼多家有數字的公司，百分位才有意義；不夠就用全市場
+const MIN_INDUSTRY_PEERS = 8
+// 產業別幾乎不會變，一天抓一次
+const TTL_INDUSTRY = 24 * 60 * 60 * 1000
 
 // 過去日期的資料不會再變，快取久一點；當天的資料可能還沒公布或會更新
 const TTL_PAST = 24 * 60 * 60 * 1000
@@ -140,9 +159,20 @@ function createTwseData({ fetchJson, cache, today }) {
     return cached('valuation', TTL_LATEST, async () => {
       const [twse, tpex] = await Promise.allSettled([fetchJson(URLS.twseValuation), fetchJson(URLS.tpexValuation)])
       const map = new Map()
-      if (twse.status === 'fulfilled') {
-        for (const row of twse.value || []) {
+      if (twse.status === 'fulfilled' && Array.isArray(twse.value) && twse.value.length > 0) {
+        for (const row of twse.value) {
           map.set(row.Code, { pe: num(row.PEratio) || null, dividendYield: num(row.DividendYield), pb: num(row.PBratio) })
+        }
+      } else {
+        // OpenAPI 失敗（被擋、回 HTML）改抓網站版；欄位：代號、名稱、收盤價、殖利率、股利年度、本益比、股價淨值比、財報年/季
+        if (twse.status === 'rejected') console.error('上市估值（OpenAPI）失敗，改用網站版：', twse.reason?.message)
+        try {
+          const payload = await fetchJson(`${URLS.twseValuationDaily}?response=json&selectType=ALL`)
+          for (const row of payload?.stat === 'OK' ? payload.data || [] : []) {
+            map.set(row[0], { pe: num(row[5]) || null, dividendYield: num(row[3]), pb: num(row[6]) })
+          }
+        } catch (error) {
+          console.error('上市估值（網站版）也失敗：', error.message)
         }
       }
       if (tpex.status === 'fulfilled') {
@@ -158,24 +188,60 @@ function createTwseData({ fetchJson, cache, today }) {
     })
   }
 
-  // 這檔的估值，以及在全體上市櫃公司裡的百分位（本益比高於多少比例的公司）
+  // 代號 → 產業別代碼。原始資料約 1.7MB（含地址、董事長等），只留產業別，記憶體裡是一張小對照表。
+  // 抓不到就是空的 Map：估值退回全市場比較，不影響其他功能
+  function loadIndustries() {
+    return cached('industries', TTL_INDUSTRY, async () => {
+      const [twse, tpex] = await Promise.allSettled([fetchJson(URLS.twseCompanies), fetchJson(URLS.tpexCompanies)])
+      const map = new Map()
+      if (twse.status === 'fulfilled') {
+        for (const row of twse.value || []) if (row['公司代號'] && row['產業別']) map.set(row['公司代號'], String(row['產業別']).trim())
+      }
+      if (tpex.status === 'fulfilled') {
+        for (const row of tpex.value || []) {
+          if (row.SecuritiesCompanyCode && row.SecuritiesIndustryCode) map.set(row.SecuritiesCompanyCode, String(row.SecuritiesIndustryCode).trim())
+        }
+      }
+      return map
+    })
+  }
+
+  // 這檔的估值，以及在全體上市櫃公司裡的百分位（本益比高於多少比例的公司）。
+  // industry：同產業的百分位。金融股本益比天生低、科技股天生高，和全市場比會一直被判便宜或偏貴，判讀以同產業為準
   async function getValuation(code) {
-    const map = await loadValuation()
+    const [map, industries] = await Promise.all([loadValuation(), loadIndustries().catch(() => new Map())])
     const own = map.get(code)
     if (!own) return null
-    const percentile = (key, value) => {
+    const percentileIn = (codes, key, value, minCount) => {
       if (value === null || value === undefined) return null
-      const all = [...map.values()].map((v) => v[key]).filter((v) => v !== null && v > 0)
-      if (all.length < 50) return null
+      const all = codes.map((c) => map.get(c)?.[key]).filter((v) => v !== null && v !== undefined && v > 0)
+      if (all.length < minCount) return null
       return round((all.filter((v) => v < value).length / all.length) * 100, 0)
     }
+    const allCodes = [...map.keys()]
+    const industryCode = industries.get(code) ?? null
+    const peers = industryCode ? allCodes.filter((c) => industries.get(c) === industryCode) : []
+    const peerCount = peers.filter((c) => (map.get(c)?.pe ?? 0) > 0).length
+    const industry =
+      industryCode && INDUSTRY_LABELS[industryCode] && peerCount >= MIN_INDUSTRY_PEERS
+        ? {
+            code: industryCode,
+            label: INDUSTRY_LABELS[industryCode],
+            // 有本益比（獲利）的同產業公司數
+            count: peerCount,
+            pePercentile: percentileIn(peers, 'pe', own.pe, MIN_INDUSTRY_PEERS),
+            yieldPercentile: percentileIn(peers, 'dividendYield', own.dividendYield, MIN_INDUSTRY_PEERS),
+            pbPercentile: percentileIn(peers, 'pb', own.pb, MIN_INDUSTRY_PEERS),
+          }
+        : null
     return {
       pe: own.pe,
       dividendYield: own.dividendYield,
       pb: own.pb,
-      pePercentile: percentile('pe', own.pe),
-      yieldPercentile: percentile('dividendYield', own.dividendYield),
-      pbPercentile: percentile('pb', own.pb),
+      pePercentile: percentileIn(allCodes, 'pe', own.pe, 50),
+      yieldPercentile: percentileIn(allCodes, 'dividendYield', own.dividendYield, 50),
+      pbPercentile: percentileIn(allCodes, 'pb', own.pb, 50),
+      industry,
     }
   }
 
@@ -303,14 +369,19 @@ function streak(values) {
   return sign * count
 }
 
-function describeChips(chips, priceChange5d) {
+// volumeLots：同一段日子的總成交量（張，個股才有）。用來算淨買賣超佔成交量幾 %（volumePct），
+// 讓操作建議分得出「真的在買」和雜訊（台積電一天幾萬張，外資淨買幾百張不算數）
+function describeChips(chips, priceChange5d, { volumeLots = null } = {}) {
   if (!chips) return null
   const label = (name, values) => {
     const s = streak(values)
     const total = round(sum(values), 1)
+    const volumePct = chips.unit === '張' && volumeLots > 0 ? round((total / volumeLots) * 100, 2) : null
     const dir = total > 0 ? '買超' : total < 0 ? '賣超' : '持平'
-    const streakText = Math.abs(s) >= 2 ? `，連續 ${Math.abs(s)} 日${s > 0 ? '買超' : '賣超'}` : ''
-    return { name, total, streak: s, text: `${name}${chips.dates.length > 1 ? ` ${chips.dates.length} 日` : ''}${dir} ${Math.abs(total).toLocaleString('en-US')} ${chips.unit}${streakText}` }
+    // 連買賣方向和合計相反時（例如 5 日合計賣超、最近 2 天買超）寫成「最近連續」，免得一句話前後看起來矛盾
+    const against = Math.sign(s) !== 0 && Math.sign(s) !== Math.sign(total)
+    const streakText = Math.abs(s) >= 2 ? `，${against ? '最近' : ''}連續 ${Math.abs(s)} 日${s > 0 ? '買超' : '賣超'}` : ''
+    return { name, total, streak: s, volumePct, text: `${name}${chips.dates.length > 1 ? ` ${chips.dates.length} 日` : ''}${dir} ${Math.abs(total).toLocaleString('en-US')} ${chips.unit}${streakText}` }
   }
   const foreign = label('外資', chips.foreign)
   const trust = label('投信', chips.trust)
@@ -338,17 +409,31 @@ function describeChips(chips, priceChange5d) {
   return { foreign, trust, dealer, margin: marginNote }
 }
 
-function describeValuation(valuation) {
-  if (!valuation) return null
-  const notes = []
-  if (valuation.pe === null) notes.push('沒有本益比（近四季虧損或資料缺）')
-  else if (valuation.pePercentile !== null && valuation.pePercentile >= 85)
-    notes.push(`本益比 ${valuation.pe} 倍，高於 ${valuation.pePercentile}% 的上市櫃公司，估值偏貴`)
-  else if (valuation.pePercentile !== null && valuation.pePercentile <= 20)
-    notes.push(`本益比 ${valuation.pe} 倍，低於 ${100 - valuation.pePercentile}% 的上市櫃公司，估值偏便宜`)
-  if (valuation.dividendYield !== null && valuation.yieldPercentile !== null && valuation.yieldPercentile >= 80)
-    notes.push(`殖利率 ${valuation.dividendYield}%，屬於高殖利率`)
-  return { notes, expensive: valuation.pePercentile !== null && valuation.pePercentile >= 85 }
+// 判讀用哪一組百分位：有同產業的就用同產業，否則全市場。scope 是放進句子的比較對象
+function valuationBasis(valuation) {
+  const industry = valuation?.industry
+  if (industry && (industry.pePercentile !== null || industry.yieldPercentile !== null)) {
+    return {
+      pePercentile: industry.pePercentile,
+      yieldPercentile: industry.yieldPercentile,
+      scope: `同產業（${industry.label}）`,
+    }
+  }
+  return { pePercentile: valuation?.pePercentile ?? null, yieldPercentile: valuation?.yieldPercentile ?? null, scope: '上市櫃' }
 }
 
-module.exports = { createTwseData, describeChips, describeValuation, streak, CHIP_DAYS }
+function describeValuation(valuation) {
+  if (!valuation) return null
+  const { pePercentile, yieldPercentile, scope } = valuationBasis(valuation)
+  const notes = []
+  if (valuation.pe === null) notes.push('沒有本益比（近四季虧損或資料缺）')
+  else if (pePercentile !== null && pePercentile >= 85)
+    notes.push(`本益比 ${valuation.pe} 倍，高於 ${pePercentile}% 的${scope}公司，估值偏貴`)
+  else if (pePercentile !== null && pePercentile <= 20)
+    notes.push(`本益比 ${valuation.pe} 倍，低於 ${100 - pePercentile}% 的${scope}公司，估值偏便宜`)
+  if (valuation.dividendYield !== null && yieldPercentile !== null && yieldPercentile >= 80)
+    notes.push(`殖利率 ${valuation.dividendYield}%，高於 ${yieldPercentile}% 的${scope}公司，屬於高殖利率`)
+  return { notes, expensive: pePercentile !== null && pePercentile >= 85, scope }
+}
+
+module.exports = { createTwseData, describeChips, describeValuation, valuationBasis, streak, CHIP_DAYS, INDUSTRY_LABELS }

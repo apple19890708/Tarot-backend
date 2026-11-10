@@ -12,21 +12,72 @@ const MIN_SAMPLES = 5
 const SPLIT_RATIO = 0.6
 // 前後兩段各至少要有這麼多次，才判斷一致性
 const MIN_SPLIT_SAMPLES = 3
-// 策略的停損版本：收盤跌破進場價這麼多 % 就出場
-const STOP_LOSS_PCT = 8
+// 策略的停損版本：收盤跌破「進場價 − 進場當天 ATR(14) × 這個倍數」就出場。
+// 用 ATR 而不是固定 %：波動小的 ETF 和波動大的小型股，停損寬度各自合理。2 倍 ATR 是常見的經驗值（不是針對個股最佳化的結果）
+const STOP_ATR_MULTIPLE = 2
+const STOP_ATR_PERIOD = 14
+// ATR 還算不出來時（資料太短）退回固定比例
+const FALLBACK_STOP_PCT = 8
 
-// 交易成本（一買一賣合計，%）：台股手續費 0.1425% × 2 ＋ 證交稅 0.3%；美股券商多半免手續費，只算一點滑價
-const ROUND_TRIP_COST = { tw: 0.585, us: 0.05 }
+// 交易成本（一買一賣合計，%）：台股手續費 0.1425% × 2 ＋ 證交稅（股票 0.3%、ETF 0.1%）；美股券商多半免手續費，只算一點滑價
+const ROUND_TRIP_COST = { tw: 0.585, twEtf: 0.385, us: 0.05 }
+
+// 訊號判定（規格見 doc/v17）：不用固定「差 5 個百分點」，改看 10 日上漲比例的信賴區間有沒有完全落在基準的一邊。
+// 次數少時區間寬、不容易過關；次數多時區間窄。z = 1.28 約是單邊 90% 的信心。
+const VERDICT_Z = 1.28
+// 5 日、20 日的上漲比例和各自基準差這麼多個百分點、而且方向和 10 日相反，就當成方向不一致
+const HORIZON_CONFLICT_PCT = 5
+
+// Wilson 信賴區間（%）：比常態近似在樣本少、比例接近 0 或 100% 時更可靠
+function wilsonInterval(wins, count, z = VERDICT_Z) {
+  if (count === 0) return null
+  const p = wins / count
+  const z2 = z * z
+  const center = (p + z2 / (2 * count)) / (1 + z2 / count)
+  const half = (z * Math.sqrt((p * (1 - p)) / count + z2 / (4 * count * count))) / (1 + z2 / count)
+  return { low: round((center - half) * 100, 1), high: round((center + half) * 100, 1) }
+}
+
+// 一個訊號的結論：direction 1 之後偏漲、-1 偏跌、0 沒有優勢；counted 為 false 代表不列入判斷（reason 說明原因）
+function judgeSignal(signal, baseline) {
+  const base = (days) => baseline.find((b) => b.days === days)?.winRate ?? null
+  const stat = (days) => signal.horizons.find((h) => h.days === days)
+  const s10 = stat(10)
+  if (!signal.sufficient || s10?.winRate === null || s10?.winRate === undefined || base(10) === null) {
+    return { direction: 0, counted: false, reason: 'few', interval: null }
+  }
+  const interval = wilsonInterval(s10.wins, s10.count)
+  if (signal.consistent === false) {
+    return { direction: 0, counted: false, reason: 'inconsistent', interval }
+  }
+  let direction = interval.low > base(10) ? 1 : interval.high < base(10) ? -1 : 0
+  let reason = direction === 0 ? 'noEdge' : 'edge'
+  if (direction !== 0) {
+    const conflict = [5, 20].some((days) => {
+      const own = stat(days)?.winRate
+      const ref = base(days)
+      if (own === null || own === undefined || ref === null) return false
+      return (own - ref) * direction <= -HORIZON_CONFLICT_PCT
+    })
+    if (conflict) {
+      direction = 0
+      reason = 'horizonConflict'
+    }
+  }
+  return { direction, counted: true, reason, interval }
+}
 
 function stats(returns) {
   if (returns.length === 0) {
-    return { count: 0, winRate: null, avgReturn: null, medianReturn: null, worst: null, best: null }
+    return { count: 0, wins: 0, winRate: null, avgReturn: null, medianReturn: null, worst: null, best: null }
   }
   const sorted = [...returns].sort((a, b) => a - b)
   const mid = Math.floor(sorted.length / 2)
   const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+  const wins = returns.filter((r) => r > 0).length
   return {
     count: returns.length,
+    wins,
     winRate: round((returns.filter((r) => r > 0).length / returns.length) * 100, 1),
     avgReturn: round(returns.reduce((sum, r) => sum + r, 0) / returns.length),
     medianReturn: round(median),
@@ -116,8 +167,10 @@ function backtestSignals(series, currentSignals) {
         consistent: comparable ? edgeSign(early) === edgeSign(late) || edgeSign(early) === 0 || edgeSign(late) === 0 : null,
       }
     })
+    // 結論在這裡統一算好，畫面和操作建議都用同一份，前端不另外判斷
+    .map((signal) => ({ ...signal, verdict: judgeSignal(signal, baseline) }))
 
-  return { horizons: HORIZONS, baseline, signals, minSamples: MIN_SAMPLES }
+  return { horizons: HORIZONS, baseline, signals, minSamples: MIN_SAMPLES, verdictZ: VERDICT_Z }
 }
 
 // ---- 策略回測 ----
@@ -182,9 +235,15 @@ const STRATEGIES = [
 ]
 
 // 收盤時決定，隔天起的報酬才算進去；進出各扣一半的來回成本
-function runStrategy(series, strategy, { start, end = series.closes.length, cost, sampleEvery = 1, stopLossPct = null }) {
+function stopPriceAt(series, i, multiple) {
+  const atr = series.atr14?.[i]
+  const close = series.closes[i]
+  return atr === null || atr === undefined ? close * (1 - FALLBACK_STOP_PCT / 100) : close - atr * multiple
+}
+
+function runStrategy(series, strategy, { start, end = series.closes.length, cost, sampleEvery = 1, stopAtrMultiple = null }) {
   const { closes, dates } = series
-  let entryPrice = null
+  let stopPrice = null
   let stops = 0
   let equity = 100
   let peak = 100
@@ -203,14 +262,14 @@ function runStrategy(series, strategy, { start, end = series.closes.length, cost
     peak = Math.max(peak, equity)
     maxDrawdown = Math.min(maxDrawdown, (equity / peak - 1) * 100)
 
-    // 停損優先於策略訊號：收盤跌破進場價一定比例就出場
-    const stopped = holding && stopLossPct !== null && closes[i] <= entryPrice * (1 - stopLossPct / 100)
+    // 停損優先於策略訊號：收盤跌破進場時算好的停損價就出場（停損價進場後固定，不跟著移動）
+    const stopped = holding && stopPrice !== null && closes[i] <= stopPrice
     const decision = stopped ? false : strategy.decide(series, i)
     if (decision === true && !holding) {
       holding = true
       equity *= 1 - cost / 200
       entryEquity = equity
-      entryPrice = closes[i]
+      stopPrice = stopAtrMultiple === null ? null : stopPriceAt(series, i, stopAtrMultiple)
     } else if (decision === false && holding) {
       holding = false
       equity *= 1 - cost / 200
@@ -259,13 +318,21 @@ function summaryOf(result) {
   }
 }
 
-function backtestStrategies(series, market) {
+function currentStopPct(series) {
+  const last = series.closes.length - 1
+  const atr = series.atr14?.[last]
+  if (atr === null || atr === undefined || !series.closes[last]) return FALLBACK_STOP_PCT
+  return round(((atr * STOP_ATR_MULTIPLE) / series.closes[last]) * 100, 1)
+}
+
+// etf：台股 ETF 的證交稅比股票低
+function backtestStrategies(series, market, { etf = false } = {}) {
   // 前 60 天用來暖機（MA60 才算得出來）
   const start = 60
   if (series.closes.length - start < 120) {
     return null
   }
-  const cost = ROUND_TRIP_COST[market] ?? ROUND_TRIP_COST.tw
+  const cost = market === 'tw' && etf ? ROUND_TRIP_COST.twEtf : (ROUND_TRIP_COST[market] ?? ROUND_TRIP_COST.tw)
   const sampleEvery = Math.max(1, Math.round((series.closes.length - start) / 150))
   const splitIndex = Math.floor(start + (series.closes.length - start) * SPLIT_RATIO)
   const buyHold = STRATEGIES[0]
@@ -280,7 +347,10 @@ function backtestStrategies(series, market) {
     splitDate: series.dates[splitIndex],
     years: round((series.closes.length - start) / 252, 1),
     roundTripCost: cost,
-    stopLossPct: STOP_LOSS_PCT,
+    stopAtrMultiple: STOP_ATR_MULTIPLE,
+    stopAtrPeriod: STOP_ATR_PERIOD,
+    // 以最後一天收盤和 ATR 算，現在進場的話停損距離約是股價的幾 %（讓人對「2 倍 ATR」有感覺）
+    stopNowPct: currentStopPct(series),
     strategies: STRATEGIES.map((strategy) => {
       const result = runStrategy(series, strategy, { start, cost, sampleEvery })
       const earlyResult = early(strategy)
@@ -289,7 +359,7 @@ function backtestStrategies(series, market) {
         ...result,
         // 加上停損的版本（買進持有不適用）
         withStop:
-          strategy.key === 'buyHold' ? null : summaryOf(runStrategy(series, strategy, { start, cost, stopLossPct: STOP_LOSS_PCT })),
+          strategy.key === 'buyHold' ? null : summaryOf(runStrategy(series, strategy, { start, cost, stopAtrMultiple: STOP_ATR_MULTIPLE })),
         // 分段驗證：前段與後段各自的報酬，和同期間的買進持有比
         periods: {
           early: { ...summaryOf(earlyResult), buyHold: buyHoldEarly },
@@ -305,4 +375,4 @@ function backtestStrategies(series, market) {
   }
 }
 
-module.exports = { HORIZONS, MIN_SAMPLES, STOP_LOSS_PCT, backtestSignals, backtestStrategies, runStrategy, STRATEGIES, stats }
+module.exports = { HORIZONS, MIN_SAMPLES, ROUND_TRIP_COST, wilsonInterval, judgeSignal, STOP_ATR_MULTIPLE, FALLBACK_STOP_PCT, backtestSignals, backtestStrategies, runStrategy, STRATEGIES, stats }

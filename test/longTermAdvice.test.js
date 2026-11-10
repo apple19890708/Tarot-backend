@@ -42,6 +42,16 @@ test('長期建議：站上往上的年線、半年線在上、長期報酬好 �
   assert.ok(advice.forHolders.includes('189.75（年線）'))
 })
 
+test('長期建議：年線三項合計最多 2 分，光靠趨勢剛好到「適合」的門檻，一項反向就不夠', () => {
+  const price = rising.closes.at(-1)
+  const trendOnly = buildLongTermAdvice({ series: rising, price })
+  assert.equal(trendOnly.score, 2)
+  assert.equal(trendOnly.stance, 'bullish')
+  // 舊版趨勢一共 4 分，估值偏貴（−1）壓不過；現在會變成中性
+  const expensive = buildLongTermAdvice({ series: rising, price, valuation: { pe: 60, pePercentile: 95, dividendYield: 1, yieldPercentile: 10 } })
+  assert.equal(expensive.stance, 'neutral')
+})
+
 test('長期建議：跌破往下的年線、估值偏貴、營收衰退 → 不適合長期持有', () => {
   const price = falling.closes.at(-1)
   const advice = buildLongTermAdvice({

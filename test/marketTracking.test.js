@@ -5,8 +5,8 @@ const express = require('express')
 const { evaluateCall, summarizeCalls, recordCalls } = require('../src/services/market/tracking')
 const { describeChips, describeValuation, streak } = require('../src/services/market/twseData')
 const { alignDates } = require('../src/services/market/prediction')
-const { computeSeries } = require('../src/services/market/series')
-const { backtestStrategies } = require('../src/services/market/backtest')
+const { computeSeries, atrSeries } = require('../src/services/market/series')
+const { backtestStrategies, runStrategy, STOP_ATR_MULTIPLE } = require('../src/services/market/backtest')
 const { createMarketRouter } = require('../src/routes/market')
 
 const bars = (closes, start = 1) =>
@@ -58,6 +58,26 @@ test('對答案：統計整體命中率、各方向與各信心的命中率，�
   assert.equal(five.neutral.hitRate, null)
   assert.equal(five.byConfidence.high.hitRate, 100)
   assert.equal(summary.pending, 1)
+  // 對照組：一路上漲，每次猜漲都對
+  assert.equal(five.alwaysUpRate, 100)
+})
+
+test('對答案：可以只看目前規則版本；舊紀錄沒有版本視為 1', () => {
+  const up = bars([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110])
+  const barsBySymbol = new Map([['A', up]])
+  const calls = [
+    { _id: 1, symbol: 'A', date: '2026-01-01', price: 100, stance: 'bullish', confidence: 'high' },
+    { _id: 2, symbol: 'A', date: '2026-01-02', price: 101, stance: 'bearish', confidence: 'low', ruleVersion: 2 },
+  ]
+  const all = summarizeCalls(calls, barsBySymbol, { ruleVersion: 2 })
+  assert.equal(all.total, 2)
+  assert.deepEqual(all.versionCounts, { current: 1, older: 1 })
+  assert.equal(all.calls.find((c) => c.id === '1').ruleVersion, 1)
+  const current = summarizeCalls(calls, barsBySymbol, { ruleVersion: 2, onlyCurrent: true })
+  assert.equal(current.total, 1)
+  assert.equal(current.onlyCurrent, true)
+  assert.deepEqual(current.versionCounts, { current: 1, older: 1 })
+  assert.equal(current.horizons[0].hitRate, 0)
 })
 
 test('對答案：只記錄有建議的標的，同一天同一標的覆蓋', async () => {
@@ -90,6 +110,16 @@ test('籌碼：連續買賣超天數與判讀文字', () => {
   // 股價跌、融資增加 10%：偏空
   assert.equal(summary.margin.direction, -1)
   assert.match(summary.margin.text, /散戶在接刀/)
+  // 合計賣超但最近連買：寫「最近連續」
+  const turning = describeChips({ unit: '張', dates: ['a', 'b', 'c'], foreign: [-50, 5, 6], trust: [0, 0, 0], dealer: [0, 0, 0], margin: null }, null)
+  assert.equal(turning.foreign.text, '外資 3 日賣超 39 張，最近連續 2 日買超')
+  // 沒給成交量：volumePct 是 null
+  assert.equal(summary.foreign.volumePct, null)
+  // 3 天共成交 6000 張，外資賣超 60 張 = 1%
+  const withVolume = describeChips({ unit: '張', dates: ['a'], foreign: [-60], trust: [0], dealer: [0], margin: null }, null, { volumeLots: 6000 })
+  assert.equal(withVolume.foreign.volumePct, -1)
+  // 大盤的單位是億元，不算比例
+  assert.equal(describeChips({ unit: '億元', dates: ['a'], foreign: [10], trust: [0], dealer: [0], margin: null }, null, { volumeLots: 6000 }).foreign.volumePct, null)
 })
 
 test('估值：本益比百分位 85 以上算偏貴', () => {
@@ -117,6 +147,42 @@ test('策略：有分段驗證與停損版本，買進持有不適用', () => {
   assert.equal(typeof maCross.robust, 'boolean')
   assert.equal(maCross.periods.early.buyHold, buyHold.periods.early.totalReturn)
   assert.ok(result.splitDate)
+})
+
+test('ATR：真實波幅含跳空，Wilder 平滑', () => {
+  // 每天高低差 2；第 3 天跳空上漲 10（昨收 100 → 今低 109），真實波幅取 |高−昨收| = 11
+  const closes = [100, 100, 100, 110, 110]
+  const highs = [101, 101, 101, 111, 111]
+  const lows = [99, 99, 99, 109, 109]
+  const atr = atrSeries(highs, lows, closes, 2)
+  assert.equal(atr[1], null)
+  assert.equal(atr[2], 2) // (2 + 2) / 2
+  assert.equal(atr[3], 6.5) // (2 × 1 + 11) / 2
+  assert.equal(atr[4], 4.25) // (6.5 + 2) / 2
+})
+
+test('策略停損：跌破「進場價 − 2 倍 ATR」就賣，停損價進場後固定', () => {
+  // 平盤 100（高低 ±1，ATR = 2），第 70 天買進，停損價 = 100 − 2 × 2 = 96；之後一路跌
+  const closes = Array.from({ length: 120 }, (_, i) => (i <= 70 ? 100 : 100 - (i - 70)))
+  const series = computeSeries(closes.map((close, i) => ({ date: `d${i}`, open: close, high: close + 1, low: close - 1, close, volume: 1000 })))
+  const buyOnce = { key: 't', label: 't', decide: (_s, i) => (i === 70 ? true : null) }
+  const withStop = runStrategy(series, buyOnce, { start: 60, cost: 0, stopAtrMultiple: STOP_ATR_MULTIPLE })
+  const noStop = runStrategy(series, buyOnce, { start: 60, cost: 0 })
+  assert.equal(withStop.stops, 1)
+  assert.equal(withStop.holdingNow, false)
+  assert.equal(withStop.totalReturn, -4) // 收盤 96 時賣出
+  assert.equal(noStop.holdingNow, true)
+  assert.ok(noStop.totalReturn < withStop.totalReturn)
+})
+
+test('策略停損：回傳 ATR 倍數與現在的停損距離', () => {
+  const closes = Array.from({ length: 400 }, (_, i) => 100 + 20 * Math.sin(i / 15) + i * 0.05)
+  const series = computeSeries(closes.map((close, i) => ({ date: `d${i}`, open: close, high: close + 1, low: close - 1, close, volume: 1000 })))
+  const result = backtestStrategies(series, 'tw')
+  assert.equal(result.stopAtrMultiple, 2)
+  assert.equal(result.stopAtrPeriod, 14)
+  assert.ok(result.stopNowPct > 0 && result.stopNowPct < 20)
+  assert.equal(typeof result.strategies.find((s) => s.key === 'maCross').withStop.stops, 'number')
 })
 
 // ---- 路由 ----
@@ -394,7 +460,7 @@ test('自訂追蹤：更新與清除持股、刪除；別人的或不存在的�
       { side: 'buy', quantity: 10, price: 180.5, date: '2026-10-01' },
       { side: 'sell', quantity: 4, price: 200, date: null },
     ])
-    assert.deepEqual(updatedItem.dividends, [{ amount: 3.2, date: null }])
+    assert.deepEqual(updatedItem.dividends, [{ amount: 3.2, date: null, exDate: null }])
     // 美股手續費預設 0：已實現 = 4 × (200 − 180.5)
     assert.equal(updatedItem.position.realized, 78)
     assert.equal(updatedItem.position.quantity, 6)

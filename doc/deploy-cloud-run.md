@@ -16,7 +16,7 @@
 | Cloud Run 服務 | `tarot-backend` |
 | 網址 | `https://tarot-backend-755135442588.us-west1.run.app` |
 | 自動部署 | Cloud Build 觸發條件 `tarot-backend-us-west1`（id `f8ffa608-2349-4678-9c09-49f16464598e`，區域 us-west1，GitHub 連線 `Orange-us`）：GitHub `apple19890708/Tarot-backend` 的 `main` 有新 commit 就在 us-west1 建置、映像存 us-west1 的 `cloud-run-source-deploy`、部署到 us-west1，全程不跨區 |
-| 資源上限 | 最多 1 台、沒流量縮到 0、1 vCPU／1GiB、請求上限 900 秒、只在處理請求時計費 |
+| 資源上限 | 最多 1 台、沒流量縮到 0、1 vCPU／1GiB、關閉啟動加速（`--no-cpu-boost`，啟動時不會用 2 倍 CPU 計費）、請求上限 900 秒、只在處理請求時計費 |
 | 環境變數 | 14 個，存在 Cloud Run 服務上；本機的來源檔是 `env.yaml`（不進版控） |
 | 資料庫 | MongoDB Atlas（白名單 `0.0.0.0/0`，因為 Cloud Run 對外 IP 不固定） |
 | 清理規則 | 映像檔保留最近 3 版（每版約 170 MB，3 版約 0.5 GB 免費額度內）、超過 30 天刪除（us-west1 的 `cloud-run-source-deploy`）；手動 `--source` 部署用的 bucket `run-sources-orangetarot-us-west1` |

@@ -14,6 +14,7 @@ const { backtestSignals, backtestStrategies } = require('./backtest')
 const { predictDirection } = require('./prediction')
 const { buildAdvice } = require('./advice')
 const { buildLongTermAdvice } = require('./longTermAdvice')
+const { isEtf } = require('./portfolio')
 const { createTwseData, describeChips, describeValuation } = require('./twseData')
 
 // 機器學習的大盤特徵：台股個股用加權指數、美股個股用標普 500
@@ -31,6 +32,8 @@ const MIN_RESEARCH_BARS = 250
 const { buildNameIndex, findMarketTargets, resolveTargetIn, searchTargets: searchLocalTargets, US_SYMBOL_PATTERN } = require('./symbols')
 
 const corporateEvents = require('./corporateEvents')
+const income = require('./income')
+const exDividendReminder = require('./exDividendReminder')
 const taifex = require('./taifex')
 const macro = require('./macro')
 const tpexIndex = require('./tpexIndex')
@@ -83,6 +86,8 @@ const URLS = {
   tpexList: 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
   mis: 'https://mis.twse.com.tw/stock/api/getStockInfo.jsp',
   yahooChart: 'https://query1.finance.yahoo.com/v8/finance/chart/',
+  // 證交所休市日（今年）
+  twseHolidays: 'https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule',
   // 非正式介面，只用來給美股輸入框的候選
   yahooSearch: 'https://query1.finance.yahoo.com/v1/finance/search',
 }
@@ -135,6 +140,12 @@ const FAILURE_TTL = 60 * 1000
 const WATCH_CONCURRENCY = 5
 // 選股技術面的歷史資料快取筆數（每筆 6 個月日 K，很小）
 const SCREEN_CACHE_MAX_ENTRIES = 300
+// 獲利與股利（v20）的歷史股利：一檔一筆、一天變動很少，快取 24 小時；獨立的快取，不擠掉共用快取的全市場資料
+const DIVIDEND_CACHE_MAX_ENTRIES = 400
+const DIVIDEND_TTL = 24 * 60 * 60 * 1000
+const DIVIDEND_FAILURE_TTL = 10 * 60 * 1000
+// 一位使用者最多 30 檔，同時最多抓這麼多檔
+const DIVIDEND_CONCURRENCY = 4
 
 function createCache(now, maxEntries = CACHE_MAX_ENTRIES) {
   const store = new Map()
@@ -169,6 +180,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
   const searchCache = createCache(now, SEARCH_CACHE_MAX_ENTRIES)
   // 選股技術面用的短期歷史（6 個月）：獨立的小快取，避免把共用快取裡的全市場資料擠掉
   const screenCache = createCache(now, SCREEN_CACHE_MAX_ENTRIES)
+  const dividendCache = createCache(now, DIVIDEND_CACHE_MAX_ENTRIES)
   // 進行中的全市場資料請求（快取剛過期時，同時進來的請求共用同一次下載）
   const inFlight = new Map()
   function once(key, load) {
@@ -443,19 +455,21 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
         !light && !detail && series && analysis && bars.length >= MIN_RESEARCH_BARS
           ? {
               backtest: backtestSignals(series, analysis.signals),
-              strategies: backtestStrategies(series, target.market),
+              strategies: backtestStrategies(series, target.market, { etf: isEtf(target) }),
               prediction: predictDirection(series, { context: extras.context || null }),
             }
           : null,
       chart: !light && series ? buildChart(series) : null,
       // 籌碼面（台股才有）：三大法人與融資融券，summary 是判讀文字
-      chips: extras.chips ? { ...extras.chips, summary: describeChips(extras.chips, indicators?.change5d ?? null) } : null,
+      chips: extras.chips
+        ? { ...extras.chips, summary: describeChips(extras.chips, indicators?.change5d ?? null, { volumeLots: chipVolumeLots(extras.chips, bars) }) }
+        : null,
       // 估值（台股個股才有）：本益比、殖利率、股價淨值比與在全體上市櫃的百分位
       valuation: extras.valuation ? { ...extras.valuation, summary: describeValuation(extras.valuation) } : null,
       barCount: bars.length,
     }
     // 操作建議要用到上面的全部資料，最後才算；輕量版缺回測與籌碼，算出來會不一致，所以不算
-    item.advice = light || detail ? null : buildAdvice(item)
+    item.advice = light || detail ? null : buildAdvice(item, { context: extras.context || null })
     // 長期建議（規格 H）：年線、大盤、買進持有年化、估值、月營收；歷史不到約一年時是 null
     if (item.advice) {
       item.advice.longTerm = buildLongTermAdvice({
@@ -1121,6 +1135,11 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
   async function loadCorporateEvents() {
     const cached = cache.get('corporate-events')
     if (cached !== undefined) return cached
+    // 同時進來的請求共用同一次下載（獲利與股利頁會同時從摘要和預告兩條路呼叫）
+    return once('corporate-events', fetchCorporateEvents)
+  }
+
+  async function fetchCorporateEvents() {
     const { URLS: E } = corporateEvents
     const [twseEx, tpexEx, twseRev, tpexRev] = await Promise.allSettled(
       [E.twseExDividend, E.tpexExDividend, E.twseRevenue, E.tpexRevenue].map((url) => fetchJson(url)),
@@ -1137,9 +1156,71 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     const events = {
       exDividends: corporateEvents.parseExDividends(all[0], all[1]),
       revenue: corporateEvents.parseRevenue(all[2], all[3]),
+      // 上市、上櫃的除權息預告都抓到才算完整：缺一邊時那一邊的股票看起來像「沒有預告」，
+      // 除息前推播錯過當天就沒了，所以只抓到一半時用短快取、提醒端也會跳過（v20 審查）
+      exDividendsComplete: all[0] !== null && all[1] !== null,
     }
-    cache.set('corporate-events', events, EVENTS_TTL)
+    cache.set('corporate-events', events, events.exDividendsComplete ? EVENTS_TTL : EVENTS_FAILURE_TTL)
     return events
+  }
+
+  // ---- 歷史股利與配股（v20，Yahoo events=div|split）----
+
+  // { cash, splits }（見 income.parseYahooEvents）；抓不到是 null（10 分鐘後再試）。5 年：股利成長（v20 階段 10）也用這份
+  async function loadDividendHistory(symbol, market) {
+    const key = `dividends:${symbol}`
+    const cached = dividendCache.get(key)
+    if (cached !== undefined) return cached
+    return once(key, async () => {
+      try {
+        const payload = await fetchJson(`${URLS.yahooChart}${encodeURIComponent(symbol)}?range=5y&interval=1mo&events=div%7Csplit`)
+        const result = payload?.chart?.result?.[0]
+        if (!result) throw new SymbolNotFoundError(symbol)
+        const timezone = result.meta?.exchangeTimezoneName || 'UTC'
+        const history = income.parseYahooEvents(result.events, { market, dateOf: (ts) => dateIn(timezone, new Date(ts * 1000)) })
+        dividendCache.set(key, history, DIVIDEND_TTL)
+        return history
+      } catch (error) {
+        console.error(`股利歷史失敗（${symbol}）：`, error.message)
+        dividendCache.set(key, null, DIVIDEND_FAILURE_TTL)
+        return null
+      }
+    })
+  }
+
+  // 依 targets 順序回傳；指數或沒有代號的是 null（不是失敗，呼叫端用 kind 分辨）
+  async function getDividendHistories(targets) {
+    const results = await settleLimited(targets, DIVIDEND_CONCURRENCY, (target) =>
+      target?.kind === 'stock' && target.symbol ? loadDividendHistory(target.symbol, target.market) : null,
+    )
+    return results.map((r) => (r.status === 'fulfilled' ? r.value : null))
+  }
+
+  // 證交所休市日（v20 除息前推播判斷「前一個交易日」）：Set<YYYY-MM-DD>；抓不到是 null（呼叫端只看週末）
+  async function getTwHolidays() {
+    const key = 'tw-holidays'
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    return once(key, async () => {
+      try {
+        const rows = await fetchJson(URLS.twseHolidays)
+        const holidays = Array.isArray(rows) ? exDividendReminder.parseHolidays(rows) : null
+        cache.set(key, holidays, holidays ? DIVIDEND_TTL : DIVIDEND_FAILURE_TTL)
+        return holidays
+      } catch (error) {
+        console.error('休市日表失敗：', error.message)
+        cache.set(key, null, DIVIDEND_FAILURE_TTL)
+        return null
+      }
+    })
+  }
+
+  // 台股除權息預告：Map<代號, [{ date, type, cashDividend, stockRatio }]>；抓不到是 null
+  // requireComplete：上市、上櫃有一邊沒抓到就回 null（除息前推播用，寧可這一輪不送）
+  async function getExDividendNotices({ requireComplete = false } = {}) {
+    const events = await loadCorporateEvents()
+    if (requireComplete && !events?.exDividendsComplete) return null
+    return events?.exDividends ?? null
   }
 
   // 自訂追蹤清單：每個標的的輕量摘要，順序和 targets 相同；查不到的是 null。
@@ -1271,6 +1352,9 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
     resolveTarget,
     getWatchSummaries,
     getWatchDetail,
+    getDividendHistories,
+    getExDividendNotices,
+    getTwHolidays,
     getAlertSignals,
     getMarketOverview,
     getIndexChart,
@@ -1339,6 +1423,19 @@ const WATCH_CHIPS_TIMEOUT_MS = 4000
 
 function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms).unref?.())])
+}
+
+// 籌碼那幾天的總成交量（張）：K 棒成交量是股，台股 1 張 = 1000 股。有任何一天對不到 K 棒或沒有成交量就回 null（不硬算）
+function chipVolumeLots(chips, bars) {
+  if (chips?.unit !== '張' || !chips.dates?.length) return null
+  const byDate = new Map(bars.map((bar) => [bar.date, bar.volume]))
+  let total = 0
+  for (const date of chips.dates) {
+    const volume = byDate.get(date)
+    if (!Number.isFinite(volume) || volume <= 0) return null
+    total += volume / 1000
+  }
+  return total
 }
 
 // 清單那一行的籌碼小標記：外資優先，其次投信；連續 2 日以上同方向才標
@@ -1487,6 +1584,13 @@ function formatItem(item) {
     lines.push(
       `估值：本益比 ${v.pe ?? '無'}${v.pe ? ` 倍${pct(v.pePercentile)}` : ''}；殖利率 ${v.dividendYield ?? '—'}%${pct(v.yieldPercentile)}；股價淨值比 ${v.pb ?? '—'}${pct(v.pbPercentile)}`,
     )
+    // 同產業比較：判讀（偏貴、偏便宜）以這組為準
+    if (v.industry) {
+      const peer = (p) => (p === null ? '—' : `高於 ${p}%`)
+      lines.push(
+        `同產業（${v.industry.label}，${v.industry.count} 家）比較：本益比${peer(v.industry.pePercentile)}、殖利率${peer(v.industry.yieldPercentile)}、股價淨值比${peer(v.industry.pbPercentile)}；判斷貴或便宜以同產業為準`,
+      )
+    }
   }
   if (item.research) {
     lines.push(...formatResearch(item.research))
@@ -1513,7 +1617,15 @@ function formatResearch({ backtest, strategies, prediction }) {
           ? `；前期 10 日上漲 ${signal.periods.early.winRate}%、後期 ${signal.periods.late.winRate}%，前後方向相反`
           : ''
       const note = (signal.sufficient ? '' : `（樣本不足 ${backtest.minSamples} 次，僅供參考）`) + consistency
-      lines.push(`- ${signal.label} ${signal.value}：過去出現 ${signal.occurrences} 次${note}；${horizons}`)
+      // 結論以 backtest.js 的 judgeSignal 為準，AI 不要自己用差幾個百分點重判
+      const verdict = signal.verdict
+      const verdictText =
+        verdict?.counted && verdict.interval
+          ? `；10 日上漲的合理範圍 ${verdict.interval.low}～${verdict.interval.high}%，結論：${
+              { edge: verdict.direction > 0 ? '之後偏漲' : '之後偏跌', noEdge: '沒有明顯優勢', horizonConflict: '5／20 日方向不一致，沒有明顯優勢' }[verdict.reason]
+            }`
+          : ''
+      lines.push(`- ${signal.label} ${signal.value}：過去出現 ${signal.occurrences} 次${note}；${horizons}${verdictText}`)
     }
   }
 
@@ -1524,7 +1636,7 @@ function formatResearch({ backtest, strategies, prediction }) {
     for (const s of strategies.strategies) {
       const trades = s.key === 'buyHold' ? '' : `、交易 ${s.trades} 次、勝率 ${pct(s.tradeWinRate)}、持有時間 ${pct(s.exposure)}`
       const now = s.key === 'buyHold' ? '' : s.holdingNow ? '，目前持有中' : '，目前空手'
-      const stop = s.withStop ? `；加 ${strategies.stopLossPct}% 停損後 ${signed(s.withStop.totalReturn, '%')}、最大回落 ${signed(s.withStop.maxDrawdown, '%')}` : ''
+      const stop = s.withStop ? `；加 ${strategies.stopAtrMultiple} 倍 ATR(${strategies.stopAtrPeriod}) 停損（現在約 ${strategies.stopNowPct}%，觸發 ${s.withStop.stops} 次）後 ${signed(s.withStop.totalReturn, '%')}、最大回落 ${signed(s.withStop.maxDrawdown, '%')}` : ''
       const split =
         s.key === 'buyHold'
           ? ''

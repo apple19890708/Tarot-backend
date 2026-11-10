@@ -13,6 +13,28 @@ function smaSeries(values, period) {
   return result
 }
 
+// ATR（平均真實波幅，Wilder 平滑）：每天的「真實波幅」取 高−低、|高−昨收|、|低−昨收| 三者最大，
+// 跳空也算進去。用來依每檔股票自己的波動決定停損寬度。高低缺值時用收盤代替
+function atrSeries(highs, lows, closes, period = 14) {
+  const result = new Array(closes.length).fill(null)
+  if (closes.length <= period) return result
+  const trueRange = (i) => {
+    const high = highs[i] ?? closes[i]
+    const low = lows[i] ?? closes[i]
+    const prev = closes[i - 1]
+    return Math.max(high - low, Math.abs(high - prev), Math.abs(low - prev))
+  }
+  let atr = 0
+  for (let i = 1; i <= period; i += 1) atr += trueRange(i)
+  atr /= period
+  result[period] = atr
+  for (let i = period + 1; i < closes.length; i += 1) {
+    atr = (atr * (period - 1) + trueRange(i)) / period
+    result[i] = atr
+  }
+  return result
+}
+
 function rsiSeries(closes, period = 14) {
   const result = new Array(closes.length).fill(null)
   if (closes.length <= period) return result
@@ -103,6 +125,7 @@ function computeSeries(bars) {
     ma20: smaSeries(closes, 20),
     ma60: smaSeries(closes, 60),
     rsi14: rsiSeries(closes),
+    atr14: atrSeries(highs, lows, closes),
     k,
     d,
     macdHist: macdHistSeries(closes),
@@ -193,4 +216,4 @@ function aggregateSeries(series, period) {
   }
 }
 
-module.exports = { smaSeries, rsiSeries, kdSeries, macdHistSeries, computeSeries, pointAt, aggregateSeries }
+module.exports = { smaSeries, rsiSeries, atrSeries, kdSeries, macdHistSeries, computeSeries, pointAt, aggregateSeries }

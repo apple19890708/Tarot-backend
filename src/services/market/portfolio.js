@@ -37,14 +37,16 @@ function tradeCosts(target, side, amount, fees) {
 function validateSequence(trades) {
   let quantity = 0
   for (const [index, trade] of trades.entries()) {
-    quantity += trade.side === 'buy' ? trade.quantity : -trade.quantity
+    // 配股之前一定要已經有持股（不然會憑空多出成本 0 的股票，應收股利也會從那天算起）
+    if (trade.side === 'stockDividend' && quantity <= 1e-9) return `第 ${index + 1} 筆配股之前沒有持股。`
+    quantity += trade.side === 'sell' ? -trade.quantity : trade.quantity
     // 浮點誤差容許一點點（零股小數）
     if (quantity < -1e-9) return `第 ${index + 1} 筆賣出的數量超過當時持有的數量。`
   }
   return null
 }
 
-// trades：[{ side, quantity, price, date }]（依輸入順序沖銷）；dividends：[{ amount, date }]
+// trades：[{ side（buy／sell／stockDividend）, quantity, price, date }]（依輸入順序沖銷）；dividends：[{ amount, date }]
 // quote：{ price, change, date } 或 null（報價取不到時，市值相關欄位為 null）
 function computePosition({ target, trades = [], dividends = [], fees: rawFees, quote = null }) {
   const fees = normalizeFees(rawFees)
@@ -57,6 +59,12 @@ function computePosition({ target, trades = [], dividends = [], fees: rawFees, q
 
   for (const trade of trades) {
     const shares = trade.quantity * unit
+    // 配股（v20）：成本 0 的一筆買進，不收手續費與稅；先進先出時跟著順序沖銷，平均成本因此降低
+    if (trade.side === 'stockDividend') {
+      open.push({ shares, cost: 0, price: 0, date: trade.date || null, stockDividend: true })
+      details.push({ fee: 0, tax: 0, realized: null })
+      continue
+    }
     const amount = trade.price * shares
     const { fee, tax } = tradeCosts(target, trade.side, amount, fees)
     feesPaid += fee
@@ -108,7 +116,8 @@ function computePosition({ target, trades = [], dividends = [], fees: rawFees, q
   if (price !== null) {
     today = 0
     for (const lot of open) {
-      if (lot.date && quote?.date && lot.date >= quote.date) today += (price - lot.price) * lot.shares
+      // 配股那筆不是今天用某個價錢買的，照一般持股算今日漲跌
+      if (!lot.stockDividend && lot.date && quote?.date && lot.date >= quote.date) today += (price - lot.price) * lot.shares
       else if (quote?.change === null || quote?.change === undefined) {
         today = null
         break
@@ -126,6 +135,8 @@ function computePosition({ target, trades = [], dividends = [], fees: rawFees, q
       return {
         quantity: round2(lot.shares / unit),
         price: lot.price,
+        // 配股來的那筆（成本 0）
+        ...(lot.stockDividend ? { stockDividend: true } : {}),
         date: lot.date,
         cost: round2(lot.cost),
         value: round2(value),
