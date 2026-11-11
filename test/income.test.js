@@ -446,7 +446,7 @@ function fakeWatches(docs) {
   }
 }
 
-function makeApp({ watches = [], groups = [], profile = null, summariesFail = false } = {}) {
+function makeApp({ watches = [], groups = [], profile = null, summariesFail = false, service = {} } = {}) {
   let saved = profile
   const app = express()
   app.use(express.json())
@@ -466,6 +466,7 @@ function makeApp({ watches = [], groups = [], profile = null, summariesFail = fa
         getDividendHistories: async (targets) => targets.map(() => ({ cash: [], splits: [] })),
         getExDividendNotices: async () => new Map(),
         getQuote: async () => ({ price: 32 }),
+        ...service,
       },
       MarketCall: {},
       MarketAlert: {},
@@ -613,30 +614,6 @@ test('API：編輯持股時前端沒送 exDate，金額與入帳日相同的股�
   })
 })
 
-test('股利成長：近 5 年每年合計（現金乘回之後的配股、配股換算成元），今年不判斷減少，比前一年少的標出來', () => {
-  const history = {
-    cash: [
-      { date: '2022-07-20', amount: 1.5 },
-      { date: '2023-07-20', amount: 1.0 },
-      { date: '2023-12-20', amount: 0.5 },
-      { date: '2024-07-20', amount: 1.188 },
-      { date: '2025-07-22', amount: 1.2 },
-      { date: '2026-07-01', amount: 0.3 },
-    ],
-    splits: [{ date: '2025-07-22', ratio: 1.0101514, kind: 'stockDividend' }],
-  }
-  const growth = income.dividendGrowthOf(history, 'tw', '2026-11-10')
-  assert.deepEqual(growth.years.map((y) => y.year), [2022, 2023, 2024, 2025, 2026])
-  // 2023 兩次加起來 1.5 和 2022 一樣，不算減少；2024 實際 1.2 比 1.5 少；2025 一樣 1.2 不算減少（浮點雜訊）；今年 0.3 還沒過完不判斷
-  assert.deepEqual(growth.years.map((y) => y.decreased), [false, false, true, false, false])
-  assert.deepEqual(growth.decreasedYears, [2024])
-  assert.equal(growth.years[1].count, 2)
-  assert.equal(growth.years[3].stock, 0.1)
-  assert.equal(growth.years[4].partial, true)
-  assert.equal(income.dividendGrowthOf({ cash: [], splits: [] }, 'tw', '2026-11-10'), null)
-  assert.equal(income.dividendGrowthOf(null, 'tw', '2026-11-10'), null)
-})
-
 test('集中度：單一持股、單一產業超過門檻才提醒；ETF 不算產業；美股沒匯率不算；只有一檔不提醒', () => {
   const row = (id, market, code, value, name = code) => ({ id, target: { market, code, symbol: code, name }, quantity: 1, position: { marketValue: value } })
   const rows = [
@@ -667,4 +644,87 @@ test('集中度：單一持股、單一產業超過門檻才提醒；ETF 不算�
   const single = income.concentrationOf({ rows: [rows[0]], industries })
   assert.equal(single.holdings[0].pct, 100)
   assert.deepEqual(single.warnings, [])
+})
+
+test('多年平均股利：依配息頻率取最近 N 次（年配 3、季配 12）÷ 年數；年配除息日前後漂移不會多算或少算；次數不夠退成 2 年、1 年；配股乘回實際金額', () => {
+  const today = '2026-11-10'
+  // 季配、每次 1 元，紀錄很長 → 最近 12 次 ÷ 3 ＝ 年平均 4 元
+  const quarterly = { cash: [], splits: [] }
+  for (let y = 2021; y <= 2026; y += 1) for (const m of ['01', '04', '07', '10']) quarterly.cash.push({ date: `${y}-${m}-15`, amount: 1 })
+  assert.deepEqual(income.dividendAverageOf(quarterly, 50, today), { months: 36, perShare: 4, yieldPct: 8 })
+
+  // 年配、今年還沒除息（11-15）、三年前在切點前幾天（2023-11-08）：最近 3 次 ＝ 2023、2024、2025，不會只抓到 2 次
+  const lateThisYear = { cash: [{ date: '2022-11-09', amount: 9 }, { date: '2023-11-08', amount: 3 }, { date: '2024-11-12', amount: 3 }, { date: '2025-11-12', amount: 3 }], splits: [] }
+  assert.equal(income.dividendAverageOf(lateThisYear, 100, today).perShare, 3)
+  // 年配、今年提早到 11-01：期間內有 2023-11-12、2024、2025、2026 四次，只取最近 3 次，不會多算
+  const earlyThisYear = { cash: [{ date: '2023-11-12', amount: 9 }, { date: '2024-11-12', amount: 3 }, { date: '2025-11-12', amount: 3 }, { date: '2026-11-01', amount: 3 }], splits: [] }
+  assert.equal(income.dividendAverageOf(earlyThisYear, 100, today).perShare, 3)
+
+  // 半年配、2025-01 才開始配：3 年要 6 次不夠 → 2 年：最近 4 次 (2+2+3+3) ÷ 2 ＝ 5
+  const young = { cash: [{ date: '2025-01-15', amount: 2 }, { date: '2025-07-15', amount: 2 }, { date: '2026-01-15', amount: 3 }, { date: '2026-07-15', amount: 3 }], splits: [] }
+  assert.deepEqual(income.dividendAverageOf(young, 100, today), { months: 24, perShare: 5, yieldPct: 5 })
+  // 半年配、只有最近 2 次 → 1 年：3 ＋ 3；沒給價格就沒有殖利率
+  const one = { cash: young.cash.slice(2), splits: [] }
+  assert.deepEqual(income.dividendAverageOf(one, null, today), { months: 12, perShare: 6, yieldPct: null })
+  // 中途從年配改季配（0056 這類）：近 1 年是季配，3 年要 12 次不夠、2 年要 8 次也不夠 → 只用 1 年，不會混進以前的大額年配
+  const switched = { cash: [{ date: '2022-10-19', amount: 2.1 }, { date: '2023-07-18', amount: 1 }, { date: '2023-10-19', amount: 1.2 }, { date: '2024-01-16', amount: 0.7 }, { date: '2024-04-16', amount: 0.8 }, { date: '2024-07-16', amount: 1.07 }, { date: '2025-01-16', amount: 1.07 }, { date: '2026-01-15', amount: 0.866 }, { date: '2026-04-23', amount: 1 }, { date: '2026-07-21', amount: 1.35 }, { date: '2026-10-22', amount: 1.72 }], splits: [] }
+  assert.equal(income.dividendAverageOf(switched, 50, today).months, 12)
+
+  // 不滿 1 年、沒有紀錄
+  assert.equal(income.dividendAverageOf({ cash: [{ date: '2024-03-01', amount: 1 }], splits: [] }, 10, today), null)
+  assert.equal(income.dividendAverageOf(null, 10, today), null)
+  // 年配、之後一拆四：之前的 1 元（Yahoo 已調整）還原成當時實際的 4 元
+  const split = { cash: [{ date: '2023-06-15', amount: 1 }, { date: '2024-06-15', amount: 1 }, { date: '2025-06-15', amount: 1 }, { date: '2026-06-15', amount: 4 }], splits: [{ date: '2025-12-18', ratio: 4, kind: 'split' }] }
+  // 最近 3 次：2024（4）、2025（4）、2026（4）→ 年平均 4
+  assert.equal(income.dividendAverageOf(split, 100, today).perShare, 4)
+})
+test('API：存股試算自選一檔（不用先追蹤）：台股回殖利率與配息頻率；美股帶匯率；找不到 404、不是個股 400、缺參數 400', async () => {
+  const quarterly = { cash: [], splits: [] }
+  for (let y = 2022; y <= 2026; y += 1) for (const m of ['01', '04', '07', '10']) quarterly.cash.push({ date: `${y}-${m}-15`, amount: 0.5 })
+  const AAPL = { market: 'us', kind: 'stock', symbol: 'AAPL', name: 'Apple' }
+  const INDEX = { market: 'tw', kind: 'index', symbol: '^TWII', name: '加權指數' }
+  const app = makeApp({
+    service: {
+      resolveTarget: async (q) => ({ '2884': TW, AAPL, TWII: INDEX })[q] ?? null,
+      getDividendHistories: async () => [quarterly],
+      getQuote: async (target) => ({ price: target.symbol === 'TWD=X' ? 32 : 40 }),
+    },
+  })
+  await withServer(app, async (base) => {
+    const tw = await (await fetch(`${base}/api/market/dividend-profile?market=tw&q=2884`)).json()
+    assert.equal(tw.profile.target.code, '2884')
+    assert.equal(tw.profile.price, 40)
+    assert.equal(tw.profile.frequency, 'quarterly')
+    assert.equal(tw.profile.usdTwd, null)
+    // 近 36 個月每年 4 次 × 0.5 ＝ 2 元 ÷ 40 ＝ 5%
+    assert.deepEqual(tw.profile.dividendAverage, { months: 36, perShare: 2, yieldPct: 5 })
+    assert.ok(tw.profile.currentYield > 0)
+    const us = await (await fetch(`${base}/api/market/dividend-profile?market=us&q=AAPL`)).json()
+    assert.equal(us.profile.usdTwd, 32)
+    assert.equal((await fetch(`${base}/api/market/dividend-profile?market=tw&q=9999`)).status, 404)
+    assert.equal((await fetch(`${base}/api/market/dividend-profile?market=tw&q=TWII`)).status, 400)
+    assert.equal((await fetch(`${base}/api/market/dividend-profile?market=jp&q=2884`)).status, 400)
+    assert.equal((await fetch(`${base}/api/market/dividend-profile?market=tw`)).status, 400)
+  })
+})
+
+test('API：存股試算自選一檔，股利紀錄或報價抓不到時照樣回應（dividendStatus failed、price null），不回 500', async () => {
+  const app = makeApp({
+    service: {
+      resolveTarget: async () => TW,
+      getDividendHistories: async () => [null],
+      getQuote: async () => {
+        throw new Error('報價來源掛了')
+      },
+    },
+  })
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/api/market/dividend-profile?market=tw&q=2884`)
+    assert.equal(response.status, 200)
+    const { profile } = await response.json()
+    assert.equal(profile.price, null)
+    assert.equal(profile.dividendStatus, 'failed')
+    assert.equal(profile.dividendAverage, null)
+    assert.equal(profile.currentYield, null)
+  })
 })

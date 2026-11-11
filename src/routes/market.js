@@ -1018,6 +1018,56 @@ function createMarketRouter({
     }
   })
 
+  // 存股試算自選一檔（v20 2.9.9，2026-11-11 使用者要求「輸入代號自選，跟加入追蹤一樣」）：不用先加入追蹤。
+  // GET /dividend-profile?market=tw|us&q=代號或名稱 → 現價、配息頻率、近 12 個月與多年平均殖利率。
+  // 把這一檔當成「沒有持股的追蹤項目」丟進 buildIncomeReport，數字和股利頁清單裡的股票同一套算法；
+  // 美股另外給美元兌台幣（試算的金額都是台幣），取不到是 null
+  router.get('/dividend-profile', requireStockAccess, searchLimit, async (req, res, next) => {
+    try {
+      const { market } = req.query
+      const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 30) : ''
+      if (!['tw', 'us'].includes(market) || !q) {
+        res.status(400).json({ message: '請選擇台股或美股，並輸入代號或名稱。' })
+        return
+      }
+      const target = await marketService.resolveTarget(q, market)
+      if (!target) {
+        res.status(404).json({ message: `找不到「${q}」。` })
+        return
+      }
+      if (target.kind !== 'stock' || !target.symbol) {
+        res.status(400).json({ message: `${target.name || q} 不是個股或 ETF，沒有股利可以試算。` })
+        return
+      }
+      const [quote, histories, usdTwd] = await Promise.all([
+        marketService.getQuote(target).catch(() => null),
+        marketService.getDividendHistories([target]),
+        market === 'us'
+          ? marketService
+              .getQuote(FX_TARGET)
+              .then((fx) => fx?.price ?? null)
+              .catch(() => null)
+          : null,
+      ])
+      const price = quote?.price ?? null
+      const item = { id: 'simulate', target, groups: [], trades: [], dividends: [], dismissedEntitlements: [], position: null, summary: price === null ? null : { quote: { price } } }
+      const row = buildIncomeReport({ items: [item], histories, today: taipeiNow().date }).items[0]
+      res.json({
+        profile: {
+          target,
+          price,
+          usdTwd,
+          dividendStatus: row.dividendStatus,
+          frequency: row.projection?.frequency ?? 'none',
+          currentYield: row.currentYield,
+          dividendAverage: row.dividendAverage,
+        },
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   // 新增：market 指定台股或美股，query 是代號或名稱；可以同時帶持股
   router.post('/watchlist', requireStockAccess, async (req, res, next) => {
     try {

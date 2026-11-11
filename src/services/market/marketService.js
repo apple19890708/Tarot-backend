@@ -1180,7 +1180,7 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
 
   // ---- 歷史股利與配股（v20，Yahoo events=div|split）----
 
-  // { cash, splits }（見 income.parseYahooEvents）；抓不到是 null（10 分鐘後再試）。5 年：股利成長（v20 階段 10）也用這份
+  // { cash, splits }（見 income.parseYahooEvents）；抓不到是 null（10 分鐘後再試）
   async function loadDividendHistory(symbol, market) {
     const key = `dividends:${symbol}`
     const cached = dividendCache.get(key)

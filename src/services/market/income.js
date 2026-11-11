@@ -333,6 +333,51 @@ function annualizedOf(flows, today) {
   return rate === null ? { pct: null, reason: 'noSolution' } : { pct: round2(rate * 100), reason: null }
 }
 
+// ---- 多年平均股利（v20 2.9.9 存股試算 2.0）----
+// 近 3 年平均每年的現金股利（當年實際的每股金額）。只看近 12 個月容易抓到高點（高股息 ETF 配息起伏大），
+// 存股試算預設用這個比較穩的基準。
+// 依配息頻率取「最近 N 次」（年配 3 次、半年配 6 次、季配 12 次、月配 36 次）再除以年數，不用「往回 36 個月切一刀」：
+// 每年除息日會前後差幾週，年配的股票剛好在切點附近時會抓到 2 次或 4 次，平均少算或多算三分之一（2026-11-11 審查發現）。
+// 期間多放寬 2 個月容許除息日漂移；次數不夠（上市不久、中途改了配息頻率）就退成 2 年、1 年；連 1 年都不夠是 null。
+// price 有給才算殖利率（未扣款，%）
+const AVERAGE_YEARS = [3, 2, 1]
+const AVERAGE_DRIFT_MONTHS = 2
+// 一年配幾次：看最近 4 個配息間隔的中位數（約 30 天月配、90 天季配、180 天半年配、365 天年配）。
+// 不用「近 12 個月配了幾次」：除息日漂移時，年配可能在 12 個月內出現 2 次（被當成半年配）或 0 次。
+// 只看最近的間隔，中途改了頻率（年配改季配）時跟著新的頻率。近 14 個月都沒配息就當作沒在配（null）
+function payoutsPerYearOf(past, today) {
+  if (!past.some((e) => e.date > shiftMonths(today, 12 + AVERAGE_DRIFT_MONTHS))) return null
+  const recent = past.slice(-5)
+  const gaps = recent.slice(1).map((e, i) => (Date.parse(e.date) - Date.parse(recent[i].date)) / DAY_MS).sort((a, b) => a - b)
+  if (!gaps.length) return 1
+  const median = gaps[Math.floor(gaps.length / 2)]
+  if (median <= 45) return 12
+  if (median <= 135) return 4
+  if (median <= 270) return 2
+  return 1
+}
+function shiftMonths(date, months) {
+  const d = new Date(`${date}T00:00:00Z`)
+  d.setUTCMonth(d.getUTCMonth() - months)
+  return d.toISOString().slice(0, 10)
+}
+function dividendAverageOf(history, price, today) {
+  if (!history?.cash?.length) return null
+  const past = history.cash.filter((e) => e.date <= today)
+  const perYear = payoutsPerYearOf(past, today)
+  if (!perYear) return null
+  for (const years of AVERAGE_YEARS) {
+    const inWindow = past.filter((e) => e.date > shiftMonths(today, years * 12 + AVERAGE_DRIFT_MONTHS))
+    if (inWindow.length < perYear * years) continue
+    const recent = inWindow.slice(-perYear * years)
+    const total = recent.reduce((sum, e) => sum + actualPerShare(e, history.splits), 0)
+    if (total <= 0) return null
+    const perShare = Math.round((total / years) * 1e4) / 1e4
+    return { months: years * 12, perShare, yieldPct: Number.isFinite(price) && price > 0 ? round2((perShare / price) * 100) : null }
+  }
+  return null
+}
+
 // 近 2 年（從 24 個月前的 1 號起、到今天）實際的除息與配股，給股利月曆往前看。
 // 現金股利用當年實際的每股金額（乘回之後的配股、分割，和應收股利同一個算法）
 const PAST_YEARS = 2
@@ -427,40 +472,6 @@ function buildDividendRecords({ history, bars, market, today }) {
         fill: fill ? { filledOn: fill.filledOn, days: fill.days, gapPct: fill.gapPct, daysSince: fill.daysSince } : null,
       }
     })
-}
-
-// ---- 股利成長（v20 2.9.7）----
-// 近 5 年每年的每股股利合計：現金用當年實際的金額（乘回之後的配股、分割），配股換算成元（台股，面額 10 元）。
-// 今年還沒過完（partial），不判斷減少；其他年份現金股利比前一年少就標 decreased。
-// Yahoo 抓 5 年，最早那一年只抓到一部分，所以只列今年往前 4 年＋今年。沒有股利資料或 5 年都沒配過是 null
-const GROWTH_YEARS = 5
-const GROWTH_TOLERANCE = 0.005
-function dividendGrowthOf(history, market, today) {
-  if (!history) return null
-  const thisYear = Number(today.slice(0, 4))
-  const years = Array.from({ length: GROWTH_YEARS }, (_, i) => thisYear - GROWTH_YEARS + 1 + i)
-  const rows = years.map((year) => {
-    const inYear = (date) => date.startsWith(String(year)) && date <= today
-    const cashEvents = history.cash.filter((e) => inYear(e.date))
-    const stockEvents = market === 'tw' ? history.splits.filter((s) => s.kind === 'stockDividend' && inYear(s.date)) : []
-    return {
-      year,
-      cash: cashEvents.length ? round6(cashEvents.reduce((sum, e) => sum + actualPerShare(e, history.splits), 0)) : 0,
-      stock: stockEvents.length ? round2(stockEvents.reduce((sum, s) => sum + (s.ratio - 1) * TW_PAR_VALUE, 0)) : 0,
-      count: cashEvents.length,
-      partial: year === thisYear,
-      decreased: false,
-    }
-  })
-  if (rows.every((row) => !row.cash && !row.stock)) return null
-  for (let i = 1; i < rows.length; i += 1) {
-    const prev = rows[i - 1]
-    const row = rows[i]
-    // 少不到 0.5% 不算：Yahoo 的調整價還原回去有誤差（玉山金 2024 年 1.188 × 1.0101514 ＝ 1.20006，實際 1.2），
-    // 一樣的股利不要被判成減少
-    row.decreased = !row.partial && prev.cash > 0 && row.cash < prev.cash * (1 - GROWTH_TOLERANCE)
-  }
-  return { years: rows, decreasedYears: rows.filter((row) => row.decreased).map((row) => row.year) }
 }
 
 // ---- 集中度提醒（v20 2.9.8）----
@@ -657,14 +668,14 @@ function buildIncomeReport({ items, histories = [], barsList = [], notices = nul
       pastEvents: isStock ? pastEventsOf(history, today) : [],
       // 填息追蹤（近 2 年每次除息後幾天填息、這次還差多少）；沒有日 K 或股利資料時是 null
       fills: isStock ? computeFills({ history, bars: barsList[index] ?? null, today }) : null,
-      // 股利成長：近 5 年每年的每股股利，比前一年少的年份標出來；沒配過息是 null
-      growth: isStock ? dividendGrowthOf(history, target.market, today) : null,
       dividendStatus,
       entitlement,
       projection,
       // 殖利率（未扣款）：成本殖利率 = 預估一年股利 ÷ 投入成本；現價殖利率 = 每股一年股利 ÷ 現價
       yieldOnCost: projection && position ? pct(projection.annualGross, position.costBasis) : null,
       currentYield: projection && price ? pct(projection.annualPerShare, price) : null,
+      // 多年平均股利（存股試算的殖利率基準）；股利紀錄不夠 12 個月是 null
+      dividendAverage: isStock ? dividendAverageOf(history, price, today) : null,
       // 年化報酬（XIRR，%）；算不出來時 pct 是 null、reason 寫原因
       annualized,
       // 報酬拆解（價差、股利、手續費、稅、預估賣出成本）
@@ -739,8 +750,8 @@ module.exports = {
   buildIncomeReport,
   xirr,
   computeFills,
+  dividendAverageOf,
   buildDividendRecords,
-  dividendGrowthOf,
   concentrationOf,
   normalizeConcentration,
   DEFAULT_CONCENTRATION,
