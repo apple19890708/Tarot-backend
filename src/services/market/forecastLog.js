@@ -5,10 +5,12 @@
 const { deductionsOf } = require('./income')
 
 const CHECK_MONTHS = 24
+// 推估的算法（v20 2.9.10）：latest＝最近一次配息。2026-11-11 以前記下的推估沒有 method，是舊算法（近 12 個月平均）
+const ESTIMATE_METHOD = 'latest'
 
 // report 是 buildIncomeReport 的結果 → bulkWrite 的操作
 // - 推估：第一次推估只寫一次（$setOnInsert）；最後一次推估在 actual 出現前一直更新，之後凍結（filter 帶 actual: null）
-// - 已公告／本月已除息：寫入 actual
+// - 已公告／本月已除息／董事會已決議：寫入 actual
 // - 過去的實際除息（pastEvents）：只補「有推估、還沒有實際」的紀錄（期間沒人開頁面也補得上）
 function forecastOps(report, at) {
   const ops = []
@@ -22,7 +24,7 @@ function forecastOps(report, at) {
       const cash = entry.cash
       if (!cash) continue
       if (cash.source === 'estimated') {
-        const point = { perShare: cash.perShare, date: cash.estimatedDate ?? cash.exDate ?? null, at, source: null }
+        const point = { perShare: cash.perShare, date: cash.estimatedDate ?? cash.exDate ?? null, at, source: null, method: ESTIMATE_METHOD }
         // 兩步（依序執行）：1. 沒有這筆就建立並記第一次推估；2. 還沒有實際數字的才更新最後一次推估（公布後凍結）。
         // 不用 aggregation pipeline 的條件更新：Mongoose 9 預設擋 pipeline（要開 updatePipeline），測試的假資料庫抓不到
         ops.push({
@@ -42,7 +44,8 @@ function forecastOps(report, at) {
         ops.push({
           updateOne: {
             filter: { ...key, month: entry.month },
-            update: { $set: { ...base, actual: { perShare: cash.perShare, date: cash.exDate, at, source: cash.source } } },
+            // 董事會決議（decided）也算實際：金額已經確定，只是除息日還沒訂，日期記決議日
+            update: { $set: { ...base, actual: { perShare: cash.perShare, date: cash.exDate ?? cash.decidedAt ?? null, at, source: cash.source } } },
             upsert: true,
           },
         })
@@ -68,9 +71,23 @@ function forecastOps(report, at) {
 
 const round2 = (value) => Math.round(value * 100) / 100
 
+// 記錄當下的台北日期
+const taipeiDay = (at) => new Date(new Date(at).getTime() + 8 * 3600000).toISOString().slice(0, 10)
+
+// 推估的每股金額。舊算法（沒有 method）的，讀取時改用新算法重算：記錄當下「最近一次配息」
+// （2026-11-11 使用者要求預估準不準也改成新的；資料庫不改，所以算法再換也能重算）。
+// pastEvents：這檔近 2 年的實際除息（日期排序）；記錄前沒有配息可用的維持原值
+function estimateOf(point, pastEvents) {
+  if (!point) return null
+  if (point.method === ESTIMATE_METHOD || !point.at) return point.perShare
+  const day = taipeiDay(point.at)
+  const prior = pastEvents.filter((e) => e.type === 'cash' && e.date <= day)
+  return prior.length ? prior[prior.length - 1].perShare : point.perShare
+}
+
 // 一筆紀錄 → 畫面要的比較（預估用公布前最後一次）
-function checkOf(doc, name) {
-  const estimate = doc.lastEstimate?.perShare ?? doc.firstEstimate?.perShare
+function checkOf(doc, name, pastEvents = []) {
+  const estimate = estimateOf(doc.lastEstimate, pastEvents) ?? estimateOf(doc.firstEstimate, pastEvents)
   const actual = doc.actual.perShare
   return {
     symbol: doc.symbol,
@@ -79,7 +96,7 @@ function checkOf(doc, name) {
     market: doc.market,
     month: doc.month,
     estimate,
-    firstEstimate: doc.firstEstimate?.perShare ?? null,
+    firstEstimate: estimateOf(doc.firstEstimate, pastEvents),
     actual,
     // 預估比實際高幾 %（正的＝高估）
     errorPct: actual > 0 ? round2(((estimate - actual) / actual) * 100) : null,
@@ -130,13 +147,14 @@ function createForecastLog({ DividendForecast, now = () => new Date() }) {
   // 這些股票近 24 個月「有推估、也有實際」的紀錄
   async function checks(items, today) {
     const names = new Map(items.filter((item) => item.target.symbol).map((item) => [item.target.symbol, item.target.name]))
+    const events = new Map(items.filter((item) => item.target.symbol).map((item) => [item.target.symbol, item.pastEvents ?? []]))
     if (!names.size) return []
     const [year, month] = today.slice(0, 7).split('-').map(Number)
     const from = `${year - Math.floor(CHECK_MONTHS / 12)}-${String(month).padStart(2, '0')}`
     const docs = await DividendForecast.find({ symbol: { $in: [...names.keys()] }, month: { $gte: from }, actual: { $ne: null }, firstEstimate: { $ne: null } })
       .sort({ month: 1, symbol: 1 })
       .lean()
-    return docs.map((doc) => checkOf(doc, names.get(doc.symbol) ?? doc.code ?? doc.symbol))
+    return docs.map((doc) => checkOf(doc, names.get(doc.symbol) ?? doc.code ?? doc.symbol, events.get(doc.symbol) ?? []))
   }
 
   return { record, checks }

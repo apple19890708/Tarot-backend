@@ -4,6 +4,7 @@ const crypto = require('crypto')
 
 const { rocDate } = require('./corporateEvents')
 const { digestMaterialNews, materialFields } = require('./materialDigest')
+const dividendDecisions = require('./dividendDecisions')
 
 const URLS = {
   twse: 'https://openapi.twse.com.tw/v1/opendata/t187ap04_L',
@@ -60,6 +61,9 @@ function rawFieldsOf(detail) {
   return { fields, emptyFields: empty }
 }
 
+const isDividendNotice = (row) =>
+  Boolean(dividendDecisions.parseDividendDecision(row.title, row.detail) || dividendDecisions.parseExDividendNotice(row.title, row.detail))
+
 // MarketNews：Mongoose model；fetchJson：抓 JSON 的函式（測試可以注入）
 function createNewsSync({ MarketNews, fetchJson, now = () => new Date() }) {
   let lastSync = 0
@@ -74,9 +78,10 @@ function createNewsSync({ MarketNews, fetchJson, now = () => new Date() }) {
       if (tpex.status === 'rejected') console.error('上櫃重大訊息失敗：', tpex.reason?.message)
       const rows = parseNews(twse.status === 'fulfilled' ? twse.value : [], tpex.status === 'fulfilled' ? tpex.value : [])
       if (rows.length) {
-        const expireAt = new Date(now().getTime() + MarketNews.KEEP_DAYS * 86400000)
+        // 董事會的股利分派決議、訂定除息交易日存比較久（股利預估要用到除息，見 dividendDecisions.js）；其他照舊 30 天
+        const expireOf = (row) => new Date(now().getTime() + (isDividendNotice(row) ? dividendDecisions.KEEP_DAYS : MarketNews.KEEP_DAYS) * 86400000)
         await MarketNews.bulkWrite(
-          rows.map((row) => ({ updateOne: { filter: { key: row.key }, update: { $setOnInsert: { ...row, expireAt } }, upsert: true } })),
+          rows.map((row) => ({ updateOne: { filter: { key: row.key }, update: { $setOnInsert: { ...row, expireAt: expireOf(row) } }, upsert: true } })),
           { ordered: false },
         )
       }
@@ -114,7 +119,35 @@ function createNewsSync({ MarketNews, fetchJson, now = () => new Date() }) {
     }))
   }
 
-  return { sync, listFor }
+  // 公司公告的配息（股利預估用，v20 2.9.10）：Map<代號, { decisions: 董事會決議[], notices: 訂定除息交易日[] }>
+  async function listDecisions(codes) {
+    const result = new Map()
+    if (!codes.length) return result
+    const since = new Date(now().getTime() - dividendDecisions.KEEP_DAYS * 86400000).toISOString().slice(0, 10)
+    const docs = await MarketNews.find({ code: { $in: codes }, date: { $gte: since }, detail: /股東配發內容|交易日/ })
+      .select({ code: 1, date: 1, title: 1, detail: 1, expireAt: 1 })
+      .lean()
+    const extend = []
+    for (const doc of docs) {
+      const decision = dividendDecisions.parseDividendDecision(doc.title, doc.detail)
+      const notice = decision ? null : dividendDecisions.parseExDividendNotice(doc.title, doc.detail)
+      if (!decision && !notice) continue
+      if (!result.has(doc.code)) result.set(doc.code, { decisions: [], notices: [] })
+      if (decision) result.get(doc.code).decisions.push(decision)
+      else result.get(doc.code).notices.push(notice)
+      // 改版前存的只留 30 天：讀到時補成和新存的一樣久（不等寫完，失敗下次再補）
+      const keepUntil = new Date(Date.parse(doc.date) + dividendDecisions.KEEP_DAYS * 86400000)
+      if (doc.expireAt && new Date(doc.expireAt) < keepUntil) {
+        extend.push({ updateOne: { filter: { _id: doc._id }, update: { $set: { expireAt: keepUntil } } } })
+      }
+    }
+    if (extend.length && MarketNews.bulkWrite) {
+      Promise.resolve(MarketNews.bulkWrite(extend, { ordered: false })).catch((error) => console.error('延長配息公告保存失敗：', error.message))
+    }
+    return result
+  }
+
+  return { sync, listFor, listDecisions }
 }
 
 module.exports = { URLS, parseNews, clock, createNewsSync }

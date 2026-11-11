@@ -9,8 +9,10 @@ const pointSchema = new mongoose.Schema(
     // 除息日（推估的是推的日期，可能是 null）
     date: { type: String, default: null },
     at: { type: Date, required: true },
-    // actual 才有：announced（證交所預告／Yahoo 已列出）或 exDone（已除息）
+    // actual 才有：announced（證交所預告／Yahoo 已列出）、exDone（已除息）或 decided（董事會決議，date 是決議日）
     source: { type: String, default: null },
+    // 推估才有：算法（latest＝最近一次配息，2026-11-11 起）；沒有的是舊算法（近 12 個月平均），讀取時重算（forecastLog.estimateOf）
+    method: { type: String, default: null },
   },
   { _id: false },
 )

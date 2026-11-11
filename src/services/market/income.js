@@ -6,6 +6,8 @@
 // 2. 歷史現金股利已依「之後的」分割與配股調整：2024 年實際 1.2 元，Yahoo 寫 1.188（÷ 2025 年配股 1.0101）
 //    → 算當年應收要乘回之後的比例；預估未來直接用調整後的（它對應的是現在的股數）
 
+const { pendingDecisions, decisionSlot } = require('./dividendDecisions')
+
 const DAY_MS = 24 * 60 * 60 * 1000
 // 比例在這之間（台股）才當成配股；之外（2:1、4:1 或反分割）是真正的股票分割
 const STOCK_DIVIDEND_MAX_RATIO = 1.5
@@ -189,10 +191,31 @@ function frequencyOf(count) {
   return 'none'
 }
 
+// 推估用「最近一次配息」（2026-11-11 改，原本是近 12 個月每次的平均）：
+// 36 檔台股與 ETF、2024-06 以後 317 次配息回測，誤差在 10% 內的比例：平均 23% → 最近一次 59%
+// （月配 24% → 76%、季配 15% → 56%）；配息越配越多的（00690）平均會一直偏低。
+// 這一檔過去用同樣方法估，誤差在 10% 內的有幾次（近 3 年、每次用前一次估下一次），畫面標示可信度用
+const CHECK_YEARS = 3
+function estimateCheckOf(cash, today) {
+  const since = `${Number(today.slice(0, 4)) - CHECK_YEARS}${today.slice(4)}`
+  let tested = 0
+  let within10 = 0
+  for (let i = 1; i < cash.length; i += 1) {
+    const event = cash[i]
+    if (event.date < since || event.date > today || !(event.amount > 0)) continue
+    tested += 1
+    if (Math.abs(cash[i - 1].amount - event.amount) / event.amount <= 0.1) within10 += 1
+  }
+  return tested ? { tested, within10 } : null
+}
+
 // 未來 12 個月的股利預估（依除息月）。
-// 每個月：證交所已公告（有金額）→ 用公告的；本月已經除息 → 用實際的；去年同月有配 → 推估，金額用過去 12 個月每次的平均。
+// 每個月：證交所已公告（有金額）→ 用公告的；本月已經除息 → 用實際的；去年同月有配 → 推估，金額用最近一次配息。
+// company：公司自己在重大訊息公告的（個股才有，見 dividendDecisions.js）
+// - notices 訂定除息交易日：和證交所預告一樣當成已公告（證交所的優先）；沒寫每股的金額用董事會決議補
+// - decisions 董事會決議：對得準的那一次推估，金額換成決議的（source 'decided'），日期仍是推的
 // 配股只列已公告的。shares 是目前持有股數（0 也算，畫面用 perShare 給「每持有 1 張一年約領多少」）
-function projectDividends({ target, history, announced = [], shares = 0, settings: rawSettings, today, unit }) {
+function projectDividends({ target, history, announced: exchangeNotices = [], company = null, shares = 0, settings: rawSettings, today, unit }) {
   const settings = normalizeIncomeSettings(rawSettings)
   const months = nextMonths(today)
   const cash = history?.cash ?? []
@@ -203,34 +226,91 @@ function projectDividends({ target, history, announced = [], shares = 0, setting
   const doneThisMonth = cash.some((e) => e.date.startsWith(thisMonth) && e.date <= today)
   const windowStart = `${doneThisMonth ? nextMonths(shiftYear(thisMonth, -1), 2)[1] : shiftYear(thisMonth, -1)}-01`
   const recent = cash.filter((e) => e.date >= windowStart && e.date <= today)
-  const average = recent.length ? recent.reduce((sum, e) => sum + e.amount, 0) / recent.length : null
+  // 推估金額：最近一次配息（不限近 12 個月，但要有近 12 個月的配息才推估，見下面 recentMonths）
+  const latest = recent.length ? recent[recent.length - 1].amount : null
   const recentMonths = new Set(recent.map((e) => e.date.slice(0, 7)))
   // 月配：每個月都推估，不看去年同月有沒有配。Yahoo 的除息日偶爾會擠到同一個月
   // （2026-11-10 實測 00929：3 月兩筆、2 月沒有），只看同月份會讓月配少一個月
   const frequency = frequencyOf(recent.length)
+  // 董事會已決議、還沒除息的（有配息的才算）
+  const pending = pendingDecisions(company?.decisions ?? [], cash, today)
+  const usedDecisions = new Set()
+  // 公司公告的除息交易日：證交所同一天（或同一個月已有金額）的預告優先；沒寫每股的，用公告前最近一筆還沒除息的決議
+  const companyNotices = (company?.notices ?? [])
+    .filter((n) => n.date >= today && !exchangeNotices.some((e) => e.date === n.date || (e.cashDividend && e.date.slice(0, 7) === n.date.slice(0, 7))))
+    .map((n) => {
+      let amount = n.cash
+      if (amount === null) {
+        const decision = pending.filter((d) => !usedDecisions.has(d) && d.decidedAt <= (n.decidedAt ?? today)).pop()
+        if (decision) amount = decision.cash
+      }
+      // 金額相同（或用來補金額）的決議就是這一次，不再拿去對推估
+      const same = pending.find((d) => !usedDecisions.has(d) && Math.abs(d.cash - (amount ?? -1)) < 1e-6)
+      if (same) usedDecisions.add(same)
+      return { date: n.date, cashDividend: amount, stockRatio: null }
+    })
+  const announced = [...exchangeNotices, ...companyNotices].sort((a, b) => a.date.localeCompare(b.date))
   // Yahoo 有時會先列出即將除息的配息（美股沒有證交所那種預告表，靠這個）；證交所預告優先
   const future = [
     ...announced.filter((e) => e.date >= today),
     ...cash.filter((e) => e.date > today && !announced.some((a) => a.date === e.date)).map((e) => ({ date: e.date, cashDividend: e.amount, stockRatio: null })),
   ]
 
-  const result = months.map((month) => {
+  const entries = months.map((month) => {
     const notice = future.find((e) => e.date.startsWith(month) && e.cashDividend)
     const noticeDateOnly = future.find((e) => e.date.startsWith(month) && !e.cashDividend && !e.stockRatio)
     const done = cash.find((e) => e.date.startsWith(month) && e.date <= today)
-    let entry = null
-    if (notice) entry = { perShare: notice.cashDividend, source: 'announced', exDate: notice.date }
-    else if (done) entry = { perShare: done.amount, source: 'exDone', exDate: done.date }
-    else if (average !== null && (frequency === 'monthly' || recentMonths.has(shiftYear(month, -1)) || noticeDateOnly))
+    if (notice) return { perShare: notice.cashDividend, source: 'announced', exDate: notice.date }
+    if (done) return { perShare: done.amount, source: 'exDone', exDate: done.date }
+    if (latest !== null && (frequency === 'monthly' || recentMonths.has(shiftYear(month, -1)) || noticeDateOnly))
       // 已公告除息日但還沒公告金額（例如主動式 ETF 的預告）：日期用公告的，金額推估
-      entry = {
-        perShare: average,
+      return {
+        perShare: latest,
         source: 'estimated',
         exDate: noticeDateOnly?.date ?? null,
         // 月曆用的推估日期：去年同月那次的除息日加一年（遇到週末移到平日）；推不出來（月配去年該月剛好沒配）是 null
         estimatedDate: noticeDateOnly ? null : guessDate(month, cash.filter((e) => e.date.startsWith(shiftYear(month, -1))).pop()?.date ?? null),
       }
+    return null
+  })
 
+  // 公告的除息月和去年不同（去年 1 月、今年公告 2 月）：同一次配息不要「公告」和「推估」各算一次，拿掉隔壁月的推估。
+  // 月配不適用（每個月本來就各有一次）
+  if (frequency !== 'monthly') {
+    entries.forEach((entry, index) => {
+      const fromNotice = entry && entry.exDate && (entry.source === 'announced' || entry.source === 'estimated')
+      if (!fromNotice || recentMonths.has(shiftYear(months[index], -1))) return
+      for (const near of [index - 1, index + 1]) {
+        const other = entries[near]
+        if (other && other.source === 'estimated' && !other.exDate) {
+          entries[near] = null
+          break
+        }
+      }
+    })
+  }
+
+  // 董事會決議：只在對得準時換掉推估（decisionSlot：頻率和決議期間相符、決議後 5 個月內只有一次可以對）
+  const slots = entries.map((entry, index) => ({ month: months[index], open: Boolean(entry) && entry.source !== 'exDone' }))
+  for (const decision of pending) {
+    if (usedDecisions.has(decision)) continue
+    const index = decisionSlot(decision, slots, frequency)
+    if (index === null) continue
+    slots[index].open = false
+    const entry = entries[index]
+    if (entry.source === 'estimated') {
+      entries[index] = {
+        ...entry,
+        perShare: decision.cash,
+        source: 'decided',
+        decidedAt: decision.decidedAt,
+        period: decision.periodEnd ? { start: decision.periodStart, end: decision.periodEnd } : null,
+      }
+    }
+  }
+
+  const result = months.map((month, index) => {
+    const entry = entries[index]
     let cashOut = null
     if (entry) {
       const gross = entry.perShare * shares
@@ -261,6 +341,9 @@ function projectDividends({ target, history, announced = [], shares = 0, setting
     annualGross: round2(annualGross),
     annualNet: round2(annualNet),
     hasEstimate: result.some((m) => m.cash?.source === 'estimated'),
+    // 推估怎麼算、過去準不準（畫面標示可信度）；沒有可以驗證的配息是 null
+    estimateMethod: 'latest',
+    estimateCheck: estimateCheckOf(cash, today),
   }
 }
 
@@ -580,7 +663,7 @@ function breakdownOf(position) {
 // histories、notices 與 items 同順序／以代號查；usdTwd 取不到時美股不併入台幣合計
 // barsList：每檔的日 K（填息追蹤用，與 items 同順序；沒有就不算）
 // industries：台股代號 → { code, label }（集中度用）；concentration：集中度門檻（使用者設定）
-function buildIncomeReport({ items, histories = [], barsList = [], notices = null, settings: rawSettings, usdTwd = null, industries = new Map(), concentration = null, today }) {
+function buildIncomeReport({ items, histories = [], barsList = [], notices = null, decisions = null, settings: rawSettings, usdTwd = null, industries = new Map(), concentration = null, today }) {
   const settings = normalizeIncomeSettings(rawSettings)
   const months = nextMonths(today)
   // 過去 24 個月（不含本月；本月在 months 裡，含本月已除息的）
@@ -596,6 +679,8 @@ function buildIncomeReport({ items, histories = [], barsList = [], notices = nul
     const isStock = target.kind === 'stock'
     const history = histories[index] ?? null
     const announced = isStock && target.market === 'tw' && notices ? notices.get(target.code) ?? [] : []
+    // 公司公告的配息（董事會決議、訂定除息交易日；個股才有，ETF 沒有這種公告）
+    const company = isStock && target.market === 'tw' && decisions ? decisions.get(target.code) ?? null : null
     const shares = position ? position.quantity * unit : 0
     const price = item.summary?.quote?.price ?? null
 
@@ -605,7 +690,7 @@ function buildIncomeReport({ items, histories = [], barsList = [], notices = nul
       : null
     const projection =
       isStock && (history || announced.length)
-        ? projectDividends({ target, history, announced, shares, settings, today, unit })
+        ? projectDividends({ target, history, announced, company, shares, settings, today, unit })
         : null
 
     if (position) {

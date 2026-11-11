@@ -17,7 +17,7 @@ function reportWith(months, pastEvents = []) {
 test('推估：第一次只在建立時寫（$setOnInsert）、最後一次只更新還沒有實際數字的（公布後凍結）；不用 pipeline', () => {
   const ops = forecastOps(reportWith([{ month: '2027-01', cash: { perShare: 1.234, source: 'estimated', exDate: null, estimatedDate: '2027-01-19' } }]), at)
   assert.equal(ops.length, 2)
-  const point = { perShare: 1.234, date: '2027-01-19', at, source: null }
+  const point = { perShare: 1.234, date: '2027-01-19', at, source: null, method: 'latest' }
   assert.deepEqual(ops[0].updateOne, {
     filter: { symbol: '0056.TW', month: '2027-01' },
     update: { $set: { code: '0056', market: 'tw' }, $setOnInsert: { firstEstimate: point } },
@@ -99,4 +99,39 @@ test('過去月份：實際應收依持股紀錄；當時的預估用同一個�
 test('寫入失敗不丟錯（不影響頁面回應）', async () => {
   const log = createForecastLog({ DividendForecast: { bulkWrite: async () => Promise.reject(new Error('db down')) }, now: () => at })
   await log.record(reportWith([{ month: '2027-01', cash: { perShare: 1, source: 'estimated', exDate: null } }]))
+})
+
+test('董事會已決議（decided）也寫 actual，日期記決議日（除息日還沒訂）', () => {
+  const ops = forecastOps(
+    reportWith([{ month: '2026-12', cash: { perShare: 2, source: 'decided', exDate: null, estimatedDate: '2026-12-15', decidedAt: '2026-11-05' } }]),
+    at,
+  )
+  assert.equal(ops.length, 1)
+  assert.deepEqual(ops[0].updateOne.update.$set.actual, { perShare: 2, date: '2026-11-05', at, source: 'decided' })
+})
+
+test('舊算法（沒有 method）的推估讀取時改用新算法重算：記錄當下最近一次配息；新算法的不動', () => {
+  // 00690：舊算法 1.3825（近 12 個月平均），11/10 記錄時最近一次配息 2.19 → 2.19；11/17 之後的配息不算
+  const pastEvents = [
+    { type: 'cash', date: '2026-05-18', perShare: 1.4 },
+    { type: 'stock', date: '2026-06-01', ratio: 0.1 },
+    { type: 'cash', date: '2026-08-18', perShare: 2.19 },
+    { type: 'cash', date: '2026-11-17', perShare: 2 },
+  ]
+  const doc = {
+    symbol: '00690.TW',
+    code: '00690',
+    market: 'tw',
+    month: '2026-11',
+    firstEstimate: { perShare: 1.3, date: '2026-11-17', at: new Date('2026-05-20T02:00:00Z') },
+    lastEstimate: { perShare: 1.3825, date: '2026-11-17', at },
+    actual: { perShare: 2, date: '2026-11-17' },
+  }
+  const check = checkOf(doc, '兆豐藍籌30', pastEvents)
+  assert.deepEqual([check.estimate, check.firstEstimate, check.errorPct], [2.19, 1.4, 9.5])
+  // 新算法記的照原值
+  const latest = checkOf({ ...doc, lastEstimate: { ...doc.lastEstimate, perShare: 2.5, method: 'latest' } }, '兆豐藍籌30', pastEvents)
+  assert.equal(latest.estimate, 2.5)
+  // 記錄前沒有配息可用 → 維持原值
+  assert.equal(checkOf(doc, '兆豐藍籌30', []).estimate, 1.3825)
 })

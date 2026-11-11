@@ -961,7 +961,7 @@ function createMarketRouter({
       const watches = groupId ? all.filter((w) => watchGroupIds(w).includes(groupId)) : all
       const targets = watches.map((w) => w.target)
       const twCodes = targets.filter((t) => t.market === 'tw' && t.kind === 'stock' && t.code).map((t) => t.code)
-      const [summaries, fees, settings, histories, notices, usdTwd, industries, concentration] = await Promise.all([
+      const [summaries, fees, settings, histories, notices, usdTwd, industries, concentration, decisions] = await Promise.all([
         // 報價抓不到也照樣回應（市值相關顯示「—」），不讓整頁 500
         targets.length ? marketService.getWatchSummaries(targets).catch(() => targets.map(() => null)) : [],
         feesOf(userId),
@@ -977,6 +977,8 @@ function createMarketRouter({
         // 集中度提醒（v20 2.9.8）：台股個股的產業別、使用者設的門檻
         marketService.getIndustryMap ? marketService.getIndustryMap(twCodes).catch(() => new Map()) : new Map(),
         concentrationSettingsOf(userId),
+        // 董事會的股利分派決議（重大訊息，v20 2.9.10）：股利預估先用決議的金額；抓不到就照舊推估
+        news?.listDecisions && twCodes.length ? news.listDecisions(twCodes).catch(() => null) : null,
       ])
       const items = watches.map((watch, index) => watchJSON(watch, summaries[index] ?? null, fees))
       // 填息追蹤用的日 K：摘要剛抓過（5 分鐘快取），這裡多半直接命中；抓不到的那一檔不算填息
@@ -992,6 +994,7 @@ function createMarketRouter({
         histories,
         barsList,
         notices,
+        decisions,
         settings,
         usdTwd,
         industries,

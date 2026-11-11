@@ -129,8 +129,8 @@ test('應收股利：持有期間做過真正的分割要提醒；美股扣預�
   assert.equal(result.unrecordedCash, 18.2)
 })
 
-test('股利預估：已公告優先、本月已除息用實際、去年同月有配才推估（金額用近 12 個月平均）', () => {
-  // 季配：近 12 個月 4 次，平均 (1 + 1.35 + 1.72 + 0.866)/4
+test('股利預估：已公告優先、本月已除息用實際、去年同月有配才推估（金額用最近一次配息）', () => {
+  // 季配：近 12 個月 4 次，最近一次 1.72（2026-11-11 起不再用平均：配息越配越多時平均一直偏低）
   const history = {
     cash: [
       { date: '2025-10-21', amount: 0.866 },
@@ -158,10 +158,13 @@ test('股利預估：已公告優先、本月已除息用實際、去年同月�
   // 2027-01 已公告 0.9：20,000 × 0.9 = 18,000（未達門檻）
   const jan = projection.months.find((m) => m.month === '2027-01')
   assert.deepEqual([jan.cash.source, jan.cash.net], ['announced', 18000])
-  // 2027-04：推估，近 12 個月（2025-10-25 之後）4 次的平均
+  // 2027-04：推估，最近一次 1.72
   const apr = projection.months.find((m) => m.month === '2027-04')
   assert.equal(apr.cash.source, 'estimated')
-  assert.equal(apr.cash.perShare, Math.round(((0.866 + 1 + 1.35 + 1.72) / 4) * 1e6) / 1e6)
+  assert.equal(apr.cash.perShare, 1.72)
+  assert.equal(projection.estimateMethod, 'latest')
+  // 過去用前一次估下一次：0.866→0.866 準、0.866→1 差 13.4%、1→1.35 差 25.9%、1.35→1.72 差 21.5% → 4 次中 1 次在 10% 內
+  assert.deepEqual(projection.estimateCheck, { tested: 4, within10: 1 })
   // 去年沒配息的月份不推估
   assert.equal(projection.months.find((m) => m.month === '2026-11').cash, null)
   assert.equal(projection.frequency, 'quarterly')
@@ -727,4 +730,99 @@ test('API：存股試算自選一檔，股利紀錄或報價抓不到時照樣�
     assert.equal(profile.dividendAverage, null)
     assert.equal(profile.currentYield, null)
   })
+})
+
+test('股利預估：董事會決議只在對得準時取代推估（頻率相符、5 個月內只有一次）；不配的決議不使用', () => {
+  // 半年配：12 月、6 月；11/05 決議上半年 2.0 → 5 個月內只有 12 月一次 → 換成決議的
+  const semi = {
+    cash: [
+      { date: '2025-06-16', amount: 2 },
+      { date: '2025-12-15', amount: 1 },
+      { date: '2026-06-15', amount: 1.5 },
+    ],
+    splits: [],
+  }
+  const half = { decidedAt: '2026-11-05', periodStart: '2026-01-01', periodEnd: '2026-06-30', cash: 2 }
+  const projection = income.projectDividends({ target: TW, history: semi, company: { decisions: [half], notices: [] }, shares: 1000, today: '2026-11-11', unit: 1000 })
+  const dec = projection.months.find((m) => m.month === '2026-12')
+  assert.deepEqual([dec.cash.source, dec.cash.perShare, dec.cash.decidedAt], ['decided', 2, '2026-11-05'])
+  assert.ok(dec.cash.estimatedDate, '日期仍用推的')
+  assert.equal(projection.months.find((m) => m.month === '2027-06').cash.source, 'estimated')
+
+  // 季配：11 月決議第 3 季，5 個月內有 12 月、3 月兩次 → 分不出來，照舊推估（台積電：12 月那次是更早決議的第 2 季）
+  const quarterly = {
+    cash: [
+      { date: '2025-12-15', amount: 5 },
+      { date: '2026-03-16', amount: 6 },
+      { date: '2026-06-15', amount: 6 },
+      { date: '2026-09-15', amount: 7 },
+    ],
+    splits: [],
+  }
+  const q3 = { decidedAt: '2026-11-10', periodStart: '2026-07-01', periodEnd: '2026-09-30', cash: 9 }
+  const tsmc = income.projectDividends({ target: TW, history: quarterly, company: { decisions: [q3], notices: [] }, shares: 1000, today: '2026-11-11', unit: 1000 })
+  assert.ok(tsmc.months.every((m) => m.cash?.source !== 'decided'))
+
+  // 年配的公司第一次決議期中股利（期間半年 ≠ 年配）→ 不能蓋掉年度股利的推估（4749、1817）
+  const annual = { cash: [{ date: '2025-06-30', amount: 2.4 }, { date: '2026-06-30', amount: 2.2 }], splits: [] }
+  const interim = income.projectDividends({ target: TW, history: annual, company: { decisions: [{ ...half, cash: 1.8 }], notices: [] }, shares: 1000, today: '2026-11-11', unit: 1000 })
+  const june = interim.months.find((m) => m.month === '2027-06').cash
+  assert.deepEqual([june.source, june.perShare], ['estimated', 2.2])
+
+  // 「上半年度不分派」只是沒有期中股利，年度股利照推（6679）
+  const zero = income.projectDividends({ target: TW, history: annual, company: { decisions: [{ ...half, cash: 0 }], notices: [] }, shares: 1000, today: '2026-11-11', unit: 1000 })
+  assert.equal(zero.months.find((m) => m.month === '2027-06').cash.source, 'estimated')
+})
+
+test('股利預估：公司公告的除息交易日當成已公告；沒寫每股的用決議補；和去年不同月時不重複推估', () => {
+  const quarterly = {
+    cash: [
+      { date: '2025-12-15', amount: 5 },
+      { date: '2026-03-16', amount: 6 },
+      { date: '2026-06-15', amount: 6 },
+      { date: '2026-09-15', amount: 7 },
+    ],
+    splits: [],
+  }
+  // 台積電：11/10 公告 116/03/11 除息、每股 9.0 元 → 3 月已公告 9；12 月仍推估
+  const tsmc = income.projectDividends({
+    target: TW,
+    history: quarterly,
+    company: { decisions: [], notices: [{ date: '2027-03-11', cash: 9, decidedAt: '2026-11-10' }] },
+    shares: 1000,
+    today: '2026-11-11',
+    unit: 1000,
+  })
+  const mar = tsmc.months.find((m) => m.month === '2027-03').cash
+  assert.deepEqual([mar.source, mar.perShare], ['announced', 9])
+  assert.equal(tsmc.months.find((m) => m.month === '2026-12').cash.source, 'estimated')
+
+  // 6613：公告只寫總金額（沒寫每股）→ 用同一天的決議 5 元；去年 1 月、今年公告 2 月 → 1 月的推估拿掉，不重複
+  const semi = { cash: [{ date: '2025-06-27', amount: 9 }, { date: '2026-01-12', amount: 3 }, { date: '2026-06-29', amount: 7 }], splits: [] }
+  const projection = income.projectDividends({
+    target: TW,
+    history: semi,
+    company: {
+      decisions: [{ decidedAt: '2026-11-05', periodStart: '2026-01-01', periodEnd: '2026-06-30', cash: 5 }],
+      notices: [{ date: '2027-02-11', cash: null, decidedAt: '2026-11-05' }],
+    },
+    shares: 1000,
+    today: '2026-11-11',
+    unit: 1000,
+  })
+  const feb = projection.months.find((m) => m.month === '2027-02').cash
+  assert.deepEqual([feb.source, feb.perShare], ['announced', 5])
+  assert.equal(projection.months.find((m) => m.month === '2027-01').cash, null)
+
+  // 證交所預告同一天的優先
+  const exchange = income.projectDividends({
+    target: TW,
+    history: quarterly,
+    announced: [{ date: '2027-03-11', cashDividend: 9.5, stockRatio: null }],
+    company: { decisions: [], notices: [{ date: '2027-03-11', cash: 9, decidedAt: '2026-11-10' }] },
+    shares: 1000,
+    today: '2026-11-11',
+    unit: 1000,
+  })
+  assert.equal(exchange.months.find((m) => m.month === '2027-03').cash.perShare, 9.5)
 })
