@@ -1,4 +1,5 @@
 // 技術指標。全部是純函式，輸入依時間由舊到新排列的數列，回傳最後一天的值；資料不足時回傳 null。
+const { computeLevelSources } = require('./levelSources')
 
 function round(value, digits = 2) {
   if (value === null || value === undefined || !Number.isFinite(value)) {
@@ -153,11 +154,19 @@ function computeIndicators(bars) {
   const macdValue = macd(closes)
   const range20 = highLow(highs, lows, 20)
   const range60 = highLow(highs, lows, 60)
+  // 一年高低（250 個交易日）：操作建議的「離一年高點」用；不到一年為 null
+  const range250 = highLow(highs, lows, 250)
+  const atrValue = atr(highs, lows, closes, 14)
+  // 支撐壓力的價位來源（成交密集區、缺口、前波高低點），signals.js 的 keyLevels 用
+  const sources = computeLevelSources(bars, atrValue)
 
   return {
     ma5: round(sma(closes, 5)),
     ma20: round(sma(closes, 20)),
     ma60: round(sma(closes, 60)),
+    // 半年線、年線：支撐壓力用（資料不足時為 null）
+    ma120: round(sma(closes, 120)),
+    ma240: round(sma(closes, 240)),
     rsi14: round(rsi(closes, 14), 1),
     k: kdValue ? round(kdValue.k, 1) : null,
     d: kdValue ? round(kdValue.d, 1) : null,
@@ -174,8 +183,18 @@ function computeIndicators(bars) {
     low20: range20 ? round(range20.low) : null,
     high60: range60 ? round(range60.high) : null,
     low60: range60 ? round(range60.low) : null,
+    high250: range250 ? round(range250.high) : null,
+    low250: range250 ? round(range250.low) : null,
     volumeRatio: round(volumeRatio(volumes), 2),
-    atr14: round(atr(highs, lows, closes, 14)),
+    atr14: round(atrValue),
+    levels: sources
+      ? {
+          volumeNodes: sources.volumeNodes.map((node) => ({ price: round(node.price), weight: round(node.weight, 1) })),
+          gaps: sources.gaps.map((gap) => ({ side: gap.side, price: round(gap.price), date: gap.date })),
+          swingHighs: sources.swingHighs.map((value) => round(value)),
+          swingLows: sources.swingLows.map((value) => round(value)),
+        }
+      : null,
   }
 }
 

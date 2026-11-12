@@ -89,4 +89,14 @@ function toReadingInput(record, spreads) {
   return { drawn, spread }
 }
 
-module.exports = { saveReading, trimHistory, toReadingInput }
+// 這段 AI 解讀講的是不是這筆紀錄的牌：張數、每張的牌與正逆位都要一樣。
+// 存回解讀的兩條路（AI 寫完後端存回、前端補存 PUT）共用，否則紀錄會配上一段和畫面無關的文字
+function isSameCards(recordCards, drawn) {
+  return (
+    Array.isArray(drawn) &&
+    recordCards.length === drawn.length &&
+    recordCards.every((card, index) => String(card.cardId) === String(drawn[index]?.id) && card.orientation === drawn[index]?.orientation)
+  )
+}
+
+module.exports = { saveReading, trimHistory, toReadingInput, isSameCards }

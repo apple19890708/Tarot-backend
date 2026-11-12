@@ -356,3 +356,90 @@ test('保存紀錄：行情資料只有股市諮詢才收，含 $ 開頭的 key 
   assert.strictEqual(Reading.calls.create[1].narration.market, null)
   assert.strictEqual(Reading.calls.create[1].narration.text, '解讀')
 })
+
+// ---- 補存 AI 解讀（2026-11-12）：AI 寫的過程中才按保存，那次 AI 請求沒有紀錄 id，寫完後由前端補上 ----
+// makeRecord 的牌：愚者正、魔術師逆、女祭司正
+const RECORD_CARDS = [
+  { id: CARD_A, orientation: 'upright' },
+  { id: CARD_B, orientation: 'reversed' },
+  { id: CARD_C, orientation: 'upright' },
+]
+async function putNarration(base, id, body) {
+  return fetch(`${base}/api/readings/${id}/narration`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cards: RECORD_CARDS, ...body }),
+  })
+}
+
+test('補存 AI 解讀：存進自己的紀錄，已經有的直接覆蓋', async () => {
+  let saves = 0
+  const record = makeRecord({ narration: { text: '舊的解讀' }, save: async () => (saves += 1) })
+  const Reading = makeFakeReading({ records: [record] })
+  await withServer(makeApp({ Reading }), async (base) => {
+    const response = await putNarration(base, RECORD_ID, { text: '新的解讀', model: 'm1' })
+    assert.strictEqual(response.status, 200)
+    assert.deepStrictEqual(await response.json(), { saved: true })
+  })
+  assert.strictEqual(saves, 1)
+  assert.strictEqual(record.narration.text, '新的解讀')
+  assert.strictEqual(record.narration.model, 'm1')
+  assert.strictEqual(String(Reading.calls.findOne[0].user), OWNER)
+})
+
+test('補存 AI 解讀：別人的紀錄回 404；沒有內容、太長回 400，都不寫入', async () => {
+  let saves = 0
+  const save = async () => (saves += 1)
+  const others = makeFakeReading({ records: [makeRecord({ user: OTHER, save })] })
+  await withServer(makeApp({ Reading: others }), async (base) => {
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '解讀' })).status, 404)
+    assert.strictEqual((await putNarration(base, 'not-an-object-id', { text: '解讀' })).status, 404)
+  })
+  const own = makeFakeReading({ records: [makeRecord({ save })] })
+  await withServer(makeApp({ Reading: own }), async (base) => {
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '   ' })).status, 400)
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '字'.repeat(20001) })).status, 400)
+  })
+  assert.strictEqual(saves, 0)
+})
+
+test('補存 AI 解讀：行情資料只有股市諮詢的紀錄才收', async () => {
+  const market = { items: [{ symbol: '2330.TW' }], notes: [] }
+  const stock = makeRecord({ domain: 'stock', save: async () => {} })
+  const plain = makeRecord({ save: async () => {} })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [stock] }) }), async (base) => {
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '解讀', market })).status, 200)
+  })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [plain] }) }), async (base) => {
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '解讀', market })).status, 200)
+  })
+  assert.deepStrictEqual(stock.narration.market, market)
+  assert.strictEqual(plain.narration.market, null)
+})
+
+test('補存 AI 解讀：牌和紀錄不一樣（張數、牌、正逆位）回 409，不寫入', async () => {
+  let saves = 0
+  const record = makeRecord({ save: async () => (saves += 1) })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    const flipped = RECORD_CARDS.map((card, index) => (index === 1 ? { ...card, orientation: 'upright' } : card))
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '解讀', cards: flipped })).status, 409)
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '解讀', cards: RECORD_CARDS.slice(0, 2) })).status, 409)
+    assert.strictEqual((await putNarration(base, RECORD_ID, { text: '解讀', cards: undefined })).status, 409)
+  })
+  assert.strictEqual(saves, 0)
+  assert.strictEqual(record.narration, null)
+})
+
+test('補存 AI 解讀：只改解讀，body 裡夾帶的問題、牌、類別、使用者都不會被改', async () => {
+  const record = makeRecord({ save: async () => {} })
+  const before = { question: record.question, cards: JSON.stringify(record.cards), domain: record.domain }
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    const response = await putNarration(base, RECORD_ID, { text: '解讀', question: '改掉的問題', domain: 'stock', user: OTHER })
+    assert.strictEqual(response.status, 200)
+  })
+  assert.strictEqual(record.question, before.question)
+  assert.strictEqual(JSON.stringify(record.cards), before.cards)
+  assert.strictEqual(record.domain, before.domain)
+  assert.strictEqual(record.user, undefined)
+  assert.strictEqual(record.narration.text, '解讀')
+})

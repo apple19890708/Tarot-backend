@@ -3,9 +3,18 @@
 //
 // tone：bull 偏多、bear 偏空、warn 需要留意（過熱、超賣、柱體收斂）、neutral 中性
 
-// 價位太接近時只留一個（例如 MA60 和近 60 日低點幾乎同價），差距在 0.3% 內視為同一價位
+// 價位太接近時併成一區（例如 MA60 和成交密集區幾乎同價）：差距在 0.3% 或 0.25 倍 ATR 內（取大的）視為同一區
 const LEVEL_MERGE_RATIO = 0.003
+const LEVEL_MERGE_ATR = 0.25
 const MAX_LEVELS = 3
+// 最近的三個裡沒有「比較守得住」的價位時，往外找到離現價這麼多倍 ATR，有的話換掉最遠的那一個
+const STRONG_REACH_ATR = 5
+const STRENGTH_RANK = { weak: 0, normal: 1, strong: 2 }
+// 強弱的說明（畫面與 AI 共用）。依據是 55 檔、5 年日 K 的實測，見 doc/v22-market-rules-research-plan.md
+const STRENGTH_NOTES = {
+  strong: '過去比較守得住',
+  weak: '跌到近期低點時，常直接跌破',
+}
 
 function trendSignal(ind) {
   const { ma5, ma20, ma60 } = ind
@@ -75,34 +84,83 @@ function volumeSignal(ratio, intraday) {
   return { key: 'volume', label: '量能', value: `量能持平${suffix}`, tone: 'neutral' }
 }
 
-// 支撐：現價以下最近的幾個參考價；壓力：現價以上最近的幾個
-function keyLevels(price, ind) {
-  const candidates = [
-    { price: ind.ma5, label: 'MA5' },
-    { price: ind.ma20, label: 'MA20' },
-    { price: ind.ma60, label: 'MA60' },
-    { price: ind.high20, label: '近 20 日高點' },
-    { price: ind.low20, label: '近 20 日低點' },
-    { price: ind.high60, label: '近 60 日高點' },
-    { price: ind.low60, label: '近 60 日低點' },
-  ].filter((level) => level.price !== null && level.price !== price)
+// 候選價位（規則版本 4）。kind：ma 均線、extreme 近 N 日高低、volume 成交密集區、gap 未回補缺口、swing 前波高低點。
+// 不放 MA5：離現價通常不到一天的波動，實測當支撐和隨機價位沒有差別
+function levelCandidates(price, ind) {
+  const list = [
+    { price: ind.ma20, label: 'MA20', kind: 'ma' },
+    { price: ind.ma60, label: 'MA60', kind: 'ma' },
+    { price: ind.ma120, label: '半年線（MA120）', kind: 'ma' },
+    { price: ind.ma240, label: '年線（MA240）', kind: 'ma' },
+    { price: ind.high20, label: '近 20 日高點', kind: 'extreme' },
+    { price: ind.low20, label: '近 20 日低點', kind: 'extreme' },
+    { price: ind.high60, label: '近 60 日高點', kind: 'extreme' },
+    { price: ind.low60, label: '近 60 日低點', kind: 'extreme' },
+  ]
+  const sources = ind.levels
+  if (sources) {
+    for (const node of sources.volumeNodes ?? []) list.push({ price: node.price, label: '成交密集區', kind: 'volume' })
+    for (const gap of sources.gaps ?? []) list.push({ price: gap.price, label: '未回補的缺口', kind: 'gap' })
+    // 前波高低點每一種只留離現價最近的一個，不然清單全是轉折點
+    const nearest = (values, below) => {
+      const side = values.filter((value) => (below ? value < price : value > price))
+      return side.length ? side.reduce((best, value) => (Math.abs(value - price) < Math.abs(best - price) ? value : best)) : null
+    }
+    list.push(
+      { price: nearest(sources.swingLows ?? [], true), label: '前波低點', kind: 'swing' },
+      { price: nearest(sources.swingHighs ?? [], true), label: '已突破的前波高點', kind: 'swing' },
+      { price: nearest(sources.swingHighs ?? [], false), label: '前波高點', kind: 'swing' },
+      { price: nearest(sources.swingLows ?? [], false), label: '已跌破的前波低點', kind: 'swing' },
+    )
+  }
+  return list.filter((level) => level.price !== null && level.price !== undefined && level.price !== price)
+}
 
-  const pick = (levels) => {
-    const result = []
+// 強弱只分支撐：成交密集區、未回補缺口比較守得住；近 N 日低點比隨機還容易跌破。
+// 壓力沒有任何一種明顯比隨機好（上漲時碰到壓力比較常直接過去），全部當一般
+function strengthOf(kind, side) {
+  if (side !== 'support') return 'normal'
+  if (kind === 'volume' || kind === 'gap') return 'strong'
+  if (kind === 'extreme') return 'weak'
+  return 'normal'
+}
+
+// 支撐：現價以下最近的幾個參考價；壓力：現價以上最近的幾個。
+// 每個價位：{ price, label, strength: 'strong' | 'normal' | 'weak', note }（note 是強弱的白話說明，一般的為 null）
+function keyLevels(price, ind) {
+  const candidates = levelCandidates(price, ind)
+  const atr = ind.atr14 ?? null
+  const mergeGap = Math.max(price * LEVEL_MERGE_RATIO, atr ? atr * LEVEL_MERGE_ATR : 0)
+
+  const pick = (levels, side) => {
+    const zones = []
     for (const level of levels) {
-      const near = result.find((kept) => Math.abs(kept.price - level.price) / level.price <= LEVEL_MERGE_RATIO)
+      const strength = strengthOf(level.kind, side)
+      const near = zones.find((zone) => Math.abs(zone.anchor - level.price) <= mergeGap)
       if (near) {
-        near.label = `${near.label}、${level.label}`
-      } else if (result.length < MAX_LEVELS) {
-        result.push({ ...level })
+        if (!near.labels.includes(level.label)) near.labels.push(level.label)
+        // 一區裡有比較守得住的成員，整區就算比較守得住，價位也用那個成員的
+        if (STRENGTH_RANK[strength] > STRENGTH_RANK[near.strength]) {
+          near.strength = strength
+          near.price = level.price
+        }
+      } else {
+        zones.push({ anchor: level.price, price: level.price, labels: [level.label], strength })
       }
     }
-    return result
+    let chosen = zones.slice(0, MAX_LEVELS)
+    if (chosen.length === MAX_LEVELS && !chosen.some((zone) => zone.strength === 'strong') && atr) {
+      const strong = zones.slice(MAX_LEVELS).find((zone) => zone.strength === 'strong' && Math.abs(zone.price - price) <= atr * STRONG_REACH_ATR)
+      if (strong) chosen = [...chosen.slice(0, MAX_LEVELS - 1), strong]
+    }
+    return chosen
+      .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price))
+      .map((zone) => ({ price: zone.price, label: zone.labels.join('、'), strength: zone.strength, note: STRENGTH_NOTES[zone.strength] ?? null }))
   }
 
   return {
-    supports: pick(candidates.filter((level) => level.price < price).sort((a, b) => b.price - a.price)),
-    resistances: pick(candidates.filter((level) => level.price > price).sort((a, b) => a.price - b.price)),
+    supports: pick(candidates.filter((level) => level.price < price).sort((a, b) => b.price - a.price), 'support'),
+    resistances: pick(candidates.filter((level) => level.price > price).sort((a, b) => a.price - b.price), 'resistance'),
   }
 }
 

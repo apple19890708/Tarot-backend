@@ -1,4 +1,4 @@
-// 占卜紀錄（v13）：列表、單筆回顧、刪除。都只看得到自己的紀錄。
+// 占卜紀錄（v13）：保存、列表、單筆回顧、補存 AI 解讀、刪除。都只看得到自己的紀錄。
 // 注意：requireAuth 掛在各路由上，不用 router.use——這個 router 與
 // POST /api/readings/draw 等公開端點共用 /api/readings 前綴，
 // 用 router.use 會把那些未登入也能用的端點一起擋掉。
@@ -9,7 +9,7 @@ const ReadingModel = require('../models/Reading')
 const spreads = require('../data/spreads')
 const { loadCardsInOrder: defaultLoadCardsInOrder } = require('../services/cardLoader')
 const { buildReadingWithDictionary } = require('../services/readingService')
-const { saveReading, toReadingInput } = require('../services/readingHistory')
+const { saveReading, toReadingInput, isSameCards } = require('../services/readingHistory')
 const {
   validateManualCards,
   validateQuestion,
@@ -193,6 +193,42 @@ function createReadingsRouter({
             }
           : null,
       })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // 補存或更新這筆紀錄的 AI 解讀（2026-11-12）：AI 寫的過程中才按保存時，那次 AI 請求沒有紀錄 id，
+  // 後端寫完不會存回；前端在 AI 完成後用這支補上。已經有解讀時直接覆蓋（重新產生的較新）。
+  // 只收解讀文字與當時的行情（同 POST 的 narration 規則），牌與問題不能從這裡改。
+  // body.cards 是這段解讀當時的牌（[{ id, orientation }]），和紀錄的牌不一樣就不存（409）：
+  // 前端狀態錯亂時（例如重抽了），不會把另一組牌的解讀存進這筆
+  router.put('/:id/narration', requireAuth, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) {
+        return
+      }
+      const record = await findOwnReading(Reading, req.params.id, req.auth.userId)
+      if (!record) {
+        res.status(404).json({ message: '找不到這筆紀錄。' })
+        return
+      }
+      if (!isSameCards(record.cards, req.body?.cards)) {
+        res.status(409).json({ message: '這段 AI 解讀和紀錄的牌不一樣，沒有存。' })
+        return
+      }
+      const { narration, error } = resolveNarration(req.body, { allowMarket: record.domain === 'stock' })
+      if (error) {
+        res.status(400).json({ message: error })
+        return
+      }
+      if (!narration) {
+        res.status(400).json({ message: '沒有 AI 解讀內容。' })
+        return
+      }
+      record.narration = narration
+      await record.save()
+      res.json({ saved: true })
     } catch (error) {
       next(error)
     }

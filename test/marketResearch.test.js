@@ -117,47 +117,66 @@ test('預測：有規律的資料（漲多會回檔）模型要能贏過基準',
 // ---- 操作建議 ----
 const { buildAdvice, RULE_VERSION } = require('../src/services/market/advice')
 
-function adviceItem({ signals, supports = [], resistances = [], research = null, session = 'closed' }) {
+function adviceItem({ signals, supports = [], resistances = [], research = null, session = 'closed', indicators = {} }) {
   return {
     quote: { price: 100 },
     session,
-    indicators: { high20: 110, low20: 90 },
+    indicators: { high20: 110, low20: 90, ...indicators },
     analysis: { signals, supports, resistances },
     research,
   }
 }
+// 長期趨勢（規則版本 4）：現價 100。UP＝在年線之上、離一年高點 5%（+2 分）；DOWN＝在年線之下、離一年高點 29%（−2 分）
+const UP = { ma240: 90, high250: 105 }
+const DOWN = { ma240: 120, high250: 140 }
 const sig = (key, label, value) => ({ key, label, value, tone: 'neutral' })
 const BULL = [sig('trend', '均線排列', '多頭排列'), sig('ma20', '月線（MA20）', '站上'), sig('ma60', '季線（MA60）', '站上')]
 const BEAR = [sig('trend', '均線排列', '空頭排列'), sig('ma20', '月線（MA20）', '跌破'), sig('ma60', '季線（MA60）', '跌破')]
 
-test('操作建議：多頭結構判偏多，停損用最近支撐、目標用最近壓力', () => {
+test('操作建議：長期趨勢偏多判偏多；出場點用 2 倍 ATR、目標用上方的壓力', () => {
   const advice = buildAdvice(
     adviceItem({
       signals: BULL,
+      indicators: { ...UP, atr14: 2 },
       supports: [{ price: 95, label: 'MA20' }],
       resistances: [{ price: 110, label: '近 20 日高點' }],
     }),
   )
   assert.equal(advice.stance, 'bullish')
-  assert.equal(advice.confidence, 'high')
-  assert.equal(advice.levels.stopLoss.price, 95)
+  // 年線 1＋接近一年高點 1＋均線排列 0.5
+  assert.equal(advice.score, 2.5)
+  // 只有趨勢類同方向：信心最多到中
+  assert.equal(advice.confidence, 'medium')
+  assert.equal(advice.levels.stopLoss.price, 96)
+  assert.match(advice.levels.stopLoss.label, /一天平均波動的 2 倍（約 −4%），收盤跌破才算/)
   assert.equal(advice.levels.targets[0].price, 110)
-  assert.equal(advice.levels.riskReward, 2)
+  assert.equal(advice.levels.riskReward, 2.5)
   assert.equal(advice.levels.targetsLabel, '目標價')
+  assert.match(advice.forNew, /收盤跌破 96 停損/)
 })
 
-test('操作建議：空頭結構判偏空，不給風險報酬比，價位改叫反彈減碼點', () => {
-  const advice = buildAdvice(adviceItem({ signals: BEAR, supports: [{ price: 95, label: 'MA60' }], resistances: [{ price: 105, label: 'MA5' }] }))
+test('操作建議：長期趨勢偏空判偏空，不給風險報酬比，價位改叫反彈減碼點', () => {
+  const advice = buildAdvice(
+    adviceItem({ signals: BEAR, indicators: DOWN, supports: [{ price: 95, label: 'MA60' }], resistances: [{ price: 105, label: 'MA20' }] }),
+  )
   assert.equal(advice.stance, 'bearish')
+  assert.equal(advice.score, -2.5)
   assert.equal(advice.levels.riskReward, null)
   assert.equal(advice.levels.targetsLabel, '反彈減碼點')
+  assert.equal(advice.levels.stopLossLabel, '持有者出場點')
   assert.match(advice.positionSize, /持有者|空手/)
 })
 
-test('操作建議：沒有支撐時停損用固定比例；沒有壓力時用波動估目標', () => {
+test('操作建議：沒有 ATR 時停損用固定比例；沒有壓力時用波動估目標', () => {
   const advice = buildAdvice(adviceItem({ signals: BULL }))
   assert.equal(advice.levels.stopLoss.price, 93)
   assert.equal(advice.levels.targets[0].price, 110)
+  // 有 ATR：目標用 3 倍 ATR 估
+  const withAtr = buildAdvice(adviceItem({ signals: BULL, indicators: { atr14: 2 } }))
+  assert.equal(withAtr.levels.targets[0].price, 106)
+  assert.match(withAtr.levels.targets[0].label, /3 倍/)
+  // 資料不到一年（沒有年線）：風險提醒要說
+  assert.ok(advice.risks.some((r) => r.includes('不到一年')))
 })
 
 // 回測訊號的假資料：count 次裡 10 日上漲 win10%；結論和真的一樣交給 judgeSignal 算
@@ -203,7 +222,7 @@ test('策略回測：台股 ETF 的證交稅比股票低', () => {
   assert.equal(backtestStrategies(series, 'us', { etf: true }).roundTripCost, ROUND_TRIP_COST.us)
 })
 
-test('操作建議：訊號回測只有明顯優於或劣於基準才算數，不可靠的模型不計入', () => {
+test('操作建議：訊號回測只有明顯優於或劣於基準才算數（每項 0.5 分）；機器學習不計分', () => {
   const baseline = [{ days: 10, winRate: 55 }]
   const research = {
     backtest: {
@@ -223,89 +242,130 @@ test('操作建議：訊號回測只有明顯優於或劣於基準才算數，�
   assert.equal(byLabel['RSI(14) 偏強'].direction, 0)
   assert.equal(byLabel['MACD 紅柱擴大'].counted, false)
   assert.equal(byLabel['模型預測上漲機率 80%'].counted, false)
-  // 只有 KD 一項偏多（+1），不足以判偏多
+  // 只有 KD 一項偏多（回測訊號每項 0.5 分），不足以判偏多
+  assert.equal(advice.score, 0.5)
   assert.equal(advice.stance, 'neutral')
 })
 
-test('操作建議：均線三項合計上限 2 分，光靠均線剛好到偏多門檻', () => {
-  const advice = buildAdvice(adviceItem({ signals: BULL }))
-  assert.equal(advice.score, 2)
-  // 再多一項偏空就不夠偏多（舊版均線一共 4 分，會壓過一項反向依據）
+test('操作建議：年線、離一年高點各 1 分，均線排列 0.5 分；月線、季線只列出不計分', () => {
+  // 沒有年線資料：均線多頭排列只有 0.5 分，不會判偏多（規則版本 3 以前光靠均線三項就 2 分）
+  const maOnly = buildAdvice(adviceItem({ signals: BULL }))
+  assert.equal(maOnly.score, 0.5)
+  assert.equal(maOnly.stance, 'neutral')
+  for (const label of ['站上月線（MA20）', '站上季線（MA60）']) {
+    assert.equal(maOnly.evidence.find((e) => e.label === label).counted, false)
+  }
+
+  const byLabel = (advice) => Object.fromEntries(advice.evidence.map((e) => [e.label, e]))
+  const up = buildAdvice(adviceItem({ signals: [sig('trend', '均線排列', '均線糾結')], indicators: UP }))
+  assert.equal(up.score, 2)
+  assert.equal(up.stance, 'bullish')
+  assert.equal(byLabel(up)['股價在年線之上'].direction, 1)
+  assert.equal(byLabel(up)['接近一年高點'].direction, 1)
+  assert.equal(byLabel(up)['均線糾結'].counted, false)
+
+  // 離一年高點 8%～20% 之間：不列入，只剩年線 1 分
+  const middle = buildAdvice(adviceItem({ signals: BULL, indicators: { ma240: 90, high250: 115 } }))
+  assert.equal(byLabel(middle)['離一年高點有一段距離'].counted, false)
+  assert.equal(middle.score, 1.5)
+  assert.equal(middle.stance, 'neutral')
+
+  const down = buildAdvice(adviceItem({ signals: BEAR, indicators: DOWN }))
+  assert.equal(byLabel(down)['股價在年線之下'].direction, -1)
+  assert.equal(byLabel(down)['離一年高點很遠'].direction, -1)
+
+  // 長期趨勢偏多（+2.5），一項回測訊號偏空（−0.5）：還是偏多；信心看有沒有趨勢以外的依據站同一邊
   const baseline = [{ days: 10, winRate: 55 }]
-  const research = {
-    backtest: { baseline, signals: [fakeSignal({ key: 'kd', label: 'KD', value: '死亡交叉', sufficient: true }, 30, { baseline })] },
-    strategies: null,
-    prediction: null,
-  }
-  assert.equal(buildAdvice(adviceItem({ signals: BULL, research })).stance, 'neutral')
+  const withSignal = (value, win10) =>
+    buildAdvice(
+      adviceItem({
+        signals: BULL,
+        indicators: UP,
+        research: { backtest: { baseline, signals: [fakeSignal({ key: 'kd', label: 'KD', value, sufficient: true }, win10, { baseline })] }, strategies: null, prediction: null },
+      }),
+    )
+  const against = withSignal('死亡交叉', 30)
+  assert.equal(against.score, 2)
+  assert.equal(against.stance, 'bullish')
+  assert.equal(against.confidence, 'medium')
+  const agree = withSignal('黃金交叉', 70)
+  assert.equal(agree.score, 3)
+  assert.equal(agree.confidence, 'high')
 })
 
-test('操作建議：出場點跳過 1 倍 ATR 內的支撐，改用較近的替代，最遠 −10%', () => {
-  const withAtr = (atr14, supports) => {
-    const item = adviceItem({ signals: BEAR, supports })
-    item.indicators = { ...item.indicators, atr14 }
-    return buildAdvice(item)
-  }
-  // ATR 2：MA5（−1）太近；下一個支撐 MA20（−3）比 2 倍 ATR（96）近，用 MA20
-  const next = withAtr(2, [{ price: 99, label: 'MA5' }, { price: 97, label: 'MA20' }])
-  assert.equal(next.levels.stopLoss.price, 97)
-  assert.match(next.levels.stopLoss.label, /跌破MA20（MA5太近/)
+test('操作建議：出場點是現價 − 2 倍 ATR（最遠 −10%），和支撐在哪裡無關', () => {
+  const withAtr = (atr14, supports = [], resistances = []) => buildAdvice(adviceItem({ signals: BEAR, indicators: { ...DOWN, atr14 }, supports, resistances }))
+  // 支撐再近（MA20 只差 1%）出場點也不跟著它：實測用最近的支撐當出場點，20 天內 75% 會碰到
+  const near = withAtr(2, [{ price: 99, label: 'MA20' }, { price: 97, label: 'MA60' }])
+  assert.equal(near.levels.stopLoss.price, 96)
+  assert.doesNotMatch(near.levels.stopLoss.label, /太近/)
+  assert.equal(withAtr(1.5).levels.stopLoss.price, 97)
 
-  // 下一個支撐很遠（近 60 日低點 −12%）：用比較近的 2 倍 ATR（−4%）
-  const far = withAtr(2, [{ price: 99, label: 'MA5' }, { price: 88, label: '近 60 日低點' }])
-  assert.equal(far.levels.stopLoss.price, 96)
-  assert.match(far.levels.stopLoss.label, /MA5太近/)
-
-  // 最近的支撐本身夠遠（ATR 2、支撐 −6%）：照用
-  assert.equal(withAtr(2, [{ price: 94, label: 'MA60' }]).levels.stopLoss.price, 94)
-
-  // 波動極大（ATR 8）：−6% 的支撐在一天的波動內，但替代方案都超過 −10%，保留支撐並提醒
-  const noisy = withAtr(8, [{ price: 94, label: 'MA20' }, { price: 79, label: '近 60 日低點' }])
-  assert.equal(noisy.levels.stopLoss.price, 94)
+  // 波動極大（ATR 8）：2 倍是 −16%，設在上限 −10%，並提醒部位放小
+  const noisy = withAtr(8)
+  assert.equal(noisy.levels.stopLoss.price, 90)
+  assert.match(noisy.levels.stopLoss.label, /最遠設到 −10%/)
   assert.ok(noisy.risks.some((r) => r.includes('容易被洗出場')))
+  assert.ok(!near.risks.some((r) => r.includes('容易被洗出場')))
 
-  // 沒有支撐：2 倍 ATR，最遠 −10%
-  assert.equal(withAtr(1.5, []).levels.stopLoss.price, 97)
-  assert.equal(withAtr(8, []).levels.stopLoss.price, 90)
+  // 目標／減碼點跳過離現價不到 1 倍 ATR 的壓力
+  const targets = withAtr(2, [], [{ price: 100.5, label: 'MA20' }, { price: 104, label: 'MA60' }, { price: 108, label: '前波高點' }])
+  assert.deepEqual(targets.levels.targets.map((t) => t.price), [104, 108])
 
-  // 沒有支撐：用 ATR，不用固定 7%
-  const none = adviceItem({ signals: BULL })
-  none.indicators = { ...none.indicators, atr14: 1.5 }
-  assert.equal(buildAdvice(none).levels.stopLoss.price, 97)
+  // 文字裡的參考支撐：跳過貼著現價的、優先用不是「容易跌破」的
+  const bull = buildAdvice(
+    adviceItem({
+      signals: BULL,
+      indicators: { ...UP, atr14: 2 },
+      supports: [
+        { price: 99.5, label: 'MA20', strength: 'normal' },
+        { price: 98, label: '近 20 日低點', strength: 'weak' },
+        { price: 96.5, label: '成交密集區', strength: 'strong' },
+      ],
+    }),
+  )
+  assert.ok(bull.forNew.includes('等拉回 96.5（成交密集區）附近再加'), bull.forNew)
+  // 夠遠的支撐都在出場點（96）之下：不提「拉回到哪裡」，免得比出場點還低
+  const below = buildAdvice(
+    adviceItem({ signals: BULL, indicators: { ...UP, atr14: 2 }, supports: [{ price: 99.5, label: 'MA20' }, { price: 94, label: '成交密集區', strength: 'strong' }] }),
+  )
+  assert.ok(!below.forNew.includes('拉回'), below.forNew)
 })
 
-test('操作建議：輸給買進持有的最佳策略不計入', () => {
+test('操作建議：最佳技術策略只列出不計分', () => {
   const strategy = (key, totalReturn, extra = {}) => ({ key, label: key, totalReturn, holdingNow: true, robust: false, ...extra })
-  const research = (best) => ({
+  const research = (best, extra) => ({
     backtest: null,
     prediction: null,
-    strategies: { years: 4.7, strategies: [strategy('buyHold', 100), strategy('maCross', best)] },
+    strategies: { years: 4.7, strategies: [strategy('buyHold', 100), strategy('maCross', best, extra)] },
   })
-  const losing = buildAdvice(adviceItem({ signals: BULL, research: research(80) }))
-  const lose = losing.evidence.find((e) => e.group === '策略')
-  assert.equal(lose.counted, false)
-  assert.match(lose.detail, /輸給買進持有/)
-  const winning = buildAdvice(adviceItem({ signals: BULL, research: research(120) }))
-  assert.equal(winning.evidence.find((e) => e.group === '策略').counted, true)
+  const losing = buildAdvice(adviceItem({ signals: BULL, research: research(80) })).evidence.find((e) => e.group === '策略')
+  assert.equal(losing.counted, false)
+  assert.match(losing.detail, /輸給買進持有/)
+  // 贏過買進持有、前後兩段都穩定也一樣不計分（歷史重算裡照它判斷方向沒有比較準）
+  const winning = buildAdvice(adviceItem({ signals: BULL, research: research(120, { robust: true }) }))
+  const win = winning.evidence.find((e) => e.group === '策略')
+  assert.equal(win.counted, false)
+  assert.match(win.detail, /贏過買進持有/)
+  assert.equal(winning.score, 0.5)
 })
 
-test('操作建議：大盤方向和判斷相反時信心降一級，不計分', () => {
+test('操作建議：大盤方向只列出，不計分也不調整信心', () => {
   const index = (above) => {
     const closes = Array.from({ length: 80 }, () => 100)
     closes[79] = above ? 110 : 90
     return { label: '大盤', series: { closes, ma60: closes.map((_, i) => (i >= 59 ? 100 : null)) } }
   }
-  const item = adviceItem({ signals: BULL, supports: [{ price: 95, label: 'MA20' }] })
+  const item = adviceItem({ signals: BULL, indicators: UP, supports: [{ price: 95, label: 'MA20' }] })
   const withUp = buildAdvice(item, { context: index(true) })
   const withDown = buildAdvice(item, { context: index(false) })
-  assert.equal(withUp.confidence, 'high')
-  assert.equal(withDown.confidence, 'medium')
+  assert.equal(withDown.confidence, withUp.confidence)
   assert.equal(withDown.score, withUp.score)
   assert.equal(withDown.evidence.find((e) => e.group === '大盤').counted, false)
-  assert.ok(withDown.risks.some((r) => r.includes('季線之下')))
-  // 沒有大盤資料（ETF、指數）照舊
-  assert.equal(buildAdvice(item).confidence, 'high')
+  assert.equal(withDown.evidence.find((e) => e.group === '大盤').label, '大盤跌破季線')
+  assert.ok(!withDown.risks.some((r) => r.includes('信心降一級')))
   assert.equal(buildAdvice(item).ruleVersion, RULE_VERSION)
+  assert.equal(RULE_VERSION, 4)
 })
 
 test('操作建議：籌碼淨買賣超太小又沒有連買，不計分', () => {

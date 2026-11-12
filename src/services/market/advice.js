@@ -7,15 +7,33 @@ const { valuationBasis } = require('./twseData')
 // 規則版本：判斷方法改了就加一，命中率統計才能分開新舊規則的紀錄（tracking.js）
 // 2：技術面三項合計上限 2 分、回測改用信賴區間、輸給買進持有的策略不列入、出場點跳過 1 倍 ATR 內的支撐、大盤方向調整信心
 // 3：籌碼要佔成交量 1% 以上或連 3 天才計分；機器學習的「可以參考」改用信賴區間
-const RULE_VERSION = 3
-// 支撐離現價不到這麼多倍 ATR 算太近（一天的正常波動就會碰到），跳過
-const MIN_STOP_ATR = 1
-// 沒有夠遠的支撐時，出場點用現價 − 這麼多倍 ATR（和策略回測的停損同一個倍數）
+// 4：依歷史重算的結果重訂計分（doc/v22-market-rules-research-plan.md）。55 檔、每 5 個交易日用當時的資料重算一次（7,765 次）：
+//    版本 3 的偏多之後 10 天上漲 56.1%、偏空之後 56.4%，沒有分辨力。逐項看，只有長趨勢（年線、離一年高點）有：
+//    新計分的偏多 57.5%、偏空 48.8%，前後兩段都成立（台股明顯、美股大型股沒有差別）。
+//    所以：年線與離一年高點各 1 分、均線排列 0.5 分、回測訊號各 0.5 分；月線、季線、最佳策略、機器學習、大盤只列出不計分。
+//    出場點改用 2 倍 ATR（收盤跌破），不再拿支撐當出場點；目標價至少離現價 1 倍 ATR
+const RULE_VERSION = 4
+// 離一年高點：不到這麼多 % 算接近高點（偏多）；低這麼多 % 以上算弱勢（偏空）
+const NEAR_HIGH_PCT = 8
+const FAR_FROM_HIGH_PCT = 20
+// 回測訊號的權重：歷史重算裡「有優勢」的訊號之後並沒有比較準，加進來不好不壞，只給半分
+const BACKTEST_WEIGHT = 0.5
+// 只列出、不計分的說明（畫面的依據清單會顯示）
+const NOT_SCORED = '歷史驗證：照它判斷方向沒有比較準，只列出來參考，不計分'
+// 出場點（規則版本 4）：現價 − 這麼多倍 ATR，「收盤」跌破才算。不再拿支撐當出場點：
+// 實測（doc/v22-market-rules-research-plan.md）用最近的支撐當出場點，20 天內 75% 會碰到、其中近一半之後是漲的；2 倍 ATR 收盤跌破是 36%、被洗 19%。
+// 和策略回測的停損同一個倍數
 const STOP_ATR_MULTIPLE = 2
-// 換過的出場點最遠離現價這麼多 %；再遠就保留原本的支撐並提醒部位放小
+// 出場點最遠離現價這麼多 %（波動極大時 2 倍 ATR 會遠到沒有意義）；碰到上限時另外提醒部位放小
 const MAX_STOP_PCT = 10
-// 沒有 ATR 也沒有支撐時，停損用固定比例
+// 沒有 ATR 時，停損用固定比例
 const FALLBACK_STOP_PCT = 7
+// 目標價／減碼點至少要離現價這麼多倍 ATR（更近的一天就會碰到，當目標沒有意義）
+const MIN_TARGET_ATR = 1
+// 上方沒有夠遠的壓力時，目標用現價 ＋ 這麼多倍 ATR 估
+const FALLBACK_TARGET_ATR = 3
+// 文字裡「等拉回到哪裡」「反彈到哪裡」用的支撐壓力，至少離現價這麼多倍 ATR
+const MIN_REFERENCE_ATR = 0.5
 
 function fmt(value) {
   return value.toLocaleString('en-US', { maximumFractionDigits: 2 })
@@ -23,8 +41,37 @@ function fmt(value) {
 
 // ---- 證據：每一項都有方向（+1 偏多、-1 偏空、0 中性）與權重 ----
 
-// 均線排列、站上／跌破月線、季線其實都在描述「價格在均線的哪一邊」，高度重疊。
-// 三項合計上限 2 分（排列 1、月線 0.5、季線 0.5），不讓同一件事單獨就決定偏多或偏空
+// 長期趨勢（規則版本 4）：年線位置、離一年高點。歷史重算裡唯一有分辨力的兩項。資料不到一年時沒有
+function longTrendEvidence(price, indicators) {
+  const evidence = []
+  const year = indicators?.ma240 ?? null
+  if (year !== null) {
+    evidence.push({
+      group: '長期趨勢',
+      label: price >= year ? '股價在年線之上' : '股價在年線之下',
+      detail: `年線（近 240 個交易日的平均價）${fmt(year)}`,
+      direction: price >= year ? 1 : -1,
+      weight: 1,
+    })
+  }
+  const high = indicators?.high250 ?? null
+  if (high !== null && high > 0) {
+    const gap = round((1 - price / high) * 100, 1)
+    const direction = gap <= NEAR_HIGH_PCT ? 1 : gap >= FAR_FROM_HIGH_PCT ? -1 : 0
+    evidence.push({
+      group: '長期趨勢',
+      label: direction > 0 ? '接近一年高點' : direction < 0 ? '離一年高點很遠' : '離一年高點有一段距離',
+      detail:
+        `一年高點 ${fmt(high)}，現價低 ${Math.max(gap, 0)}%` +
+        (direction > 0 ? `（${NEAR_HIGH_PCT}% 以內算強勢）` : direction < 0 ? `（${FAR_FROM_HIGH_PCT}% 以上算弱勢）` : `，介於 ${NEAR_HIGH_PCT}%～${FAR_FROM_HIGH_PCT}% 之間，不列入`),
+      direction,
+      weight: direction === 0 ? 0 : 1,
+    })
+  }
+  return evidence
+}
+
+// 均線排列 0.5 分；站上／跌破月線、季線和排列講的是同一件事，歷史重算裡加進來反而比較不準，只列出不計分
 function trendEvidence(signals) {
   const evidence = []
   const find = (key) => signals.find((signal) => signal.key === key)
@@ -33,7 +80,7 @@ function trendEvidence(signals) {
     const direction = trend.value === '多頭排列' ? 1 : trend.value === '空頭排列' ? -1 : 0
     // 「均線糾結」本身已含均線兩字
     const label = trend.value.startsWith('均線') ? trend.value : `均線${trend.value}`
-    evidence.push({ group: '技術面', label, direction, weight: 1 })
+    evidence.push({ group: '技術面', label, detail: direction === 0 ? '沒有方向，不列入' : null, direction, weight: direction === 0 ? 0 : 0.5 })
   }
   for (const key of ['ma20', 'ma60']) {
     const signal = find(key)
@@ -41,8 +88,9 @@ function trendEvidence(signals) {
       evidence.push({
         group: '技術面',
         label: `${signal.value}${signal.label}`,
+        detail: '和均線排列講的是同一件事，只列出來參考，不計分',
         direction: signal.value === '站上' ? 1 : -1,
-        weight: 0.5,
+        weight: 0,
       })
     }
   }
@@ -79,11 +127,12 @@ function backtestEvidence(backtest) {
         noEdge: '範圍包含平常的比例，看不出優勢',
         horizonConflict: '10 日看起來有差，但 5 日或 20 日方向相反，不算有優勢',
       }[verdict.reason]
-      return { group: '歷史回測', label, detail: `${head}；${tail}`, direction: verdict.direction, weight: 1 }
+      return { group: '歷史回測', label, detail: `${head}；${tail}`, direction: verdict.direction, weight: verdict.direction === 0 ? 0 : BACKTEST_WEIGHT }
     })
 }
 
-// 過去表現最好的技術策略（不含買進持有）現在是持有還是空手
+// 過去表現最好的技術策略（不含買進持有）現在是持有還是空手。
+// 規則版本 4 起只列出不計分：歷史重算裡，最佳策略「持有中」之後 10 天上漲 54.2%、「空手」之後 56.4%，方向反而相反
 function strategyEvidence(strategies) {
   if (!strategies) return []
   const buyHold = strategies.strategies.find((s) => s.key === 'buyHold')
@@ -91,30 +140,19 @@ function strategyEvidence(strategies) {
     .filter((s) => s.key !== 'buyHold' && s.totalReturn !== null)
     .sort((a, b) => b.totalReturn - a.totalReturn)[0]
   if (!best) return []
-  const beatBuyHold = buyHold && best.totalReturn > buyHold.totalReturn
-  // 輸給買進持有的策略，照它進出還不如不動，它現在持有或空手沒有參考價值
-  if (buyHold && !beatBuyHold) {
-    return [
-      {
-        group: '策略',
-        label: `${best.label}策略${best.holdingNow ? '持有中' : '目前空手'}`,
-        detail: `近 ${strategies.years} 年表現最好的技術策略（${best.totalReturn > 0 ? '+' : ''}${best.totalReturn}%）也輸給買進持有（${buyHold.totalReturn > 0 ? '+' : ''}${buyHold.totalReturn}%），不計入`,
-        direction: 0,
-        weight: 0,
-      },
-    ]
-  }
-  const robustText = best.robust ? '；前後兩段都贏過同期的買進持有，表現穩定' : '；分段驗證沒有兩段都贏過買進持有'
+  const pct = (value) => `${value > 0 ? '+' : ''}${value}%`
+  const versus = !buyHold
+    ? ''
+    : best.totalReturn > buyHold.totalReturn
+      ? `，贏過買進持有（${pct(buyHold.totalReturn)}）`
+      : `，輸給買進持有（${pct(buyHold.totalReturn)}）`
   return [
     {
       group: '策略',
       label: `${best.label}策略${best.holdingNow ? '持有中' : '目前空手'}`,
-      detail: `這是近 ${strategies.years} 年表現最好的技術策略（${best.totalReturn > 0 ? '+' : ''}${best.totalReturn}%）${
-        beatBuyHold ? '，而且贏過買進持有' : `，但輸給買進持有（${buyHold.totalReturn > 0 ? '+' : ''}${buyHold.totalReturn}%）`
-      }${robustText}`,
+      detail: `近 ${strategies.years} 年表現最好的技術策略（${pct(best.totalReturn)}）${versus}。${NOT_SCORED}`,
       direction: best.holdingNow ? 1 : -1,
-      // 分段驗證都贏過買進持有的策略最值得參考
-      weight: best.robust ? 1.5 : 1,
+      weight: 0,
     },
   ]
 }
@@ -157,31 +195,18 @@ function chipsEvidence(chips) {
   return evidence
 }
 
+// 機器學習：規則版本 4 起只列出不計分。55 檔滾動驗證（4 萬多筆樣本外預測）準確率 51%，低於一律猜漲的 53%；
+// 單一檔「樣本外有贏過基準」多半只是運氣（歷史重算裡標示可靠的 38 次，之後 10 天上漲 42%）
 function predictionEvidence(prediction) {
   if (!prediction || prediction.probabilityUp === null) return []
-  if (!prediction.reliable) {
-    return [
-      {
-        group: '機器學習',
-        label: `模型預測上漲機率 ${prediction.probabilityUp}%`,
-        detail:
-          prediction.edge > 0 && prediction.accuracyInterval
-            ? `樣本外準確率 ${prediction.testAccuracy}% 比基準 ${prediction.baselineAccuracy}% 高，但獨立的測試樣本只有約 ${prediction.effectiveSamples} 筆，合理範圍 ${prediction.accuracyInterval.low}～${prediction.accuracyInterval.high}% 還包含基準，可能只是運氣，不計入`
-            : `樣本外準確率 ${prediction.testAccuracy}% 沒有贏過基準 ${prediction.baselineAccuracy}%，不計入`,
-        direction: 0,
-        weight: 0,
-      },
-    ]
-  }
   const p = prediction.probabilityUp
-  const direction = p >= 55 ? 1 : p <= 45 ? -1 : 0
   return [
     {
       group: '機器學習',
       label: `模型預測上漲機率 ${p}%`,
-      detail: `樣本外準確率 ${prediction.testAccuracy}%，比基準高 ${prediction.edge} 個百分點`,
-      direction,
-      weight: 1,
+      detail: `樣本外準確率 ${prediction.testAccuracy}%（基準 ${prediction.baselineAccuracy}%）。${NOT_SCORED}`,
+      direction: p >= 55 ? 1 : p <= 45 ? -1 : 0,
+      weight: 0,
     },
   ]
 }
@@ -191,59 +216,54 @@ function predictionEvidence(prediction) {
 function pickLevels(price, analysis, indicators) {
   const supports = analysis?.supports ?? []
   const resistances = analysis?.resistances ?? []
-
-  // 出場點（規則版本 2）：
-  // 1. 最近的支撐離現價有 1 倍 ATR（一天的正常波動）以上就用它
-  // 2. 太近（例如 MA5 只差 1%，一般震盪就會碰到）：改用「下一個夠遠的支撐」和「現價 − 2 倍 ATR」中比較近的那個，但最遠 −10%
-  // 3. 連這樣都超過 −10%（波動極大，例如重挫後一天動 8%）：保留原本的支撐，另外在風險提醒部位要放小
-  // 不直接要求「至少 2 倍 ATR」或「跳到下一個支撐」：實測重挫後大立光會被推到 −16%～−21%，出場點遠到沒有意義
   const atr = indicators?.atr14 ?? null
   const distancePct = (level) => ((price - level) / price) * 100
-  const nearest = supports[0] ?? null
-  const tooClose = nearest !== null && atr !== null && price - nearest.price < atr * MIN_STOP_ATR
-  const atrStop = atr !== null ? round(price - atr * STOP_ATR_MULTIPLE) : null
+
+  // 出場點：2 倍 ATR，最遠 −10%
   let stopLoss
   let noisyStop = false
-  if (nearest && !tooClose) {
-    stopLoss = { price: nearest.price, label: `跌破${nearest.label}` }
-  } else if (nearest) {
-    const next = supports.find((level) => price - level.price >= atr * MIN_STOP_ATR) ?? null
-    const useNext = next !== null && (atrStop === null || next.price >= atrStop)
-    const alt = useNext ? next.price : atrStop
-    if (alt !== null && alt > 0 && distancePct(alt) <= MAX_STOP_PCT) {
-      stopLoss = useNext
-        ? { price: next.price, label: `跌破${next.label}（${nearest.label}太近，一般震盪就會碰到）` }
-        : { price: atrStop, label: `${nearest.label}太近，改用一般波動的 ${STOP_ATR_MULTIPLE} 倍（約 −${round(distancePct(atrStop), 1)}%）` }
+  const atrStop = atr !== null ? round(price - atr * STOP_ATR_MULTIPLE) : null
+  if (atrStop !== null && atrStop > 0) {
+    const floor = round(price * (1 - MAX_STOP_PCT / 100))
+    if (atrStop >= floor) {
+      stopLoss = { price: atrStop, label: `一天平均波動的 ${STOP_ATR_MULTIPLE} 倍（約 −${round(distancePct(atrStop), 1)}%），收盤跌破才算` }
     } else {
-      stopLoss = { price: nearest.price, label: `跌破${nearest.label}` }
+      // 波動極大（例如重挫後一天動 6%）：2 倍會超過 −10%，設在上限，風險提醒部位要放小
+      stopLoss = { price: floor, label: `最遠設到 −${MAX_STOP_PCT}%（波動很大，${STOP_ATR_MULTIPLE} 倍的一天平均波動會更遠），收盤跌破才算` }
       noisyStop = true
     }
-  } else if (atrStop !== null && atrStop > 0) {
-    // 沒有支撐：2 倍 ATR，最遠 −10%
-    const capped = Math.max(atrStop, round(price * (1 - MAX_STOP_PCT / 100)))
-    stopLoss = { price: capped, label: `近期沒有支撐，用一般波動的 ${STOP_ATR_MULTIPLE} 倍（約 −${round(distancePct(capped), 1)}%）` }
   } else {
-    stopLoss = { price: round(price * (1 - FALLBACK_STOP_PCT / 100)), label: `近期沒有支撐，用 −${FALLBACK_STOP_PCT}% 當停損` }
+    stopLoss = { price: round(price * (1 - FALLBACK_STOP_PCT / 100)), label: `歷史資料不足，用 −${FALLBACK_STOP_PCT}% 當停損` }
   }
 
-  // 目標：上方前兩個壓力；沒有壓力（創新高）時用近 20 日波動幅度往上估
-  let targets = resistances.slice(0, 2).map((level) => ({ price: level.price, label: level.label }))
-  if (targets.length === 0 && indicators?.high20 && indicators?.low20) {
-    const range = indicators.high20 - indicators.low20
-    targets = [{ price: round(price + range / 2), label: '上方沒有壓力，以近 20 日波動的一半估算' }]
+  // 目標：上方離現價至少 1 倍 ATR 的前兩個壓力；沒有（創新高、或壓力都貼著現價）時用 3 倍 ATR 估
+  const farEnough = (level) => atr === null || level.price - price >= atr * MIN_TARGET_ATR
+  let targets = resistances.filter(farEnough).slice(0, 2).map((level) => ({ price: level.price, label: level.label }))
+  if (targets.length === 0) {
+    if (atr !== null) {
+      targets = [{ price: round(price + atr * FALLBACK_TARGET_ATR), label: `上方沒有明顯的壓力，以一天平均波動的 ${FALLBACK_TARGET_ATR} 倍估算` }]
+    } else if (indicators?.high20 && indicators?.low20) {
+      targets = [{ price: round(price + (indicators.high20 - indicators.low20) / 2), label: '上方沒有壓力，以近 20 日波動的一半估算' }]
+    }
   }
 
   const reward = targets[0] ? targets[0].price - price : null
   const risk = price - stopLoss.price
   const riskReward = reward !== null && risk > 0 ? round(reward / risk, 2) : null
 
+  // 文字用的參考價位。支撐：離現價至少 0.5 倍 ATR、而且在出場點之上（「拉回到這裡加碼」不能比出場點還低），
+  // 優先用不是「容易跌破」的；沒有就不提。壓力：和目標價同一個（離現價至少 1 倍 ATR），沒有才用最近的
+  const usable = (level) => level.price > stopLoss.price && (atr === null || price - level.price >= atr * MIN_REFERENCE_ATR)
+  const referenceSupport = supports.find((level) => usable(level) && level.strength !== 'weak') ?? supports.find(usable) ?? null
+  const referenceResistance = resistances.find(farEnough) ?? resistances[0] ?? null
+
   return {
     stopLoss,
     targets,
     riskReward,
-    nearestSupport: supports[0] ?? null,
-    nearestResistance: resistances[0] ?? null,
-    // 出場點在一天的正常波動內（波動極大時沒有更好的選擇），風險提醒要說
+    nearestSupport: referenceSupport,
+    nearestResistance: referenceResistance,
+    // 出場點被上限卡住（波動極大），風險提醒要說
     noisyStop,
     atrPct: atr !== null ? round((atr / price) * 100, 1) : null,
   }
@@ -266,8 +286,6 @@ function marketRegime(context) {
 const CHIP_MIN_VOLUME_PCT = 1
 const CHIP_MIN_STREAK = 3
 
-const LOWER_CONFIDENCE ={ high: 'medium', medium: 'low', low: 'low' }
-
 // item：marketService 的單一標的快照（需要 quote、analysis、indicators、research）；context：大盤（可省略）
 function buildAdvice(item, { context = null } = {}) {
   if (!item?.analysis || !item.indicators) {
@@ -275,6 +293,7 @@ function buildAdvice(item, { context = null } = {}) {
   }
   const price = item.quote.price
   const evidence = [
+    ...longTrendEvidence(price, item.indicators),
     ...trendEvidence(item.analysis.signals),
     ...backtestEvidence(item.research?.backtest),
     ...strategyEvidence(item.research?.strategies),
@@ -282,13 +301,14 @@ function buildAdvice(item, { context = null } = {}) {
     ...predictionEvidence(item.research?.prediction),
   ]
 
-  // 大盤方向不計分，只在和判斷方向相反時把信心降一級（大部分個股跟著大盤走）
+  // 大盤方向只列出不計分。規則版本 2、3 會在大盤和結論相反時把信心降一級；歷史重算裡大盤在季線之上或之下，
+  // 個股之後 10 天上漲的比例是 55.0% 對 57.2%，沒有差別，版本 4 拿掉降級
   const regime = marketRegime(context)
   if (regime) {
     evidence.push({
       group: '大盤',
       label: `${regime.label}${regime.direction > 0 ? '站上' : '跌破'}季線`,
-      detail: '不計分；和綜合判斷方向相反時，信心降一級',
+      detail: NOT_SCORED,
       direction: regime.direction,
       weight: 0,
     })
@@ -301,11 +321,12 @@ function buildAdvice(item, { context = null } = {}) {
   const agreement = totalWeight > 0 ? Math.abs(score) / totalWeight : 0
 
   const stance = score >= 2 ? 'bullish' : score <= -2 ? 'bearish' : 'neutral'
-  const rawConfidence =
-    stance === 'neutral' ? 'low' : agreement >= 0.6 ? 'high' : agreement >= 0.35 ? 'medium' : 'low'
-  const againstMarket =
-    regime !== null && ((stance === 'bullish' && regime.direction < 0) || (stance === 'bearish' && regime.direction > 0))
-  const confidence = againstMarket ? LOWER_CONFIDENCE[rawConfidence] : rawConfidence
+  // 信心高：依據夠一致，而且不只有趨勢類（長期趨勢、均線）同方向，籌碼或回測訊號也有一項站同一邊。
+  // 只有趨勢類時最多到中：趨勢幾項本來就常常同方向，一致不代表比較有把握
+  const direction = stance === 'bullish' ? 1 : -1
+  const otherSupport = counted.some((e) => e.direction === direction && e.group !== '長期趨勢' && e.group !== '技術面')
+  const confidence =
+    stance === 'neutral' ? 'low' : agreement >= 0.6 ? (otherSupport ? 'high' : 'medium') : agreement >= 0.35 ? 'medium' : 'low'
 
   const levels = pickLevels(price, item.analysis, item.indicators)
   const { stopLoss, targets, nearestSupport, nearestResistance } = levels
@@ -319,24 +340,24 @@ function buildAdvice(item, { context = null } = {}) {
   let forHolders
   if (stance === 'bullish') {
     forNew = supportText
-      ? `可以分批布局，第一筆不追高，等拉回 ${supportText} 附近再加；跌破 ${fmt(stopLoss.price)} 停損。`
-      : `可以小量試單，跌破 ${fmt(stopLoss.price)} 停損。`
+      ? `可以分批布局，第一筆不追高，等拉回 ${supportText}附近再加；收盤跌破 ${fmt(stopLoss.price)} 停損。`
+      : `可以小量試單，收盤跌破 ${fmt(stopLoss.price)} 停損。`
     forHolders = t1
-      ? `續抱，到 ${fmt(t1.price)}（${t1.label}）附近先賣一部分鎖住獲利；停損上移到 ${fmt(stopLoss.price)}。`
-      : `續抱，停損設在 ${fmt(stopLoss.price)}。`
+      ? `續抱，到 ${fmt(t1.price)}（${t1.label}）附近先賣一部分鎖住獲利；收盤跌破 ${fmt(stopLoss.price)} 出場。`
+      : `續抱，收盤跌破 ${fmt(stopLoss.price)} 出場。`
   } else if (stance === 'bearish') {
     forNew = resistanceText
-      ? `先不要進場。等重新站回 ${resistanceText} 之上、訊號轉強再評估。`
-      : '先不要進場，等訊號轉強再評估。'
+      ? `先不要進場。等重新站回 ${resistanceText}之上、長期趨勢轉強再評估。`
+      : '先不要進場，等長期趨勢轉強再評估。'
     forHolders = resistanceText
-      ? `反彈到 ${resistanceText} 附近減碼；跌破 ${fmt(stopLoss.price)} 就出場，不要攤平。`
-      : `跌破 ${fmt(stopLoss.price)} 就出場，不要攤平。`
+      ? `反彈到 ${resistanceText}附近減碼；收盤跌破 ${fmt(stopLoss.price)} 就出場，不要攤平。`
+      : `收盤跌破 ${fmt(stopLoss.price)} 就出場，不要攤平。`
   } else {
     forNew =
       supportText && resistanceText
-        ? `方向不明，先觀望。要操作就做區間：靠近 ${supportText} 小量買、接近 ${resistanceText} 賣；帶量突破 ${fmt(nearestResistance.price)} 才追。`
+        ? `方向不明，先觀望。要操作就做區間：靠近 ${supportText}小量買、接近 ${resistanceText}賣；帶量突破 ${fmt(nearestResistance.price)} 才追。`
         : '方向不明，先觀望，等訊號一致再進場。'
-    forHolders = `部位不要再加。跌破 ${fmt(stopLoss.price)} 減碼或出場${resistanceText ? `，站上 ${resistanceText} 再考慮加碼` : ''}。`
+    forHolders = `部位不要再加。收盤跌破 ${fmt(stopLoss.price)} 減碼或出場${resistanceText ? `，站上 ${resistanceText}再考慮加碼` : ''}。`
   }
 
   const POSITION_SIZES = {
@@ -353,8 +374,8 @@ function buildAdvice(item, { context = null } = {}) {
   if (riskReward !== null && riskReward < 1) {
     risks.push(`到第一目標的空間小於停損的距離（風險報酬比 ${riskReward}），現在進場不划算。`)
   }
-  if (item.research?.prediction && !item.research.prediction.reliable) {
-    risks.push('機器學習模型在這檔標的沒有明顯贏過基準，預測機率不列入判斷。')
+  if (item.indicators.ma240 === null || item.indicators.ma240 === undefined) {
+    risks.push('歷史資料不到一年，沒有年線與一年高點可以看，判斷的依據比較少。')
   }
   if (evidence.some((e) => e.group === '歷史回測' && e.weight === 0 && e.detail?.includes('樣本太少'))) {
     risks.push('部分訊號過去出現次數太少，沒有列入判斷。')
@@ -368,14 +389,7 @@ function buildAdvice(item, { context = null } = {}) {
     risks.push('部分訊號前後期表現方向相反，可能只是剛好適合過去，沒有列入判斷。')
   }
   if (levels.noisyStop) {
-    risks.push(`波動很大（一天約 ${levels.atrPct}%），出場點在一般震盪的範圍內，容易被洗出場；部位要放小。`)
-  }
-  if (againstMarket) {
-    risks.push(
-      stance === 'bullish'
-        ? `${regime.label}在季線之下，個股逆勢偏多比較難走得遠，信心降一級。`
-        : `${regime.label}在季線之上，個股偏空可能被大盤拉住，信心降一級。`,
-    )
+    risks.push(`波動很大（一天約 ${levels.atrPct}%），出場點設在最遠的 −${MAX_STOP_PCT}%，還在兩天的震盪範圍內，容易被洗出場；部位要放小。`)
   }
   if (item.session === 'intraday') risks.push('目前是盤中資料，收盤前訊號可能改變。')
 

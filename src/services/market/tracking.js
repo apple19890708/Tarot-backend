@@ -55,7 +55,9 @@ function evaluateCall(call, bars) {
   if (call.stance === 'bullish' && index >= 0 && call.stopLoss && call.targets?.[0]) {
     path = 'open'
     for (let i = index + 1; i <= index + 20 && i < bars.length; i += 1) {
-      if (bars[i].low <= call.stopLoss) {
+      // 規則版本 4 起出場點是「收盤跌破才算」；之前的版本是盤中碰到就算
+      const stopped = (call.ruleVersion ?? 1) >= 4 ? bars[i].close < call.stopLoss : bars[i].low <= call.stopLoss
+      if (stopped) {
         path = 'stop'
         break
       }

@@ -1544,7 +1544,8 @@ function above(price, level, label) {
   return `${price >= level ? '高於' : '低於'} ${label}`
 }
 
-function formatItem(item) {
+// research：要不要附上歷史回測、策略回測、機器學習（塔羅的股市諮詢不附，個股 AI 深度分析要附）
+function formatItem(item, { research = true } = {}) {
   const { quote, indicators: ind } = item
   const id = item.kind === 'index' ? item.symbol : item.code || item.symbol
   const label = id ? `${item.name}（${id}）` : item.name
@@ -1590,7 +1591,7 @@ function formatItem(item) {
   if (analysis) {
     lines.push(`判讀：${analysis.signals.map((signal) => `${signal.label} ${signal.value}`).join('；')}`)
     const levels = (list) =>
-      list.length > 0 ? list.map((level) => `${formatNumber(level.price)}（${level.label}）`).join('、') : '資料內沒有'
+      list.length > 0 ? list.map((level) => `${formatNumber(level.price)}（${level.label}${level.note ? `，${level.note}` : ''}）`).join('、') : '資料內沒有'
     lines.push(`支撐：${levels(analysis.supports)}`)
     lines.push(`壓力：${levels(analysis.resistances)}`)
   }
@@ -1615,7 +1616,7 @@ function formatItem(item) {
       )
     }
   }
-  if (item.research) {
+  if (item.research && research) {
     lines.push(...formatResearch(item.research))
   }
   if (item.advice) {
@@ -1719,7 +1720,8 @@ function formatAdvice(advice) {
   return lines
 }
 
-function formatMarketForPrompt(snapshot) {
+// options.research：false 時不附歷史回測、策略回測與機器學習（塔羅的股市諮詢，2026-11-12 使用者要求拿掉那一節）
+function formatMarketForPrompt(snapshot, { research = true } = {}) {
   if (!snapshot) {
     return ''
   }
@@ -1736,7 +1738,7 @@ function formatMarketForPrompt(snapshot) {
     // Intl 在日期與時間之間放的是窄空白（U+2009），換成一般空白
     .replace(/\s/g, ' ')
 
-  const body = snapshot.items.length > 0 ? snapshot.items.map(formatItem).join('\n\n') : '這次沒有查到任何報價。'
+  const body = snapshot.items.length > 0 ? snapshot.items.map((item) => formatItem(item, { research })).join('\n\n') : '這次沒有查到任何報價。'
   const notes = snapshot.notes.length > 0 ? `\n\n備註：\n${snapshot.notes.map((note) => `- ${note}`).join('\n')}` : ''
   return `查詢時間：${time}（台北時間）\n\n${body}${notes}`
 }

@@ -83,16 +83,57 @@ test('判讀：RSI、KD 交叉、MACD 柱體、量能', () => {
   assert.equal(valueOf({ volumeRatio: 0.5 }, 'volume'), '量縮')
 })
 
-test('判讀：支撐取現價以下最近的價位、壓力取以上，太接近的價位合併', () => {
+test('判讀：支撐取現價以下最近的價位、壓力取以上，太接近的價位合併；不放 MA5', () => {
   const { supports, resistances } = keyLevels(102, BASE_IND)
-  assert.deepEqual(supports.map((l) => l.price), [100, 95, 92])
+  // MA5（100）不當支撐：離現價通常不到一天的波動，實測和隨機價位沒有差別
+  assert.deepEqual(supports.map((l) => l.price), [95, 92, 90])
+  assert.ok(supports.every((l) => !l.label.includes('MA5')))
   assert.deepEqual(resistances.map((l) => l.price), [110, 120])
-  // MA60 與近 60 日低點差不到 0.3%，合成一個價位
-  const merged = keyLevels(102, { ...BASE_IND, ma60: 80.1 })
-  assert.ok(merged.supports.length <= 3)
   assert.equal(keyLevels(70, BASE_IND).supports.length, 0)
+  // MA60 與近 60 日低點差不到 0.3%，合成一個價位
   const low = keyLevels(85, { ...BASE_IND, ma60: 80.1 })
   assert.equal(low.supports[0].label, 'MA60、近 60 日低點')
+  // 半年線、年線也是候選
+  const long = keyLevels(102, { ...BASE_IND, ma120: 99, ma240: 130 })
+  assert.equal(long.supports[0].label, '半年線（MA120）')
+  assert.ok(long.resistances.some((l) => l.label === '年線（MA240）'))
+})
+
+test('判讀：支撐分強弱——成交密集區、缺口比較守得住，近 N 日低點容易跌破；壓力不分', () => {
+  const sources = { volumeNodes: [{ price: 97, weight: 2 }, { price: 115, weight: 1.5 }], gaps: [{ side: 'support', price: 93.5, date: 'd1' }], swingHighs: [], swingLows: [] }
+  const { supports, resistances } = keyLevels(102, { ...BASE_IND, levels: sources })
+  const at = (price) => supports.find((l) => l.price === price)
+  assert.equal(at(97).strength, 'strong')
+  assert.equal(at(97).note, '過去比較守得住')
+  assert.equal(at(95).strength, 'normal')
+  assert.equal(at(95).note, null)
+  // 近 20 日低點單獨一個價位：容易跌破
+  const weak = keyLevels(102, BASE_IND).supports.find((l) => l.price === 92)
+  assert.equal(weak.strength, 'weak')
+  assert.match(weak.note, /跌破/)
+  // 壓力裡的成交密集區不特別標示
+  assert.ok(resistances.every((l) => l.strength === 'normal' && l.note === null))
+
+  // 併成一區時，整區用比較強的成員的強弱與價位
+  const merged = keyLevels(102, { ...BASE_IND, atr14: 2, levels: { ...sources, volumeNodes: [{ price: 92.3, weight: 2 }], gaps: [] } })
+  const zone = merged.supports.find((l) => l.label.includes('成交密集區'))
+  assert.equal(zone.strength, 'strong')
+  assert.equal(zone.price, 92.3)
+  assert.match(zone.label, /近 20 日低點/)
+})
+
+test('判讀：最近三個支撐都不是比較守得住的，5 倍 ATR 內有的話換掉最遠的那一個', () => {
+  const ind = { ...BASE_IND, atr14: 2, levels: { volumeNodes: [{ price: 93.5, weight: 2 }], gaps: [], swingHighs: [], swingLows: [99] } }
+  // 由近到遠：99 前波低點、95 MA20、93.5 成交密集區、92 近 20 日低點、90 MA60
+  assert.deepEqual(keyLevels(102, ind).supports.map((l) => l.price), [99, 95, 93.5])
+  // 成交密集區排到第四個：換掉第三個（近 20 日低點 92）
+  const far = { ...ind, levels: { ...ind.levels, volumeNodes: [{ price: 93, weight: 2 }] }, low20: 94 }
+  const supports = keyLevels(102, far).supports
+  assert.deepEqual(supports.map((l) => l.price), [99, 95, 93])
+  assert.equal(supports[2].strength, 'strong')
+  // 超過 5 倍 ATR（10 元）就不換
+  const tooFar = { ...ind, levels: { ...ind.levels, volumeNodes: [{ price: 85, weight: 2 }] } }
+  assert.deepEqual(keyLevels(102, tooFar).supports.map((l) => l.price), [99, 95, 92])
 })
 
 test('判讀：沒有指標時回傳 null', () => {
@@ -330,7 +371,25 @@ test('市場：給 AI 的資料段包含時間、報價、指標與備註', () =
 
 test('市場：有市場資料時才附加股市規則與 market_data 區塊', () => {
   assert.equal(buildSystemPrompt(null), SYSTEM_PROMPT)
-  assert.match(buildSystemPrompt(SAMPLE_SNAPSHOT), /市場數據分析為主、牌面為輔/)
+  const marketPrompt = buildSystemPrompt(SAMPLE_SNAPSHOT)
+  assert.match(marketPrompt, /前半是塔羅解牌、後半是市場數據/)
+  // 2026-11-12：開場以牌面為主、每張牌都要解、解牌不帶數據；情境與操作排在行情現況、技術面前面；沒有回測與模型那一節
+  assert.match(marketPrompt, /以塔羅牌的結果回答問題/)
+  assert.match(marketPrompt, /每一張牌都要寫/)
+  assert.match(marketPrompt, /解牌時不要帶任何市場數據/)
+  const order = ['## 牌面速覽', '## 事情會怎麼走', '## 位置｜牌名', '## 情境與操作', '## 行情現況', '## 技術面判斷', '## 最後的判斷'].map((title) => marketPrompt.lastIndexOf(title))
+  assert.ok(order.every((index) => index >= 0), `標題都要在：${order}`)
+  assert.deepEqual([...order].sort((x, y) => x - y), order)
+  assert.doesNotMatch(marketPrompt.slice(marketPrompt.indexOf('結構（使用 Markdown，取代上面的結構）')), /## 歷史回測與模型/)
+  // 整理成表格（2026-11-12）：每張表的表頭固定，前端依表頭與固定的詞套樣式、上色；最多三欄（手機放得下）
+  const headers = ['| 位置 | 牌 | 這張在提醒什麼 |', '| 情境 | 觸發價位 | 怎麼做 |', '| 項目 | 數值 | 代表什麼 |', '| 面向 | 判讀 | 重點 |', '| 類型 | 價位 | 來源 |', '| 期間 | 方向 | 依據與做法 |']
+  for (const header of headers) assert.ok(marketPrompt.includes(header), header)
+  const tableRows = marketPrompt.split(/\r?\n/).filter((line) => line.startsWith('|'))
+  assert.ok(tableRows.every((line) => line.split('|').length === 5), '提示詞裡的範例表格都是三欄')
+  assert.match(marketPrompt, /只能寫「偏多」「偏空」「觀望」其中一個詞/)
+  assert.match(marketPrompt, /只能寫「偏多」「偏空」「中性」其中一個詞/)
+  assert.match(marketPrompt, /只能寫「壓力」「現價」「支撐」其中一個詞/)
+  assert.match(marketPrompt, /短線＝5～20 個交易日、中線＝1～3 個月、長線＝半年以上/)
 
   const reading = {
     question: '這週台股會怎麼走',
@@ -340,6 +399,13 @@ test('市場：有市場資料時才附加股市規則與 market_data 區塊', (
   }
   assert.doesNotMatch(buildUserMessage({ reading, cards: [] }), /<market_data>/)
   assert.match(buildUserMessage({ reading, cards: [], market: SAMPLE_SNAPSHOT }), /<market_data>\n查詢時間/)
+
+  // 塔羅的股市諮詢不附歷史回測（拿掉那一節，資料也不給，免得 AI 照樣寫）；個股 AI 深度分析照舊附上
+  const research = { backtest: { baseline: [{ days: 10, winRate: 55, avgReturn: 1 }], signals: [], minSamples: 5 }, strategies: null, prediction: null }
+  const withResearch = { ...SAMPLE_SNAPSHOT, items: SAMPLE_SNAPSHOT.items.map((item) => ({ ...item, research })) }
+  assert.match(formatMarketForPrompt(withResearch), /歷史回測/)
+  assert.doesNotMatch(formatMarketForPrompt(withResearch, { research: false }), /歷史回測/)
+  assert.doesNotMatch(buildUserMessage({ reading, cards: [], market: withResearch }), /歷史回測/)
 })
 
 test('大盤概況：外部來源一直沒回應時，各區塊逾時後照樣回傳（2026-11-07 線上卡住）', async (t) => {

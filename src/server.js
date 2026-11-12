@@ -15,6 +15,7 @@ const { createMailer } = require('./services/mailer')
 const { createGoogleVerifier } = require('./services/googleAuth')
 const { createAdminRouter } = require('./routes/admin')
 const { createReadingsRouter } = require('./routes/readings')
+const { isSameCards } = require('./services/readingHistory')
 const { loadCardsInOrder } = require('./services/cardLoader')
 const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
@@ -92,6 +93,8 @@ app.use(
 // 保存紀錄時會一起帶上股市諮詢當時的行情（含圖表與回測曲線，最多約 200KB），只放寬這條；
 // 這個 parser 先解析過，後面的全域 express.json() 就會略過
 app.post('/api/readings', express.json({ limit: '300kb' }))
+// 補存 AI 解讀也會帶行情資料，限制和保存一樣。這兩行要放在全域 express.json() 前面：先解析過的，全域那個會略過
+app.put('/api/readings/:id/narration', express.json({ limit: '300kb' }))
 app.use(express.json())
 // JSON 回應 gzip（Cloud Run 不會替回應壓縮；傳出流量是唯一可能超過免費額度的項目）。串流與圖片不經過，見 lib/jsonCompression.js
 app.use(jsonCompression())
@@ -356,13 +359,7 @@ async function saveNarration({ readingId, userId, text, model, market, drawn }) 
     }
 
     // 確認這段解讀講的就是那筆紀錄的牌，否則紀錄會配上一段和畫面無關的文字
-    const sameCards =
-      record.cards.length === drawn.length &&
-      record.cards.every(
-        (card, index) =>
-          String(card.cardId) === String(drawn[index].id) && card.orientation === drawn[index].orientation,
-      )
-    if (!sameCards) {
+    if (!isSameCards(record.cards, drawn)) {
       return false
     }
 
