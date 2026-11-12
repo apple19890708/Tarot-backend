@@ -1417,9 +1417,15 @@ test('v11：AI 解讀不重講畫面上已有的內容', () => {
 
   assert.match(prompt, /畫面上已經有的內容（不要重講）/)
   assert.match(prompt, /## 事情會怎麼走/)
-  // 元素、數字已有獨立區塊，AI 不再各寫一節
-  assert.ok(!prompt.includes('## 元素'), '不再要求元素一節')
-  assert.ok(!prompt.includes('## 數字'), '不再要求數字一節')
+  // 2026-11-12 使用者要求恢復：牌與牌的互動、數字與元素各一節（要解釋，不是報統計），並有牌面速覽表
+  const order = ['## 牌面速覽', '## 事情會怎麼走', '## 牌與牌的互動', '## 數字與元素', '每個位置一節', '## 最後的判斷', '## 你可以問自己']
+    .map((title) => prompt.indexOf(title))
+  assert.ok(order.every((index) => index >= 0), `標題都要在：${order}`)
+  assert.deepEqual([...order].sort((x, y) => x - y), order)
+  assert.ok(prompt.includes('| 位置 | 牌 | 這張在說什麼 |'))
+  // 範例也照新的結構寫
+  const example = prompt.slice(prompt.indexOf('<example>'))
+  for (const title of ['## 牌面速覽', '## 牌與牌的互動', '## 數字與元素']) assert.ok(example.includes(title), title)
   // 每個位置一節，而且要依位置轉換讀法（負面牌在助力位、好牌在障礙位）
   assert.match(prompt, /每個位置一節/)
   assert.match(prompt, /位置會改變牌的讀法/)

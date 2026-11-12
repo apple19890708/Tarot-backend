@@ -377,7 +377,7 @@ test('市場：有市場資料時才附加股市規則與 market_data 區塊', (
   assert.match(marketPrompt, /以塔羅牌的結果回答問題/)
   assert.match(marketPrompt, /每一張牌都要寫/)
   assert.match(marketPrompt, /解牌時不要帶任何市場數據/)
-  const order = ['## 牌面速覽', '## 事情會怎麼走', '## 位置｜牌名', '## 情境與操作', '## 行情現況', '## 技術面判斷', '## 最後的判斷'].map((title) => marketPrompt.lastIndexOf(title))
+  const order = ['## 牌面速覽', '## 事情會怎麼走', '4-1. ## 牌與牌的互動', '4-2. ## 數字與元素', '## 位置｜牌名', '## 情境與操作', '## 行情現況', '## 技術面判斷', '## 最後的判斷'].map((title) => marketPrompt.lastIndexOf(title))
   assert.ok(order.every((index) => index >= 0), `標題都要在：${order}`)
   assert.deepEqual([...order].sort((x, y) => x - y), order)
   assert.doesNotMatch(marketPrompt.slice(marketPrompt.indexOf('結構（使用 Markdown，取代上面的結構）')), /## 歷史回測與模型/)
