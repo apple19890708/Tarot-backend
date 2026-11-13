@@ -15,11 +15,31 @@ const { createMailer } = require('./services/mailer')
 const { createGoogleVerifier } = require('./services/googleAuth')
 const { createAdminRouter } = require('./routes/admin')
 const { createReadingsRouter } = require('./routes/readings')
-const { isSameCards } = require('./services/readingHistory')
+const { isSameCards, followUpRelation, mergeFollowUpRecords } = require('./services/readingHistory')
+const {
+  FOLLOW_UP_MAX_ROUNDS,
+  FOLLOW_UP_MAX_CARDS,
+  validateFollowUpQuestion,
+  validateFollowUps,
+  loadFollowUps,
+  buildFollowUpEntries,
+  buildFollowUpContext,
+  keepAnsweredSections,
+  mergeFollowUpAnswer,
+} = require('./services/followUp')
 const { loadCardsInOrder } = require('./services/cardLoader')
 const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
-const { isNarrationAvailable, streamNarration, streamChat, NarrationRefusedError } = require('./services/narrationService')
+const {
+  isNarrationAvailable,
+  streamNarration,
+  streamFollowUpNarration,
+  streamChat,
+  MARKET_MODEL,
+  NarrationRefusedError,
+} = require('./services/narrationService')
+// 個股與財經新聞的 AI 分析用自己的模型設定（OPENROUTER_MARKET_MODEL），塔羅解讀用 OPENROUTER_MODEL
+const streamMarketChat = (options) => streamChat({ ...options, model: MARKET_MODEL })
 const { startNdjson } = require('./lib/ndjsonStream')
 const { jsonCompression } = require('./lib/jsonCompression')
 const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./services/market/marketService')
@@ -144,7 +164,7 @@ app.use(
   }),
 )
 app.use('/api/admin', createAdminRouter({ ensureDatabase, requireAdmin }))
-// 只定義 GET／DELETE，與下面公開的 POST /api/readings/draw 等端點不衝突
+// 只定義 POST /、GET、PUT /:id/…、DELETE（都是單段或 :id 開頭的路徑），與下面公開的 POST /api/readings/draw 等端點不衝突
 // 股市諮詢只給 admin 與開通「金融股市」的會員。選單只是不顯示，真正的放行在這裡。
 // 用在 draw、manual、narrate 與保存紀錄；narrate 另外還要 AI 權限（requireAiAccess）
 async function ensureDomainAllowed(req, res, domain) {
@@ -372,6 +392,39 @@ async function saveNarration({ readingId, userId, text, model, market, drawn }) 
   }
 }
 
+// 追問的延伸回答寫完後存回紀錄（規則同 saveNarration）：連同這次的追問清單一起寫入，
+// 這樣「已保存的紀錄再追問」時，就算前端沒來得及另外同步追問，紀錄也是完整的。
+// 回傳 null（沒有指定紀錄）、true（已存）、false（沒存成）
+async function saveFollowUpNarration({ readingId, userId, text, model, drawn, followUps }) {
+  if (!readingId) {
+    return null
+  }
+  if (!userId || !text || !mongoose.isValidObjectId(readingId)) {
+    return false
+  }
+  try {
+    const record = await Reading.findOne({ _id: readingId, user: userId })
+    if (!record || !isSameCards(record.cards, drawn)) {
+      return false
+    }
+    // 寫的途中使用者可能又抽了一次追問並同步過：紀錄比這次請求新時只存回答，不動追問清單；
+    // 對不起來（換成另一組追問）就不存，讓前端用手上完整的清單補存
+    const relation = followUpRelation(record.followUps, followUps)
+    if (relation === 'different') {
+      return false
+    }
+    if (relation !== 'behind') {
+      record.followUps = mergeFollowUpRecords(record.followUps, followUps)
+    }
+    record.followUpNarration = { text, model: model || '', rounds: followUps.length, createdAt: new Date() }
+    await record.save()
+    return true
+  } catch (error) {
+    console.error('AI 追問存檔失敗：', error.message)
+    return false
+  }
+}
+
 // 到價推播：瀏覽器推播（所有會員；VAPID 金鑰沒設定時自動關閉）與 Discord Webhook（只給 admin）
 const notifier = createNotifier({ discord: createDiscord(), webPush: createWebPush(), MarketProfile, PushSubscription, User, MarketAlert })
 // 重大訊息：公開資訊觀測站只給當天的，抓到就存 30 天（排程與使用者開頁面時都會觸發，30 分鐘最多一次）
@@ -482,7 +535,7 @@ app.use(
     MarketProfile,
     MarketAiUsage,
     news: newsSync,
-    ai: { isAvailable: isNarrationAvailable, stream: streamChat },
+    ai: { isAvailable: isNarrationAvailable, stream: streamMarketChat },
   }),
 )
 
@@ -498,7 +551,7 @@ app.use(
     MarketWatch,
     FinanceNewsAnalysis,
     MarketAiUsage,
-    ai: { isAvailable: isNarrationAvailable, stream: streamChat },
+    ai: { isAvailable: isNarrationAvailable, stream: streamMarketChat },
   }),
 )
 
@@ -520,6 +573,77 @@ app.use(
 
 // 依牌與正逆位重算組合分析，再交給 AI 改寫成口語解讀；不信任前端傳來的分析文字
 // AI 解讀會產生費用，所以限 admin 與被管理者開通的會員（未登入者仍可抽牌與看規則分析）
+// AI 解讀與追問的延伸回答共用：檢查並還原「原本那次占卜」（牌陣或自訂位置、牌與正逆位、問題、類型）。
+// 有問題時直接回應並回傳 null
+async function resolveNarrateReading(req, res) {
+  // spreadKey 省略、manual 或 custom 時走手動選牌（位置由 positions 決定）；否則依指定牌陣
+  const MANUAL_KEYS = ['manual', 'custom']
+  const isManual = !req.body.spreadKey || MANUAL_KEYS.includes(req.body.spreadKey)
+  const spread = isManual ? null : spreads.find((item) => item.key === req.body.spreadKey)
+  if (!isManual && !spread) {
+    res.status(400).json({ message: '找不到指定牌陣。' })
+    return null
+  }
+
+  const { question, error: questionError } = validateQuestion(req.body.question)
+  if (questionError) {
+    res.status(400).json({ message: questionError })
+    return null
+  }
+
+  const { domain: narrateDomain, error: narrateDomainError } = resolveDomain(req.body.domain)
+  if (narrateDomainError) {
+    res.status(400).json({ message: narrateDomainError })
+    return null
+  }
+  // requireAiAccess 只確認 AI 權限；股市諮詢還要金融股市權限，否則會拿到行情、回測與操作建議
+  if (!(await ensureDomainAllowed(req, res, narrateDomain))) {
+    return null
+  }
+
+  let drawn
+  let narrateSpread = spread
+  if (isManual) {
+    const result = validateManualCards(req.body.cards)
+    if (result.error) {
+      res.status(400).json({ message: result.error })
+      return null
+    }
+    drawn = result.drawn
+    // 自訂位置要一起帶進來，否則 AI 解讀會看不到使用者定義的位置含意
+    const custom = resolveCustomSpread(req.body.positions, drawn.length)
+    if (custom.error) {
+      res.status(400).json({ message: custom.error })
+      return null
+    }
+    narrateSpread = custom.spread
+  } else {
+    drawn = Array.isArray(req.body.cards) ? req.body.cards : []
+    const isValid =
+      drawn.length === spread.cardCount &&
+      drawn.every((item) => mongoose.isValidObjectId(item?.id) && ORIENTATIONS.includes(item?.orientation))
+    if (!isValid) {
+      res.status(400).json({ message: '牌卡資料格式不正確。' })
+      return null
+    }
+  }
+
+  const { cards, error: loadError } = await loadCardsInOrder(drawn)
+  if (loadError) {
+    res.status(400).json({ message: loadError })
+    return null
+  }
+
+  const reading = await buildReadingWithDictionary({
+    question,
+    spread: narrateSpread,
+    cards,
+    drawOrientation: (index) => drawn[index].orientation,
+    domain: narrateDomain,
+  })
+  return { reading, cards, drawn, question, domain: narrateDomain }
+}
+
 app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
   try {
     if (!isNarrationAvailable()) {
@@ -531,71 +655,11 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
       return
     }
 
-    // spreadKey 省略、manual 或 custom 時走手動選牌（位置由 positions 決定）；否則依指定牌陣
-    const MANUAL_KEYS = ['manual', 'custom']
-    const isManual = !req.body.spreadKey || MANUAL_KEYS.includes(req.body.spreadKey)
-    const spread = isManual ? null : spreads.find((item) => item.key === req.body.spreadKey)
-    if (!isManual && !spread) {
-      res.status(400).json({ message: '找不到指定牌陣。' })
+    const resolved = await resolveNarrateReading(req, res)
+    if (!resolved) {
       return
     }
-
-    const { question, error: questionError } = validateQuestion(req.body.question)
-    if (questionError) {
-      res.status(400).json({ message: questionError })
-      return
-    }
-
-    const { domain: narrateDomain, error: narrateDomainError } = resolveDomain(req.body.domain)
-    if (narrateDomainError) {
-      res.status(400).json({ message: narrateDomainError })
-      return
-    }
-    // requireAiAccess 只確認 AI 權限；股市諮詢還要金融股市權限，否則會拿到行情、回測與操作建議
-    if (!(await ensureDomainAllowed(req, res, narrateDomain))) {
-      return
-    }
-
-    let drawn
-    let narrateSpread = spread
-    if (isManual) {
-      const result = validateManualCards(req.body.cards)
-      if (result.error) {
-        res.status(400).json({ message: result.error })
-        return
-      }
-      drawn = result.drawn
-      // 自訂位置要一起帶進來，否則 AI 解讀會看不到使用者定義的位置含意
-      const custom = resolveCustomSpread(req.body.positions, drawn.length)
-      if (custom.error) {
-        res.status(400).json({ message: custom.error })
-        return
-      }
-      narrateSpread = custom.spread
-    } else {
-      drawn = Array.isArray(req.body.cards) ? req.body.cards : []
-      const isValid =
-        drawn.length === spread.cardCount &&
-        drawn.every((item) => mongoose.isValidObjectId(item?.id) && ORIENTATIONS.includes(item?.orientation))
-      if (!isValid) {
-        res.status(400).json({ message: '牌卡資料格式不正確。' })
-        return
-      }
-    }
-
-    const { cards, error: loadError } = await loadCardsInOrder(drawn)
-    if (loadError) {
-      res.status(400).json({ message: loadError })
-      return
-    }
-
-    const reading = await buildReadingWithDictionary({
-      question,
-      spread: narrateSpread,
-      cards,
-      drawOrientation: (index) => drawn[index].orientation,
-      domain: narrateDomain,
-    })
+    const { reading, cards, drawn, question, domain: narrateDomain } = resolved
 
     // 問題和股市有關時，先查即時報價與技術指標一起交給 AI。查詢失敗不影響解讀，只是少了數據
     // 只有「股市諮詢」才查市場資料、改用技術分析的寫法；其他問題類型一律走原本的塔羅解讀。
@@ -674,6 +738,192 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
   } catch (error) {
     if (error instanceof NarrationRefusedError) {
       res.status(422).json({ message: 'AI 無法產生這次的解讀。' })
+      return
+    }
+    next(error)
+  }
+})
+
+// ---- 抽牌追問（v23）----
+// 追問抽牌：從還沒出現過的牌裡抽 1～3 張。不存檔（和占卜一樣，由前端決定要不要保存）。
+// body：{ cards: 原牌陣的牌, followUps: 之前的追問, question: 這次追問的內容, count: 1～3, picks?: 自己抽的牌 }
+// picks：使用者在扇形牌堆自己抽的牌（[{ id, orientation }]，正逆位在前端洗牌時就決定，同手動抽牌）；
+// 有帶就用它、不另外抽，張數以 picks 為準（2026-11-13 使用者要求追問也能自己抽牌）
+app.post('/api/readings/follow-up/draw', optionalAuth, async (req, res, next) => {
+  try {
+    if (!ensureDatabase(res)) {
+      return
+    }
+    const { drawn: baseDrawn, error: cardsError } = validateManualCards(req.body.cards)
+    if (cardsError) {
+      res.status(400).json({ message: cardsError })
+      return
+    }
+    const { followUps, error: followUpError } = validateFollowUps(req.body.followUps, baseDrawn)
+    if (followUpError) {
+      res.status(400).json({ message: followUpError })
+      return
+    }
+    if (followUps.length >= FOLLOW_UP_MAX_ROUNDS) {
+      res.status(400).json({ message: `追問最多 ${FOLLOW_UP_MAX_ROUNDS} 次。` })
+      return
+    }
+    const { question, error: questionError } = validateFollowUpQuestion(req.body.question)
+    if (questionError) {
+      res.status(400).json({ message: questionError })
+      return
+    }
+    // 自己抽的牌：和之前的追問放在一起檢查（張數、格式、不能和桌上的牌重複），再照順序從牌庫載入
+    if (req.body.picks !== undefined) {
+      const { followUps: checked, error: picksError } = validateFollowUps(
+        [...followUps.map((item) => ({ question: item.question, cards: item.drawn })), { question, cards: req.body.picks }],
+        baseDrawn,
+      )
+      if (picksError) {
+        res.status(400).json({ message: picksError })
+        return
+      }
+      const pickedDrawn = checked[checked.length - 1].drawn
+      const { cards: pickedCards, error: loadError } = await loadCardsInOrder(pickedDrawn)
+      if (loadError) {
+        res.status(400).json({ message: loadError })
+        return
+      }
+      res.json({ question, cards: buildFollowUpEntries(pickedCards, pickedDrawn) })
+      return
+    }
+
+    const count = Number.parseInt(String(req.body.count), 10)
+    if (!Number.isInteger(count) || count < 1 || count > FOLLOW_UP_MAX_CARDS) {
+      res.status(400).json({ message: `每次追問抽 1 到 ${FOLLOW_UP_MAX_CARDS} 張牌。` })
+      return
+    }
+
+    // 同一副牌：已經在桌上的牌（原牌陣與之前的補充牌）不會再被抽到
+    const used = [...baseDrawn, ...followUps.flatMap((item) => item.drawn)].map(
+      (item) => new mongoose.Types.ObjectId(String(item.id)),
+    )
+    const cards = await Card.aggregate([{ $match: { _id: { $nin: used } } }, { $sample: { size: count } }])
+    if (cards.length < count) {
+      res.status(400).json({ message: '牌庫剩下的牌不夠了。' })
+      return
+    }
+    const drawn = cards.map((card) => ({ id: String(card._id), orientation: Math.random() > 0.5 ? 'upright' : 'reversed' }))
+    res.json({ question, cards: buildFollowUpEntries(cards, drawn) })
+  } catch (error) {
+    next(error)
+  }
+})
+
+// 追問的 AI 延伸回答：把原牌陣、先前的解讀與所有追問的補充牌一起交給 AI。
+// body：同 /api/readings/narrate（原本那次占卜），加上 followUps、narration（先前的解讀全文，可省略）、readingId（可省略）。
+// 回應是 NDJSON：delta、done（saved：有沒有存回紀錄）、error。不查市場資料（追問只談牌）
+app.post('/api/readings/follow-up/narrate', requireAiAccess, async (req, res, next) => {
+  try {
+    if (!isNarrationAvailable()) {
+      res.status(503).json({ message: 'AI 解讀尚未設定（缺少 OPENROUTER_API_KEY）。' })
+      return
+    }
+    if (!ensureDatabase(res)) {
+      return
+    }
+    const resolved = await resolveNarrateReading(req, res)
+    if (!resolved) {
+      return
+    }
+    const { reading, cards, drawn, question } = resolved
+
+    const { followUps, error: followUpError } = await loadFollowUps(req.body.followUps, drawn, loadCardsInOrder)
+    if (followUpError) {
+      res.status(400).json({ message: followUpError })
+      return
+    }
+    if (followUps.length === 0) {
+      res.status(400).json({ message: '還沒有追問，請先寫下追問並抽補充牌。' })
+      return
+    }
+    // 只拿來讓 AI 避免重複、對照結論；長度和 narrationService 的 PREVIOUS_NARRATION_MAX 一致
+    const previousNarration = typeof req.body.narration === 'string' ? req.body.narration.slice(0, 6000) : ''
+
+    const context = buildFollowUpContext({
+      question,
+      baseCards: cards,
+      baseDrawn: drawn,
+      positionKeys: reading.cards.every((entry) => entry.position) ? reading.cards.map((entry) => entry.position.key) : null,
+      rounds: followUps,
+    })
+
+    // 只回答新的追問（2026-11-13 使用者要求）：body.answeredRounds＝前幾次已經有回答、要保留。
+    // 至少留最後一次給 AI 寫（「重新回答」沒有新追問時，重寫最後一次與綜合來看）。
+    // 已經寫好的回答優先用紀錄裡存的；沒有紀錄（還沒保存）才用前端送來的
+    const requested = Number.parseInt(String(req.body.answeredRounds ?? 0), 10)
+    const keepCount = Number.isInteger(requested) ? Math.min(Math.max(requested, 0), followUps.length - 1) : 0
+    let previousAnswer = ''
+    if (keepCount > 0 && req.body.readingId && mongoose.isValidObjectId(req.body.readingId)) {
+      const record = await Reading.findOne({ _id: req.body.readingId, user: req.auth.userId }).lean()
+      if (record && isSameCards(record.cards, drawn)) previousAnswer = record.followUpNarration?.text || ''
+    }
+    if (keepCount > 0 && !previousAnswer && typeof req.body.followUpText === 'string') {
+      previousAnswer = req.body.followUpText.slice(0, 20000)
+    }
+    const answered = keepAnsweredSections(previousAnswer, keepCount)
+
+    const controller = new AbortController()
+    res.on('close', () => {
+      if (!res.writableFinished) {
+        controller.abort()
+      }
+    })
+    const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
+    let text = ''
+
+    try {
+      const { model } = await streamFollowUpNarration({
+        reading,
+        cards,
+        context,
+        previousNarration,
+        answered: answered.kept,
+        answeredText: answered.text,
+        signal: controller.signal,
+        // kept：保留了前幾次追問的回答，前端照這個數字把舊的段落接在新寫的前面
+        onStart: () => {
+          startNdjson(res)
+          writeEvent({ type: 'start', kept: answered.kept })
+        },
+        onDelta: (delta) => {
+          text += delta
+          writeEvent({ type: 'delta', text: delta })
+        },
+      })
+      const saved = await saveFollowUpNarration({
+        readingId: req.body.readingId,
+        userId: req.auth.userId,
+        text: mergeFollowUpAnswer(answered.text, text),
+        model,
+        drawn,
+        followUps,
+      })
+      writeEvent({ type: 'done', model, saved })
+      res.end()
+    } catch (error) {
+      if (controller.signal.aborted) {
+        console.log('AI 追問已由使用者中斷')
+        return
+      }
+      if (!res.headersSent) {
+        throw error
+      }
+      console.error(error)
+      writeEvent({
+        type: 'error',
+        message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的回答。' : 'AI 追問中途發生錯誤，請再試一次。',
+      })
+      res.end()
+    }
+  } catch (error) {
+    if (error instanceof NarrationRefusedError) {
+      res.status(422).json({ message: 'AI 無法產生這次的回答。' })
       return
     }
     next(error)

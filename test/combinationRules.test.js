@@ -1268,11 +1268,10 @@ test('v11：多張宮廷牌讀法一致時，讀法只在開場講一次', () =>
   })
 })
 
-test('v8 E：AI 提示要求提問節，且用詞與規則引擎一致', () => {
+test('v8 E：AI 用詞與規則引擎一致（提問節 2026-11-14 使用者要求拿掉）', () => {
   const prompt = require('../src/services/narrationService').SYSTEM_PROMPT
 
-  assert.match(prompt, /你可以問自己/, 'AI 也要產出提問節')
-  assert.match(prompt, /不在預告結果/)
+  assert.doesNotMatch(prompt, /你可以問自己/, '不再產出提問節')
   assert.match(prompt, /「牌組」指權杖／聖杯／寶劍／錢幣/, '用詞要分流')
   assert.ok(!prompt.includes('主導花色'), '舊用詞已對齊')
 })
@@ -1416,16 +1415,17 @@ test('v11：AI 解讀不重講畫面上已有的內容', () => {
   const prompt = require('../src/services/narrationService').SYSTEM_PROMPT
 
   assert.match(prompt, /畫面上已經有的內容（不要重講）/)
-  assert.match(prompt, /## 事情會怎麼走/)
-  // 2026-11-12 使用者要求恢復：牌與牌的互動、數字與元素各一節（要解釋，不是報統計），並有牌面速覽表
-  const order = ['## 牌面速覽', '## 事情會怎麼走', '## 牌與牌的互動', '## 數字與元素', '每個位置一節', '## 最後的判斷', '## 你可以問自己']
-    .map((title) => prompt.indexOf(title))
+  // 2026-11-14：結構順序 牌面速覽 → 事件發展 → 每個位置 → 牌與牌的互動 → 數字與元素 → 最後的判斷，範例照同一順序
+  const structure = prompt.slice(prompt.indexOf('結構（使用 Markdown）'), prompt.indexOf('<example>'))
+  const order = ['## 牌面速覽', '## 事件發展', '每個位置一節', '## 牌與牌的互動', '## 數字與元素', '## 最後的判斷'].map((title) => structure.indexOf(title))
   assert.ok(order.every((index) => index >= 0), `標題都要在：${order}`)
   assert.deepEqual([...order].sort((x, y) => x - y), order)
   assert.ok(prompt.includes('| 位置 | 牌 | 這張在說什麼 |'))
-  // 範例也照新的結構寫
   const example = prompt.slice(prompt.indexOf('<example>'))
-  for (const title of ['## 牌面速覽', '## 牌與牌的互動', '## 數字與元素']) assert.ok(example.includes(title), title)
+  const exampleOrder = ['## 牌面速覽', '## 事件發展', '## 現況｜錢幣二逆', '## 牌與牌的互動', '## 數字與元素', '## 最後的判斷'].map((title) => example.indexOf(title))
+  assert.ok(exampleOrder.every((index) => index >= 0), `範例標題都要在：${exampleOrder}`)
+  assert.deepEqual([...exampleOrder].sort((x, y) => x - y), exampleOrder)
+  assert.doesNotMatch(example, /## 事情會怎麼走|## 你可以問自己/)
   // 每個位置一節，而且要依位置轉換讀法（負面牌在助力位、好牌在障礙位）
   assert.match(prompt, /每個位置一節/)
   assert.match(prompt, /位置會改變牌的讀法/)

@@ -23,13 +23,14 @@ function validateManualCards(raw) {
   }
   const ids = new Set()
   for (const item of drawn) {
-    if (!mongoose.isValidObjectId(item?.id) || !ORIENTATIONS.includes(item?.orientation)) {
+    // 只收 24 位十六進位字串：isValidObjectId 連物件都放行，大寫的 id 也會繞過重複檢查（api-reviewer 2026-11-13）
+    if (typeof item?.id !== 'string' || !/^[0-9a-f]{24}$/i.test(item.id) || !ORIENTATIONS.includes(item?.orientation)) {
       return { error: '牌卡資料格式不正確。' }
     }
-    if (ids.has(String(item.id))) {
+    if (ids.has(item.id.toLowerCase())) {
       return { error: '同一張牌不可重複選取。' }
     }
-    ids.add(String(item.id))
+    ids.add(item.id.toLowerCase())
   }
   return { drawn }
 }

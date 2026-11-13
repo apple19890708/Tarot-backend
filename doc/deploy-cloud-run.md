@@ -17,7 +17,7 @@
 | 網址 | `https://tarot-backend-755135442588.us-west1.run.app` |
 | 自動部署 | Cloud Build 觸發條件 `tarot-backend-us-west1`（id `f8ffa608-2349-4678-9c09-49f16464598e`，區域 us-west1，GitHub 連線 `Orange-us`）：GitHub `apple19890708/Tarot-backend` 的 `main` 有新 commit 就在 us-west1 建置、映像存 us-west1 的 `cloud-run-source-deploy`、部署到 us-west1，全程不跨區 |
 | 資源上限 | 最多 1 台、沒流量縮到 0、1 vCPU／1GiB、關閉啟動加速（`--no-cpu-boost`，啟動時不會用 2 倍 CPU 計費）、請求上限 900 秒、只在處理請求時計費 |
-| 環境變數 | 14 個，存在 Cloud Run 服務上；本機的來源檔是 `env.yaml`（不進版控） |
+| 環境變數 | 17 個，存在 Cloud Run 服務上；本機的來源檔是 `env.yaml`（不進版控）。AI 模型相關的見下方「AI 模型設定」 |
 | 資料庫 | MongoDB Atlas（白名單 `0.0.0.0/0`，因為 Cloud Run 對外 IP 不固定） |
 | 清理規則 | 映像檔保留最近 3 版（每版約 170 MB，3 版約 0.5 GB 免費額度內）、超過 30 天刪除（us-west1 的 `cloud-run-source-deploy`）；手動 `--source` 部署用的 bucket `run-sources-orangetarot-us-west1` |
 | 誰會呼叫它 | 前端（GitHub Pages）、GitHub Actions 的 `market-cron`（每 10 分鐘，開盤時段） |
@@ -241,3 +241,14 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
   ```
 - **換回台灣**：需要台灣區域的 GitHub 連線與觸發條件（台灣原本那一套已停用／刪除，要重建，見第七節第 10 步）；前端 `.env` 的 `VITE_API_BASE_URL`、後端 repo 的 secret `BACKEND_URL` 改回 `https://tarot-backend-755135442588.asia-east1.run.app`。
 - 如果之後覺得太慢又不想付流量費：把 Atlas 也搬到美國（例如 AWS `us-west-2`）會把資料庫那段延遲拿掉，但要搬資料，另外評估。
+
+## AI 模型設定（OpenRouter）
+
+都是選填，沒設定就用程式裡的預設值（`src/services/narrationService.js`）。改值用 `gcloud run services update tarot-backend --region us-west1 --update-env-vars KEY=value`，立即生效、不用重新部署。
+
+| 變數 | 用途 | 目前的值／預設 |
+|---|---|---|
+| `OPENROUTER_MODEL` | 塔羅解讀（含股市諮詢、追問） | 已設 `anthropic/claude-sonnet-5.5`（2026-11-14） |
+| `OPENROUTER_REASONING_EFFORT` | 推理深度 `low`／`medium`／`high`，所有 AI 共用 | 已設 `medium`（2026-11-14） |
+| `OPENROUTER_MARKET_MODEL` | 個股 AI 分析、財經新聞 AI 分析 | 已設 `anthropic/claude-opus-5.5`（2026-11-14）；沒設時和 `OPENROUTER_MODEL` 相同 |
+| `OPENROUTER_FALLBACK_MODEL` | 主模型出錯時 OpenRouter 自動改用的模型 | 未設，預設 `anthropic/claude-opus-5.5` |

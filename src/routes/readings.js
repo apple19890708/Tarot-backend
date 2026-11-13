@@ -9,7 +9,14 @@ const ReadingModel = require('../models/Reading')
 const spreads = require('../data/spreads')
 const { loadCardsInOrder: defaultLoadCardsInOrder } = require('../services/cardLoader')
 const { buildReadingWithDictionary } = require('../services/readingService')
-const { saveReading, toReadingInput, isSameCards } = require('../services/readingHistory')
+const {
+  saveReading,
+  toReadingInput,
+  isSameCards,
+  followUpRelation,
+  mergeFollowUpRecords,
+} = require('../services/readingHistory')
+const { loadFollowUps, buildFollowUpEntries } = require('../services/followUp')
 const {
   validateManualCards,
   validateQuestion,
@@ -99,6 +106,18 @@ function createReadingsRouter({
         return
       }
 
+      // 保存前已經追問過的，一起存（追問與它的 AI 延伸回答）
+      const { followUps, error: followUpError } = await loadFollowUps(req.body.followUps, drawn, loadCardsInOrder)
+      if (followUpError) {
+        res.status(400).json({ message: followUpError })
+        return
+      }
+      const { narration: followUpNarration, error: followUpNarrationError } = resolveFollowUpNarration(req.body.followUpNarration)
+      if (followUpNarrationError) {
+        res.status(400).json({ message: followUpNarrationError })
+        return
+      }
+
       const record = await saveReading({
         userId: req.auth.userId,
         question,
@@ -107,6 +126,8 @@ function createReadingsRouter({
         drawn,
         cards,
         narration,
+        followUps,
+        followUpNarration,
         Reading,
       })
 
@@ -184,6 +205,16 @@ function createReadingsRouter({
         createdAt: record.createdAt,
         domain: record.domain || null,
         reading,
+        followUps: await restoreFollowUps(record, loadCardsInOrder),
+        followUpNarration: record.followUpNarration
+          ? {
+              text: record.followUpNarration.text,
+              model: record.followUpNarration.model || '',
+              // 涵蓋了幾次追問（0＝舊資料沒記，前端當成全部涵蓋）
+              rounds: record.followUpNarration.rounds || 0,
+              createdAt: record.followUpNarration.createdAt,
+            }
+          : null,
         narration: record.narration
           ? {
               text: record.narration.text,
@@ -227,6 +258,56 @@ function createReadingsRouter({
         return
       }
       record.narration = narration
+      await record.save()
+      res.json({ saved: true })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // 更新這筆紀錄的追問（v23）：已經保存的紀錄再追問、抽補充牌，或 AI 延伸回答寫完時由前端呼叫。
+  // 整批取代（追問最多三次，前端手上的就是完整清單）。body.cards 是原牌陣的牌，和紀錄不一樣就不存（409）。
+  // body.narration：有這個 key 才動延伸回答（物件＝存、null＝清掉）；沒有就保留原本的
+  router.put('/:id/follow-ups', requireAuth, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) {
+        return
+      }
+      const record = await findOwnReading(Reading, req.params.id, req.auth.userId)
+      if (!record) {
+        res.status(404).json({ message: '找不到這筆紀錄。' })
+        return
+      }
+      if (!isSameCards(record.cards, req.body?.cards)) {
+        res.status(409).json({ message: '這些追問和紀錄的牌不一樣，沒有存。' })
+        return
+      }
+      const { followUps, error } = await loadFollowUps(req.body.followUps, req.body.cards, loadCardsInOrder)
+      if (error) {
+        res.status(400).json({ message: error })
+        return
+      }
+      // 延伸回答要先檢查（有錯就整筆不寫）
+      const hasNarrationKey = Boolean(req.body) && 'narration' in req.body
+      let nextNarration = null
+      if (hasNarrationKey) {
+        const { narration, error: narrationError } = resolveFollowUpNarration(req.body.narration)
+        if (narrationError) {
+          res.status(400).json({ message: narrationError })
+          return
+        }
+        nextNarration = narration ? { ...narration, rounds: followUps.length } : null
+      }
+      const relation = followUpRelation(record.followUps, followUps)
+      record.followUps = followUps.length > 0 ? mergeFollowUpRecords(record.followUps, followUps) : undefined
+      if (followUps.length === 0) {
+        record.followUpNarration = null
+      } else if (hasNarrationKey) {
+        record.followUpNarration = nextNarration
+      } else if (relation === 'behind' || relation === 'different') {
+        // 追問被換成另一組或變少了：原本的延伸回答講的已經不是這些牌，不能留著配新的追問
+        record.followUpNarration = null
+      }
       await record.save()
       res.json({ saved: true })
     } catch (error) {
@@ -304,6 +385,26 @@ function resolveNarration(raw, { allowMarket = false } = {}) {
   const model = typeof raw.model === 'string' ? raw.model.slice(0, 100) : ''
 
   return { narration: { text, model, market: allowMarket ? resolveMarket(raw.market) : null, createdAt: new Date() } }
+}
+
+// 追問的 AI 延伸回答：規則同 narration，但不收行情資料
+function resolveFollowUpNarration(raw) {
+  const { narration, error } = resolveNarration(raw)
+  if (error || !narration) return { narration: null, error }
+  return { narration: { text: narration.text, model: narration.model, createdAt: narration.createdAt } }
+}
+
+// 把紀錄裡的追問還原成畫面要的樣子（含牌義）。牌已經不在牌庫的那一次略過，不讓整筆紀錄打不開
+async function restoreFollowUps(record, loadCardsInOrder) {
+  const stored = Array.isArray(record.followUps) ? record.followUps : []
+  const restored = []
+  for (const followUp of stored) {
+    const drawn = followUp.cards.map((card) => ({ id: String(card.cardId), orientation: card.orientation }))
+    const { cards, error } = await loadCardsInOrder(drawn)
+    if (error) continue
+    restored.push({ question: followUp.question, createdAt: followUp.createdAt, cards: buildFollowUpEntries(cards, drawn) })
+  }
+  return restored
 }
 
 // id 不合法時直接當成找不到，避免 CastError。

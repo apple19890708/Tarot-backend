@@ -12,6 +12,9 @@ async function saveReading({
   drawn,
   cards,
   narration = null,
+  // 追問：[{ question, drawn, cards（資料庫文件） }]；followUpNarration：{ text, model, createdAt }
+  followUps = [],
+  followUpNarration = null,
   Reading = ReadingModel,
 }) {
   const record = await Reading.create({
@@ -31,11 +34,53 @@ async function saveReading({
       nameZh: cards[index] ? cards[index].nameZh : '',
     })),
     narration,
+    followUps: followUps.length > 0 ? followUps.map(toFollowUpRecord) : undefined,
+    // 沒有追問就不會有延伸回答
+    followUpNarration: followUps.length > 0 && followUpNarration ? { ...followUpNarration, rounds: followUps.length } : null,
   })
 
   await trimHistory(userId, Reading)
 
   return record
+}
+
+// 追問存進紀錄的樣子：問題、牌 id 與正逆位，加一份牌名快照
+function toFollowUpRecord(followUp) {
+  return {
+    question: followUp.question,
+    cards: followUp.drawn.map((item, index) => ({
+      cardId: item.id,
+      orientation: item.orientation,
+      nameZh: followUp.cards?.[index]?.nameZh || '',
+    })),
+    createdAt: new Date(),
+  }
+}
+
+const isSameRound = (stored, followUp) => stored.question === followUp.question && isSameCards(stored.cards, followUp.drawn)
+
+// 紀錄裡的追問和送來的清單是什麼關係（api-reviewer 2026-11-13：整批取代時不能蓋掉較新的追問）：
+// same＝完全相同；extended＝送來的是紀錄的延伸（多了新的追問）；
+// behind＝送來的比紀錄少（紀錄已經有更新的追問，例如 AI 寫的途中又抽了一次）；different＝對不起來
+function followUpRelation(recordFollowUps, followUps) {
+  const stored = Array.isArray(recordFollowUps) ? recordFollowUps : []
+  const shared = Math.min(stored.length, followUps.length)
+  for (let index = 0; index < shared; index += 1) {
+    if (!isSameRound(stored[index], followUps[index])) return 'different'
+  }
+  if (stored.length === followUps.length) return 'same'
+  return stored.length < followUps.length ? 'extended' : 'behind'
+}
+
+// 整批取代時，同一位置、問題與牌都沒變的追問沿用原本的時間，不要每次同步都變成現在
+function mergeFollowUpRecords(recordFollowUps, followUps) {
+  const stored = Array.isArray(recordFollowUps) ? recordFollowUps : []
+  return followUps.map((followUp, index) => {
+    const record = toFollowUpRecord(followUp)
+    const previous = stored[index]
+    if (previous && previous.createdAt && isSameRound(previous, followUp)) record.createdAt = previous.createdAt
+    return record
+  })
 }
 
 // 超過上限就從最舊的開始刪。用 _id 清單刪，避免 skip 期間有新資料插入導致誤刪。
@@ -99,4 +144,12 @@ function isSameCards(recordCards, drawn) {
   )
 }
 
-module.exports = { saveReading, trimHistory, toReadingInput, isSameCards }
+module.exports = {
+  saveReading,
+  trimHistory,
+  toReadingInput,
+  isSameCards,
+  toFollowUpRecord,
+  followUpRelation,
+  mergeFollowUpRecords,
+}

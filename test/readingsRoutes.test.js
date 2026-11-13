@@ -443,3 +443,198 @@ test('補存 AI 解讀：只改解讀，body 裡夾帶的問題、牌、類別�
   assert.strictEqual(record.user, undefined)
   assert.strictEqual(record.narration.text, '解讀')
 })
+
+// ---- 抽牌追問（v23，2026-11-13）：追問與補充牌存進紀錄 ----
+const CARD_D = '507f1f77bcf86cd799439014'
+const CARD_E = '507f1f77bcf86cd799439015'
+const FOLLOW_UPS = [{ question: '那他會自己請辭嗎', cards: [{ id: CARD_D, orientation: 'reversed' }] }]
+async function putFollowUps(base, id, body) {
+  return fetch(`${base}/api/readings/${id}/follow-ups`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cards: RECORD_CARDS, followUps: FOLLOW_UPS, ...body }),
+  })
+}
+
+test('保存紀錄：追問與延伸回答一起存；沒有追問就不存延伸回答', async () => {
+  const Reading = makeFakeReading()
+  await withServer(makeApp({ Reading }), async (base) => {
+    const post = (body) =>
+      fetch(`${base}/api/readings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: '他會下台嗎', cards: RECORD_CARDS, ...body }),
+      })
+    assert.strictEqual((await post({ followUps: FOLLOW_UPS, followUpNarration: { text: '延伸回答', model: 'm1' } })).status, 201)
+    assert.strictEqual((await post({ followUpNarration: { text: '沒有追問的延伸回答' } })).status, 201)
+    // 補充牌和原牌陣重複、超過三次都擋掉
+    assert.strictEqual((await post({ followUps: [{ question: '問', cards: [{ id: CARD_A, orientation: 'upright' }] }] })).status, 400)
+    assert.strictEqual((await post({ followUps: [...FOLLOW_UPS, ...FOLLOW_UPS] })).status, 400)
+  })
+  const [withFollowUps, without] = Reading.calls.create
+  assert.strictEqual(withFollowUps.followUps.length, 1)
+  assert.strictEqual(withFollowUps.followUps[0].question, '那他會自己請辭嗎')
+  assert.strictEqual(String(withFollowUps.followUps[0].cards[0].cardId), CARD_D)
+  assert.strictEqual(withFollowUps.followUps[0].cards[0].orientation, 'reversed')
+  assert.strictEqual(withFollowUps.followUpNarration.text, '延伸回答')
+  assert.strictEqual(without.followUps, undefined)
+  assert.strictEqual(without.followUpNarration, null)
+  assert.strictEqual(Reading.calls.create.length, 2)
+})
+
+test('更新追問：整批取代；narration 有帶才動延伸回答，清空追問時一併清掉', async () => {
+  let saves = 0
+  const record = makeRecord({ followUpNarration: { text: '舊的延伸回答' }, save: async () => (saves += 1) })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    // 沒帶 narration：只換追問，延伸回答保留
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, {})).status, 200)
+    assert.strictEqual(record.followUps.length, 1)
+    assert.strictEqual(String(record.followUps[0].cards[0].cardId), CARD_D)
+    assert.strictEqual(record.followUpNarration.text, '舊的延伸回答')
+    // 帶 narration：一起更新
+    const two = [...FOLLOW_UPS, { question: '什麼時候', cards: [{ id: CARD_E, orientation: 'upright' }] }]
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: two, narration: { text: '新的延伸回答', model: 'm2' } })).status, 200)
+    assert.strictEqual(record.followUps.length, 2)
+    assert.strictEqual(record.followUpNarration.text, '新的延伸回答')
+    assert.strictEqual(record.followUpNarration.market, undefined)
+    // 清空
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: [] })).status, 200)
+    assert.strictEqual(record.followUps, undefined)
+    assert.strictEqual(record.followUpNarration, null)
+  })
+  assert.strictEqual(saves, 3)
+})
+
+test('更新追問：別人的紀錄 404、牌不一致 409、格式不對 400，都不寫入，也改不到問題與原牌陣', async () => {
+  let saves = 0
+  const save = async () => (saves += 1)
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [makeRecord({ user: OTHER, save })] }) }), async (base) => {
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, {})).status, 404)
+  })
+  const record = makeRecord({ save })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { cards: RECORD_CARDS.slice(0, 2) })).status, 409)
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: [{ question: '', cards: [{ id: CARD_D, orientation: 'upright' }] }] })).status, 400)
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: [{ question: '問', cards: [{ id: CARD_B, orientation: 'upright' }] }] })).status, 400)
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { narration: { text: '字'.repeat(20001) } })).status, 400)
+    assert.strictEqual(saves, 0)
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { question: '改掉的問題', domain: 'stock', user: OTHER })).status, 200)
+  })
+  assert.strictEqual(saves, 1)
+  assert.strictEqual(record.question, '這份工作適合我嗎')
+  assert.strictEqual(record.cards.length, 3)
+  assert.strictEqual(record.domain, null)
+  assert.strictEqual(record.user, undefined)
+})
+
+// ---- api-reviewer 2026-11-13 的修正 ----
+const { followUpRelation, mergeFollowUpRecords } = require('../src/services/readingHistory')
+const { validateFollowUps } = require('../src/services/followUp')
+const { validateManualCards } = require('../src/services/manualDraw')
+
+test('追問清單的關係：相同、延伸、落後、對不起來；合併時沒變的追問沿用原本的時間', () => {
+  const old = new Date('2026-11-01T00:00:00Z')
+  const stored = [{ question: '問一', cards: [{ cardId: CARD_D, orientation: 'reversed' }], createdAt: old }]
+  const one = { question: '問一', drawn: [{ id: CARD_D, orientation: 'reversed' }] }
+  const two = { question: '問二', drawn: [{ id: CARD_E, orientation: 'upright' }] }
+  assert.strictEqual(followUpRelation(stored, [one]), 'same')
+  assert.strictEqual(followUpRelation(stored, [one, two]), 'extended')
+  assert.strictEqual(followUpRelation(stored, []), 'behind')
+  assert.strictEqual(followUpRelation(stored, [two]), 'different')
+  assert.strictEqual(followUpRelation(stored, [{ ...one, question: '改過的問題' }]), 'different')
+  assert.strictEqual(followUpRelation(undefined, [one]), 'extended')
+
+  const merged = mergeFollowUpRecords(stored, [one, two])
+  assert.strictEqual(merged[0].createdAt, old)
+  assert.notStrictEqual(merged[1].createdAt, old)
+  // 同一位置換成別的追問：是新的，不沿用時間
+  assert.notStrictEqual(mergeFollowUpRecords(stored, [two])[0].createdAt, old)
+})
+
+test('牌 id 只收 24 位十六進位字串：大寫不能繞過重複檢查，物件與其他型別回格式錯誤', () => {
+  const base = [{ id: CARD_A, orientation: 'upright' }]
+  const round = (id) => [{ question: '問', cards: [{ id, orientation: 'upright' }] }]
+  assert.ok(validateFollowUps(round(CARD_A.toUpperCase()), base).error)
+  assert.match(validateFollowUps(round({ id: CARD_D }), base).error, /格式不正確/)
+  assert.match(validateFollowUps(round('123456789012'), base).error, /格式不正確/)
+  // 合法的大寫 id 存成小寫
+  assert.strictEqual(validateFollowUps(round(CARD_D.toUpperCase()), base).followUps[0].drawn[0].id, CARD_D)
+  assert.match(validateFollowUps('not-an-array', base).error, /格式不正確/)
+
+  assert.ok(validateManualCards([{ id: CARD_A, orientation: 'upright' }, { id: CARD_A.toUpperCase(), orientation: 'upright' }]).error)
+  assert.ok(validateManualCards([{ id: { id: CARD_A }, orientation: 'upright' }]).error)
+  assert.strictEqual(validateManualCards([{ id: CARD_A, orientation: 'upright' }]).drawn.length, 1)
+})
+
+test('更新追問：換成另一組追問而沒帶延伸回答時，舊的延伸回答清掉；延伸回答記下涵蓋幾次追問', async () => {
+  const stored = [{ question: '那他會自己請辭嗎', cards: [{ cardId: CARD_D, orientation: 'reversed' }], createdAt: new Date('2026-11-01T00:00:00Z') }]
+  const record = makeRecord({ followUps: stored, followUpNarration: { text: '舊的延伸回答', rounds: 1 }, save: async () => {} })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    // 往後追加：延伸回答留著，第一次追問的時間不變
+    const two = [...FOLLOW_UPS, { question: '什麼時候', cards: [{ id: CARD_E, orientation: 'upright' }] }]
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: two })).status, 200)
+    assert.strictEqual(record.followUpNarration.text, '舊的延伸回答')
+    assert.strictEqual(record.followUps[0].createdAt.toISOString(), '2026-11-01T00:00:00.000Z')
+    // 帶延伸回答：記下涵蓋兩次
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: two, narration: { text: '新的' } })).status, 200)
+    assert.strictEqual(record.followUpNarration.rounds, 2)
+    // 換成另一組追問、沒帶延伸回答：清掉
+    const other = [{ question: '另一個問題', cards: [{ id: CARD_E, orientation: 'reversed' }] }]
+    assert.strictEqual((await putFollowUps(base, RECORD_ID, { followUps: other })).status, 200)
+    assert.strictEqual(record.followUpNarration, null)
+  })
+})
+
+test('單筆回顧：回傳追問（含牌義）與延伸回答涵蓋的次數；舊紀錄沒有追問時是空陣列', async () => {
+  const withFollowUps = makeRecord({
+    followUps: [{ question: '那他會自己請辭嗎', cards: [{ cardId: CARD_D, orientation: 'reversed' }], createdAt: new Date('2026-11-01T00:00:00Z') }],
+    followUpNarration: { text: '延伸回答', model: 'm1', rounds: 1, createdAt: new Date('2026-11-01T00:01:00Z') },
+  })
+  const restore = (record) => restoreForTest(record)
+  const restored = await restore(withFollowUps)
+  assert.strictEqual(restored.followUps.length, 1)
+  assert.strictEqual(restored.followUps[0].question, '那他會自己請辭嗎')
+  assert.strictEqual(restored.followUps[0].cards[0].orientation, 'reversed')
+  assert.strictEqual(restored.followUpNarration.rounds, 1)
+  assert.strictEqual(restored.followUpNarration.market, undefined)
+  const plain = await restore(makeRecord())
+  assert.deepStrictEqual(plain.followUps, [])
+  assert.strictEqual(plain.followUpNarration, null)
+})
+
+// GET /:id 要重算分析，需要完整的牌資料；這裡給夠用的假牌
+async function restoreForTest(record) {
+  const app = express()
+  app.use(express.json())
+  app.use(
+    '/api/readings',
+    createReadingsRouter({
+      ensureDatabase: () => true,
+      requireAuth: (req, _res, next) => {
+        req.auth = { userId: OWNER }
+        next()
+      },
+      Reading: makeFakeReading({ records: [record] }),
+      loadCardsInOrder: async (drawn) => ({
+        cards: drawn.map((item, index) => ({
+          _id: item.id,
+          slug: `card-${index}`,
+          nameZh: `權杖${index + 2}`,
+          nameEn: ['Two of Wands', 'Three of Wands', 'Four of Wands'][index] || 'Five of Wands',
+          arcanaType: 'minor',
+          suit: 'wands',
+          number: index + 2,
+          keywords: [],
+          sections: {},
+        })),
+      }),
+    }),
+  )
+  let body = null
+  await withServer(app, async (base) => {
+    const response = await fetch(`${base}/api/readings/${RECORD_ID}`)
+    assert.strictEqual(response.status, 200)
+    body = await response.json()
+  })
+  return body
+}

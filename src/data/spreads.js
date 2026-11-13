@@ -104,6 +104,54 @@ const spreads = [
     ],
   },
   {
+    // 2026-11-14 使用者要求新增。位置 key 沿用規則認得的：present／challenge／past／future／advice，
+    // 時間走向（根源 → 核心 → 發展）與建議位置的判定才會套用
+    key: 'cross',
+    name: '十字牌陣',
+    cardCount: 5,
+    description: '看清楚現況的核心、卡住的地方、背後的成因、接下來的走向，以及可以怎麼做。',
+    // 十字：核心在中央，阻礙在左、發展在右，根源在下、建議在上
+    grid: { cols: 3, rows: 3 },
+    positions: [
+      { key: 'present', label: '核心', prompt: '問題當下的中心狀態、你目前面臨的主要處境或核心情緒', weight: 0.25, layout: { col: 2, row: 2 } },
+      { key: 'challenge', label: '阻礙', prompt: '目前遇到的障礙、內在盲點或需要克服的難題', weight: 0.15, layout: { col: 1, row: 2 } },
+      { key: 'past', label: '根源', prompt: '影響現狀的深層因素、事件的背景或過去的成因', weight: 0.15, layout: { col: 2, row: 3 } },
+      { key: 'future', label: '發展', prompt: '維持現狀、順著目前方向推演下去，未來可能出現的變化', weight: 0.3, layout: { col: 3, row: 2 } },
+      { key: 'advice', label: '建議', prompt: '可以考慮採取的實際行動、心態調整或突破口', weight: 0.15, layout: { col: 2, row: 1 } },
+    ],
+    relations: [
+      { from: 0, to: 1, kind: 'crossing' }, // 核心被什麼擋住
+      { from: 2, to: 0, kind: 'sequence' }, // 根源走到核心
+      { from: 0, to: 3, kind: 'sequence' }, // 核心走到發展
+      { from: 1, to: 4, kind: 'remedy' }, // 面對阻礙，建議是可用的方式
+    ],
+  },
+  {
+    // 2026-11-14 使用者要求新增。兩人關係：雙方嘴上（心裡）怎麼看對方、實際怎麼想，加上建議與結果。
+    // 位置 key 只有 advice／outcome 是規則認得的，其他四格由 AI 依位置含意解讀
+    key: 'relationship',
+    name: '關係牌陣',
+    cardCount: 6,
+    description: '對照你和對方各自對這段關係的感覺與真正的想法，看兩人會走向哪裡。',
+    // 中間一排從左到右：你的實際想法、你對對方、對方對你、對方的實際想法；建議在上、結果在下，都在正中央
+    grid: { cols: 5, rows: 3 },
+    positions: [
+      { key: 'querent-thought', label: '你的實際想法', prompt: '你心裡對這段關係真正的想法與打算', weight: 0.15, layout: { col: 1, row: 2 } },
+      { key: 'querent-feeling', label: '你對對方的看法', prompt: '你對對方的看法與感情', weight: 0.15, layout: { col: 2, row: 2 } },
+      { key: 'partner-feeling', label: '對方對你的看法', prompt: '對方對你的看法與感情', weight: 0.15, layout: { col: 4, row: 2 } },
+      { key: 'partner-thought', label: '對方的實際想法', prompt: '對方心裡對這段關係真正的想法與打算', weight: 0.15, layout: { col: 5, row: 2 } },
+      { key: 'advice', label: '建議', prompt: '這段關係裡你最適合的態度與做法', weight: 0.15, layout: { col: 3, row: 1 } },
+      { key: 'outcome', label: '結果', prompt: '照目前的狀態走下去，這段關係會走到哪裡', weight: 0.25, layout: { col: 3, row: 3 } },
+    ],
+    relations: [
+      { from: 1, to: 0, kind: 'depth' }, // 你：表面的感情，底下的真正想法
+      { from: 2, to: 3, kind: 'depth' }, // 對方：表面的感情，底下的真正想法
+      { from: 1, to: 2, kind: 'contrast' }, // 兩人對彼此的感情對照
+      { from: 0, to: 3, kind: 'contrast' }, // 兩人真正想法的落差，這個牌陣的重點
+      { from: 4, to: 5, kind: 'remedy' }, // 照建議做，結果是否改變
+    ],
+  },
+  {
     key: 'guiding-star',
     name: '指引之星',
     cardCount: 7,

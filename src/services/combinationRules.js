@@ -12,6 +12,8 @@ const { analyzePositions } = require('./rules/positionRules')
 const { analyzeNumberStage } = require('./rules/numberStageRules')
 const { analyzeWeights } = require('./rules/weightRules')
 const { analyzeQuant } = require('./rules/quantRules')
+const { analyzeYesNo } = require('./rules/yesNoRules')
+const { analyzeTiming } = require('./rules/timingRules')
 const { resolveRelationPairs } = require('./rules/relationPairs')
 
 const DOMINANT_SUIT_MIN = 3
@@ -253,6 +255,10 @@ function analyzeCombination({
       domainResolvedFrom,
     }),
     question: questionResult,
+    // 規則 12：是非題的答案；不是是非題時為 null
+    yesNo: analyzeYesNo({ question, items, positionKeys, positionWeights }),
+    // 規則 13：時間類問題（多久、什麼時候…）的時間線索；不是時間類問題時為 null
+    timing: analyzeTiming({ question, items, positionKeys }),
     positions: analyzePositions({ positionKeys, items }),
     numberStage: analyzeNumberStage(items, positionKeys),
     weights: analyzeWeights({

@@ -3,6 +3,7 @@ const {
   QUESTION_DOMAINS,
   NUMBER_STAGES,
   DIRECTION_LABELS,
+  YES_NO_VERDICT_LABELS,
   DIMENSION_LABELS,
   QUANT,
 } = require('../data/ruleConfig')
@@ -949,6 +950,26 @@ function assertConsistency(analysis) {
   }
 }
 
+// 規則 12：是非題的答案。先講「會」在這題指什麼，再給答案，最後點出把答案往兩邊拉最多的牌
+const YES_MEANS_TEXT = {
+  change: (keyword) => `這是是非題，「會」指的是事情會變動（${keyword}）。`,
+  stay: (keyword) => `這是是非題，「會」指的是現狀會維持（${keyword}）。`,
+  unfavorable: (keyword) => `這是是非題，「會」指的是你擔心的事會發生（${keyword}）。`,
+  favorable: () => '這是是非題，「會」指的是事情會成。',
+}
+
+function buildYesNoText(yesNo, entries) {
+  const name = (index) => `${entries[index].card.nameZh}${entries[index].orientation === 'reversed' ? '逆位' : '正位'}`
+  const lines = [YES_MEANS_TEXT[yesNo.yesMeans](yesNo.keyword), `牌面的答案：${YES_NO_VERDICT_LABELS[yesNo.verdict]}。`]
+  const towardYes = yesNo.contributions.find((item) => item.share > 0)
+  const towardNo = yesNo.contributions.find((item) => item.share < 0)
+  if (towardYes) lines.push(`把答案往「會」拉最多的是${name(towardYes.index)}。`)
+  if (towardNo) lines.push(`往「不會」拉最多的是${name(towardNo.index)}。`)
+  // 不寫「給不出答案」：兩邊力道相當，代表結果還握在提問者手上（2026-11-13 使用者要求給建設性的回覆）
+  if (yesNo.verdict === 'unclear') lines.push('兩邊的力道相當，結果還沒定下來，接下來怎麼做會決定往哪邊走。')
+  return lines.join('')
+}
+
 function formatAnalysis(result, rawEntries, pairTexts = null) {
   const entries = rawEntries.map((entry, index) => ({ ...entry, profile: result.profiles[index] }))
   const verdict = buildVerdict(result)
@@ -998,6 +1019,12 @@ function formatAnalysis(result, rawEntries, pairTexts = null) {
         }
       : null,
     question: result.question ? { ...result.question, text: buildQuestionText(result.question) } : null,
+    // 新增欄位（規則 13）：時間類問題的時間線索，只交給 AI；不是時間類問題時為 null
+    timing: result.timing || null,
+    // 新增欄位（規則 12）：不是是非題時為 null
+    yesNo: result.yesNo
+      ? { ...result.yesNo, verdictLabel: YES_NO_VERDICT_LABELS[result.yesNo.verdict], text: buildYesNoText(result.yesNo, entries) }
+      : null,
     positions: result.positions.map((finding) => ({ ...finding, text: buildPositionText(finding, entries) })),
     numberStage: result.numberStage
       ? { ...result.numberStage, ...buildNumberStage(result.numberStage, entries, result.quant) }
@@ -1191,6 +1218,8 @@ function buildGuidance(result, rawEntries) {
 module.exports = {
   formatAnalysis,
   buildGuidance,
+  // 追問（followUp.js）也用同一句是非判斷
+  buildYesNoText,
   // 匯出供測試檢查守門員本身有效
   CONTRADICTIONS,
 }

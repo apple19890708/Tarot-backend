@@ -49,6 +49,35 @@ const readingSchema = new mongoose.Schema(
       ),
       default: null,
     },
+    // 抽牌追問（v23）：針對同一件事再問、再抽的補充牌，最多三次、每次 1～3 張。
+    // 只存問題與牌，牌義讀取時重算；舊紀錄沒有這個欄位
+    followUps: {
+      type: [
+        new mongoose.Schema(
+          {
+            question: { type: String, required: true, maxlength: 200 },
+            cards: { type: [readingCardSchema], required: true },
+            createdAt: { type: Date, default: Date.now },
+          },
+          { _id: false },
+        ),
+      ],
+      default: undefined,
+    },
+    // 追問的 AI 延伸回答：一篇涵蓋目前所有追問，重新產生就覆蓋
+    followUpNarration: {
+      type: new mongoose.Schema(
+        {
+          text: { type: String, required: true },
+          model: { type: String, default: '' },
+          // 寫的時候涵蓋了幾次追問；之後又追問的話，畫面要提示這篇還沒包含新的
+          rounds: { type: Number, default: 0 },
+          createdAt: { type: Date, default: Date.now },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
   },
   { timestamps: true },
 )
@@ -71,6 +100,7 @@ readingSchema.methods.toSummaryJSON = function toSummaryJSON() {
       orientation: card.orientation,
     })),
     hasNarration: Boolean(this.narration && this.narration.text),
+    followUpCount: Array.isArray(this.followUps) ? this.followUps.length : 0,
     createdAt: this.createdAt,
   }
 }

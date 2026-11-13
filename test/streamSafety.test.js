@@ -83,3 +83,46 @@ test('streamChat：使用者停止時照樣是中止，不是卡住', async () =
     global.fetch = realFetch
   }
 })
+
+// ---- 2026-11-14：備援模型、提示詞快取、塔羅與股市分開的模型 ----
+const { buildRequestBody, MODEL, FALLBACK_MODEL } = require('../src/services/narrationService')
+
+test('送給 OpenRouter 的內容：主模型在前、備援在後；系統提示加快取標記；其他訊息不動', () => {
+  const body = buildRequestBody({
+    messages: [
+      { role: 'system', content: '系統提示' },
+      { role: 'user', content: '問題' },
+    ],
+  })
+  assert.equal(body.model, MODEL)
+  assert.deepEqual(body.models, MODEL === FALLBACK_MODEL ? undefined : [MODEL, FALLBACK_MODEL])
+  assert.deepEqual(body.messages[0], {
+    role: 'system',
+    content: [{ type: 'text', text: '系統提示', cache_control: { type: 'ephemeral' } }],
+  })
+  assert.deepEqual(body.messages[1], { role: 'user', content: '問題' })
+  assert.equal(body.reasoning.exclude, true)
+  assert.equal(body.stream, true)
+})
+
+test('指定模型時用指定的；和備援同一個就不帶備援清單', () => {
+  assert.equal(buildRequestBody({ messages: [], model: 'x/other' }).model, 'x/other')
+  assert.deepEqual(buildRequestBody({ messages: [], model: 'x/other' }).models, ['x/other', FALLBACK_MODEL])
+  assert.equal(buildRequestBody({ messages: [], model: FALLBACK_MODEL }).models, undefined)
+})
+
+test('streamChat 把指定的模型送出去（個股與財經新聞分析用自己的模型）', async () => {
+  const realFetch = global.fetch
+  let sent = null
+  global.fetch = async (_url, { body }) => {
+    sent = JSON.parse(body)
+    return new Response('data: {"model":"x/market","choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200 })
+  }
+  try {
+    const result = await streamChat({ messages: [], model: 'x/market', signal: new AbortController().signal, onStart: () => {}, onDelta: () => {} })
+    assert.equal(sent.model, 'x/market')
+    assert.equal(result.model, 'x/market')
+  } finally {
+    global.fetch = realFetch
+  }
+})
