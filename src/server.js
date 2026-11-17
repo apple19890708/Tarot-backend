@@ -3,6 +3,7 @@ require('dotenv').config()
 const path = require('path')
 const express = require('express')
 const cors = require('cors')
+const { securityHeaders } = require('./lib/securityHeaders')
 const mongoose = require('mongoose')
 
 const Card = require('./models/Card')
@@ -11,6 +12,10 @@ const spreads = require('./data/spreads')
 const { createAuthMiddleware } = require('./middleware/auth')
 const { createAuthRouter } = require('./routes/auth')
 const PasswordReset = require('./models/PasswordReset')
+const LoginAttempt = require('./models/LoginAttempt')
+const EmailVerification = require('./models/EmailVerification')
+const { defaultUserDataDeleter } = require('./services/accountDeletion')
+const { createTarotAiQuota } = require('./services/tarotAiQuota')
 const { createMailer } = require('./services/mailer')
 const { createGoogleVerifier } = require('./services/googleAuth')
 const { createAdminRouter } = require('./routes/admin')
@@ -50,6 +55,8 @@ const { createFinanceNewsRouter } = require('./routes/financeNews')
 const FinanceNews = require('./models/FinanceNews')
 const FinanceNewsAnalysis = require('./models/FinanceNewsAnalysis')
 const MarketAiUsage = require('./models/MarketAiUsage')
+// 塔羅 AI 解讀與追問的每日次數（v24 1-4）
+const tarotAiQuota = createTarotAiQuota({ Usage: MarketAiUsage })
 const { createFinanceNewsSync } = require('./services/market/financeNews')
 const { createNewsDigest, digestFromHtml } = require('./services/market/newsDigest')
 const MarketAnalysis = require('./models/MarketAnalysis')
@@ -97,6 +104,9 @@ const clientUrls = (process.env.CLIENT_URL || 'http://localhost:5173')
   .split(',')
   .map((item) => item.trim().replace(/\/$/, ''))
   .filter(Boolean)
+
+// 安全標頭與 noindex（v24 1-5、4-4），細節見 lib/securityHeaders.js
+app.use(securityHeaders())
 
 app.use(
   cors({
@@ -158,6 +168,9 @@ app.use(
     ensureDatabase,
     requireAuth,
     PasswordResets: PasswordReset,
+    LoginAttempts: LoginAttempt,
+    deleteUserData: defaultUserDataDeleter(),
+    EmailVerifications: EmailVerification,
     mailer: createMailer(),
     google: createGoogleVerifier(),
     appUrl: process.env.APP_URL || clientUrls[0] || '',
@@ -661,6 +674,12 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
     }
     const { reading, cards, drawn, question, domain: narrateDomain } = resolved
 
+    const quota = await tarotAiQuota.check(req.auth, 'tarot')
+    if (!quota.allowed) {
+      res.status(429).json({ message: tarotAiQuota.limitMessage('tarot', quota.limit) })
+      return
+    }
+
     // 問題和股市有關時，先查即時報價與技術指標一起交給 AI。查詢失敗不影響解讀，只是少了數據
     // 只有「股市諮詢」才查市場資料、改用技術分析的寫法；其他問題類型一律走原本的塔羅解讀。
     // 查詢失敗不影響解讀，只是少了數據
@@ -690,6 +709,7 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
 
     // 完整產生的解讀要存回紀錄（AI 文字要花錢又無法重現），所以邊送邊收集
     let narrationText = ''
+    let usage = null
 
     try {
       const { model } = await streamNarration({
@@ -700,6 +720,7 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
         onStart: () => {
           // 送出標頭並開始心跳（前端靠它分辨「還在等 AI」和「連線斷了」）
           startNdjson(res)
+          usage = tarotAiQuota.record(req.auth.userId, 'tarot')
           if (market) {
             writeEvent({ type: 'market', snapshot: market })
           }
@@ -725,6 +746,8 @@ app.post('/api/readings/narrate', requireAiAccess, async (req, res, next) => {
         console.log('AI 解讀已由使用者中斷')
         return
       }
+      // 伺服器或 AI 出錯（不是使用者停止）：退還這次的次數
+      void tarotAiQuota.refund(usage)
       if (!res.headersSent) {
         throw error
       }
@@ -833,6 +856,12 @@ app.post('/api/readings/follow-up/narrate', requireAiAccess, async (req, res, ne
     }
     const { reading, cards, drawn, question } = resolved
 
+    const quota = await tarotAiQuota.check(req.auth, 'followUp')
+    if (!quota.allowed) {
+      res.status(429).json({ message: tarotAiQuota.limitMessage('followUp', quota.limit) })
+      return
+    }
+
     const { followUps, error: followUpError } = await loadFollowUps(req.body.followUps, drawn, loadCardsInOrder)
     if (followUpError) {
       res.status(400).json({ message: followUpError })
@@ -876,6 +905,7 @@ app.post('/api/readings/follow-up/narrate', requireAiAccess, async (req, res, ne
     })
     const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
     let text = ''
+    let usage = null
 
     try {
       const { model } = await streamFollowUpNarration({
@@ -889,6 +919,7 @@ app.post('/api/readings/follow-up/narrate', requireAiAccess, async (req, res, ne
         // kept：保留了前幾次追問的回答，前端照這個數字把舊的段落接在新寫的前面
         onStart: () => {
           startNdjson(res)
+          usage = tarotAiQuota.record(req.auth.userId, 'followUp')
           writeEvent({ type: 'start', kept: answered.kept })
         },
         onDelta: (delta) => {
@@ -911,6 +942,7 @@ app.post('/api/readings/follow-up/narrate', requireAiAccess, async (req, res, ne
         console.log('AI 追問已由使用者中斷')
         return
       }
+      void tarotAiQuota.refund(usage)
       if (!res.headersSent) {
         throw error
       }

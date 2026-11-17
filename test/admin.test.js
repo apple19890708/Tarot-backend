@@ -105,7 +105,8 @@ function buildAdmin() {
   const users = new Map(
     [
       fakeUser({ _id: ADMIN_ID, role: 'admin' }),
-      fakeUser({ _id: MEMBER_ID, role: 'member' }),
+      // 信箱驗證過的會員才能被開通權限（v24 3-1）
+      fakeUser({ _id: MEMBER_ID, role: 'member', emailVerified: true }),
       fakeUser({ _id: OTHER_ADMIN_ID, role: 'admin' }),
     ].map((u) => [u._id, u]),
   )
@@ -245,7 +246,13 @@ test('Google 登入：同信箱的帳號被停用時回 403，而且不會被綁
     user.saved = true
   }
   const Users = {
-    findOne: async (where) => (where.email === 'a@example.com' ? user : null),
+    // 同信箱查詢會帶 .select('+passwordHash')（v24 1-1 要看有沒有舊密碼），await 和 .select() 都要能用
+    findOne: (where) => {
+      const found = where.email === 'a@example.com' ? user : null
+      const result = Promise.resolve(found)
+      result.select = async () => found
+      return result
+    },
     updateOne: async () => {},
   }
   const google = { isConfigured: () => true, verify: async () => ({ googleId: 'g-1', email: 'a@example.com', name: 'A' }) }
@@ -259,5 +266,19 @@ test('Google 登入：同信箱的帳號被停用時回 403，而且不會被綁
     assert.equal((await response.json()).message, ACCOUNT_DISABLED)
     assert.equal(user.googleId, undefined)
     assert.equal(user.saved, false)
+  })
+})
+
+test('開通權限：信箱沒驗證過的會員不能開通（回 409），收回不受影響', async () => {
+  const { app, users } = buildAdmin()
+  users.get(MEMBER_ID).emailVerified = false
+  users.get(MEMBER_ID).stockAccess = true
+  await withServer(app, async (base) => {
+    const grant = await fetch(`${base}/api/admin/users/${MEMBER_ID}/ai-access`, patch({ allowed: true }))
+    assert.equal(grant.status, 409)
+    assert.match((await grant.json()).message, /信箱還沒驗證/)
+    assert.equal(users.get(MEMBER_ID).aiAccess, false)
+    assert.equal((await fetch(`${base}/api/admin/users/${MEMBER_ID}/stock-access`, patch({ allowed: false }))).status, 200)
+    assert.equal(users.get(MEMBER_ID).stockAccess, false)
   })
 })

@@ -22,6 +22,9 @@ const userSchema = new mongoose.Schema(
     },
     // Google 帳號的 sub（Google 登入時用來找人）；沒用過 Google 登入的帳號沒有這個欄位
     googleId: { type: String, unique: true, sparse: true },
+    // 信箱確定是本人的（v24 1-1）：用 Google 登入過、或用重設信設過密碼。
+    // 沒驗證過的帳號綁 Google 時，原本的密碼會被清掉（可能是別人預先用這個信箱註冊的）
+    emailVerified: { type: Boolean, default: false },
     displayName: { type: String, default: '' },
     role: { type: String, enum: ROLES, default: 'member' },
     // AI 解析要由管理者逐一開通；admin 本身不看這個欄位，一律放行
@@ -55,6 +58,8 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
     email: this.email,
     displayName: this.displayName || this.email.split('@')[0],
     role: this.role,
+    // 信箱驗證過沒有（v24 3-1）：前端在帳號設定頁提示重寄、管理頁標示「未驗證」
+    emailVerified: Boolean(this.emailVerified),
     aiAccess: this.role === 'admin' ? true : Boolean(this.aiAccess),
     stockAccess: this.role === 'admin' ? true : Boolean(this.stockAccess),
     createdAt: this.createdAt,

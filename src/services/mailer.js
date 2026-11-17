@@ -11,7 +11,7 @@ const encodeHeader = (text) => `=?UTF-8?B?${Buffer.from(text, 'utf8').toString('
 function buildRawMessage({ from, to, subject, text, html }) {
   const boundary = `tarot-${Date.now().toString(36)}`
   const lines = [
-    `From: ${encodeHeader('塔羅占卜')} <${from}>`,
+    `From: ${encodeHeader('Tarot Bar')} <${from}>`,
     `To: <${to}>`,
     `Subject: ${encodeHeader(subject)}`,
     'MIME-Version: 1.0',

@@ -17,6 +17,7 @@ const DEFAULT_MODELS = {
 }
 const { startOfTaipeiDay, DAILY_LIMIT: STOCK_AI_DAILY_LIMIT } = require('./marketAnalysis')
 const { DAILY_LIMIT: NEWS_AI_DAILY_LIMIT } = require('./financeNews')
+const { TAROT_AI_DAILY_LIMITS } = require('../services/tarotAiQuota')
 
 const PAGE_SIZE_DEFAULT = 20
 const PAGE_SIZE_MAX = 100
@@ -153,12 +154,14 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
       const today = startOfTaipeiDay(nowMs)
       const since30 = new Date(nowMs - INACTIVE_DAYS * DAY_MS)
       const count = (Model, where) => (Model ? Model.countDocuments(where) : Promise.resolve(null))
-      const [readings, readings30, stockAiToday, newsAiToday, stockAnalyses, newsAnalyses, watches, activeAlerts, pushDevices, logs] =
+      const [readings, readings30, stockAiToday, newsAiToday, tarotAiToday, followUpAiToday, stockAnalyses, newsAnalyses, watches, activeAlerts, pushDevices, logs] =
         await Promise.all([
           count(models.Reading, { user: id }),
           count(models.Reading, { user: id, createdAt: { $gte: since30 } }),
           count(models.MarketAiUsage, { user: id, kind: 'stock', createdAt: { $gte: today } }),
           count(models.MarketAiUsage, { user: id, kind: 'news', createdAt: { $gte: today } }),
+          count(models.MarketAiUsage, { user: id, kind: 'tarot', createdAt: { $gte: today } }),
+          count(models.MarketAiUsage, { user: id, kind: 'followUp', createdAt: { $gte: today } }),
           count(models.MarketAnalysis, { user: id }),
           count(models.FinanceNewsAnalysis, { user: id }),
           count(models.MarketWatch, { user: id }),
@@ -177,6 +180,11 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
             newsToday: newsAiToday,
             stockLimit: user.role === 'admin' ? null : STOCK_AI_DAILY_LIMIT,
             newsLimit: user.role === 'admin' ? null : NEWS_AI_DAILY_LIMIT,
+            // 塔羅 AI 解讀與追問（v24 1-4）
+            tarotToday: tarotAiToday,
+            followUpToday: followUpAiToday,
+            tarotLimit: user.role === 'admin' ? null : TAROT_AI_DAILY_LIMITS.tarot,
+            followUpLimit: user.role === 'admin' ? null : TAROT_AI_DAILY_LIMITS.followUp,
             stockAnalyses,
             newsAnalyses,
           },
@@ -205,6 +213,11 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
 
         const user = await findTarget(req, res, { withPassword: true })
         if (!user) return
+        // 信箱沒驗證過的會員不能開通（v24 3-1）：可能是別人拿這個信箱註冊的。收回不受影響
+        if (req.body.allowed && user.role !== 'admin' && !user.emailVerified) {
+          res.status(409).json({ message: `這位會員的信箱還沒驗證，不能開通${label}。請他到帳號設定頁重寄驗證信。` })
+          return
+        }
 
         // admin 本來就有權限，不需要也不應該被這支關掉
         if (user.role === 'admin') {

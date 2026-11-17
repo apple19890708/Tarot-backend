@@ -159,6 +159,10 @@ test('重設密碼：有效連結可以設新密碼且只能用一次；過期�
     assert.equal(await comparePassword('brand-new-password', Users.rows[0].passwordHash), true)
     // 改了密碼，之前發出的登入憑證全部失效（版本號加 1）
     assert.equal(Users.rows[0].tokenVersion, 1)
+    // 收得到重設信＝信箱是本人的（v24 1-1），並寄一封「密碼已重設」的通知信（v24 2-2）
+    assert.equal(Users.rows[0].emailVerified, true)
+    assert.equal(mailer.sent.length, 2)
+    assert.match(mailer.sent[1].subject, /密碼已重設/)
     // 用過就失效
     assert.equal((await post('/reset-password', { token, password: 'another-password' })).status, 400)
     assert.deepEqual(await (await fetch(`${base}/reset-password/${token}`)).json(), { valid: false })
@@ -166,7 +170,7 @@ test('重設密碼：有效連結可以設新密碼且只能用一次；過期�
     // 過期：30 分鐘後
     clock += 6 * 60 * 1000
     await post('/forgot-password', { email: 'amy@example.com' })
-    const late = mailer.sent[1].text.match(/token=([\w-]+)/)[1]
+    const late = mailer.sent[2].text.match(/token=([\w-]+)/)[1]
     clock += 31 * 60 * 1000
     assert.equal((await post('/reset-password', { token: late, password: 'too-late-password' })).status, 400)
   })
