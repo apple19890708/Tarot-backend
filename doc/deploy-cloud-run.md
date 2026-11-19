@@ -252,3 +252,4 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 | `OPENROUTER_REASONING_EFFORT` | 推理深度 `low`／`medium`／`high`，所有 AI 共用 | 已設 `medium`（2026-11-14） |
 | `OPENROUTER_MARKET_MODEL` | 個股 AI 分析、財經新聞 AI 分析 | 已設 `anthropic/claude-sonnet-5.5`（2026-11-14，先設 Opus 5.5 後改回 Sonnet 5.5）；沒設時和 `OPENROUTER_MODEL` 相同 |
 | `OPENROUTER_FALLBACK_MODEL` | 主模型出錯時 OpenRouter 自動改用的模型 | 未設，預設 `anthropic/claude-opus-5.5` |
+| `OPENROUTER_REASONING_EFFORT_LARGE` | 塔羅牌 6 張以上、或追問兩次以上時改用的推理深度（v25 階段 5） | 未設＝和上面相同；要先用評估比較過再設 |

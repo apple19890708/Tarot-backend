@@ -370,7 +370,9 @@ test('市場：給 AI 的資料段包含時間、報價、指標與備註', () =
 })
 
 test('市場：有市場資料時才附加股市規則與 market_data 區塊', () => {
-  assert.equal(buildSystemPrompt(null), SYSTEM_PROMPT)
+  // v25：沒有市場資料、一般問題時只有共用的段落
+  assert.equal(buildSystemPrompt(null), require('../src/services/narrationService').BASE_PROMPT)
+  assert.ok(SYSTEM_PROMPT.startsWith(buildSystemPrompt(null)))
   const marketPrompt = buildSystemPrompt(SAMPLE_SNAPSHOT)
   assert.match(marketPrompt, /前半是塔羅解牌、後半是市場數據/)
   // 2026-11-12：開場以牌面為主、每張牌都要解、解牌不帶數據；情境與操作排在行情現況、技術面前面；沒有回測與模型那一節
@@ -432,4 +434,55 @@ test('大盤概況：外部來源一直沒回應時，各區塊逾時後照樣�
   assert.equal(await service.getMarketOverview(), overview)
   clock += 61 * 1000
   assert.notEqual(await settle(service.getMarketOverview()), overview)
+})
+
+test('市場：上櫃清單暫時失敗時不能快取 12 小時；沿用上一次的上櫃清單，10 分鐘後重抓（2026-11-19）', async () => {
+  let clock = Date.parse('2026-11-19T02:00:00Z')
+  let tpexDown = true
+  const tpexList = [{ SecuritiesCompanyCode: '6488', CompanyName: '環球晶' }]
+  const { impl, calls } = fakeFetch([
+    ['https://openapi.twse.com.tw', [{ Code: '2330', Name: '台積電' }]],
+    ['https://www.tpex.org.tw', () => (tpexDown ? new Error('timeout') : tpexList)],
+  ])
+  const service = createMarketService({ fetchImpl: impl, now: () => clock })
+  // 第一次就失敗、沒有舊清單：上市照常，上櫃暫時查不到
+  assert.equal((await service.resolveTarget('2330', 'tw'))?.code, '2330')
+  assert.equal(await service.resolveTarget('6488', 'tw'), null)
+  // 10 分鐘後重抓，上櫃恢復
+  tpexDown = false
+  clock += 11 * 60 * 1000
+  assert.equal((await service.resolveTarget('6488', 'tw'))?.code, '6488')
+  // 12 小時後完整清單過期；這次上櫃又失敗，要沿用上一次的上櫃清單，不能讓環球晶消失
+  tpexDown = true
+  clock += 13 * 60 * 60 * 1000
+  assert.equal((await service.resolveTarget('6488', 'tw'))?.code, '6488')
+  const tpexCalls = calls.filter((url) => url.startsWith('https://www.tpex.org.tw')).length
+  assert.ok(tpexCalls >= 3, `上櫃清單要重抓，實際抓了 ${tpexCalls} 次`)
+})
+
+test('個股 AI 的回測結論要寫出和平常比較的結果（2026-11-19：AI 寫成「落在合理範圍內，結論是偏跌」）', () => {
+  const signal = (verdict) => ({ label: '月線（MA20）', value: '跌破', occurrences: 68, sufficient: true, consistent: true, horizons: [{ days: 10, winRate: 47.1, avgReturn: -0.36, worst: -31.67 }], verdict })
+  const research = {
+    backtest: {
+      baseline: [{ days: 10, winRate: 55.6, avgReturn: 2.45 }],
+      minSamples: 5,
+      signals: [
+        signal({ counted: true, direction: -1, reason: 'edge', interval: { low: 39.5, high: 54.8 } }),
+        signal({ counted: true, direction: 0, reason: 'noEdge', interval: { low: 38.6, high: 57.2 } }),
+      ],
+    },
+    strategies: null,
+    prediction: null,
+  }
+  const text = formatMarketForPrompt({ ...SAMPLE_SNAPSHOT, items: SAMPLE_SNAPSHOT.items.map((item) => ({ ...item, research })) })
+  assert.match(text, /合理範圍 39\.5～54\.8%，整個範圍都低於平常的 55\.6%，結論：之後偏跌/)
+  assert.match(text, /合理範圍 38\.6～57\.2%，平常的 55\.6% 落在範圍內，結論：沒有明顯優勢/)
+})
+
+test('估值：沒配息寫「沒有配息」、沒有本益比寫「無法比較」，不寫「—」或「高於 0%」（2026-11-19，6547）', () => {
+  const valuation = { pe: null, pePercentile: null, dividendYield: 0, yieldPercentile: 0, pb: 3.57, pbPercentile: 86, industry: { label: '生技醫療', count: 99, pePercentile: null, yieldPercentile: 0, pbPercentile: 83 } }
+  const text = formatMarketForPrompt({ ...SAMPLE_SNAPSHOT, items: SAMPLE_SNAPSHOT.items.map((item) => ({ ...item, valuation })) })
+  assert.match(text, /估值：本益比 無；殖利率 0%（近一年沒有配息）；股價淨值比 3\.57，高於 86% 的上市櫃公司/)
+  assert.match(text, /同產業（生技醫療，99 家）比較：本益比無法比較、殖利率沒有配息、股價淨值比高於 83%/)
+  assert.doesNotMatch(text, /—|高於 0%/)
 })

@@ -6,6 +6,7 @@ const express = require('express')
 const mongoose = require('mongoose')
 
 const ReadingModel = require('../models/Reading')
+const { FEEDBACK_VALUES, FEEDBACK_REASONS } = ReadingModel
 const spreads = require('../data/spreads')
 const { loadCardsInOrder: defaultLoadCardsInOrder } = require('../services/cardLoader')
 const { buildReadingWithDictionary } = require('../services/readingService')
@@ -213,6 +214,7 @@ function createReadingsRouter({
               // 涵蓋了幾次追問（0＝舊資料沒記，前端當成全部涵蓋）
               rounds: record.followUpNarration.rounds || 0,
               createdAt: record.followUpNarration.createdAt,
+              feedback: toFeedbackJSON(record.followUpNarration.feedback),
             }
           : null,
         narration: record.narration
@@ -221,6 +223,7 @@ function createReadingsRouter({
               model: record.narration.model || '',
               market: record.narration.market || null,
               createdAt: record.narration.createdAt,
+              feedback: toFeedbackJSON(record.narration.feedback),
             }
           : null,
       })
@@ -257,9 +260,51 @@ function createReadingsRouter({
         res.status(400).json({ message: '沒有 AI 解讀內容。' })
         return
       }
+      // 後端已經存回同一篇、前端又補存一次時，保留使用者在中間按的回饋（api-reviewer L5）
+      if (record.narration?.text === narration.text && record.narration.feedback) {
+        narration.feedback = record.narration.feedback
+      }
       record.narration = narration
       await record.save()
       res.json({ saved: true })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  // 使用者對 AI 解讀的回饋（v25 階段 4）：有幫助／沒幫助（＋原因），value 為 null 時清掉。
+  // body：{ target: 'narration' | 'followUp', value: 'up' | 'down' | null, reason?: FEEDBACK_REASONS 其中一個 }
+  // 只改回饋，不動解讀文字（檢查結果與提示詞版本也不會重算）
+  router.put('/:id/narration-feedback', requireAuth, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) {
+        return
+      }
+      const body = req.body || {}
+      const field = body.target === 'followUp' ? 'followUpNarration' : body.target === 'narration' ? 'narration' : null
+      if (!field) {
+        res.status(400).json({ message: '不知道是哪一篇 AI 解讀的回饋。' })
+        return
+      }
+      const value = body.value === null ? null : FEEDBACK_VALUES.includes(body.value) ? body.value : undefined
+      if (value === undefined) {
+        res.status(400).json({ message: '回饋只能是有幫助或沒幫助。' })
+        return
+      }
+      // 原因只在「沒幫助」時收；不認得的原因當成沒選
+      const reason = value === 'down' && FEEDBACK_REASONS.includes(body.reason) ? body.reason : null
+      const record = await findOwnReading(Reading, req.params.id, req.auth.userId)
+      if (!record) {
+        res.status(404).json({ message: '找不到這筆紀錄。' })
+        return
+      }
+      if (!record[field]?.text) {
+        res.status(409).json({ message: '這筆紀錄還沒有 AI 解讀。' })
+        return
+      }
+      record[field].feedback = value ? { value, reason, at: new Date() } : null
+      await record.save()
+      res.json({ saved: true, feedback: toFeedbackJSON(record[field].feedback) })
     } catch (error) {
       next(error)
     }
@@ -297,6 +342,10 @@ function createReadingsRouter({
           return
         }
         nextNarration = narration ? { ...narration, rounds: followUps.length } : null
+        // 同一篇回答再存一次時保留回饋（同上）
+        if (nextNarration && record.followUpNarration?.text === nextNarration.text && record.followUpNarration.feedback) {
+          nextNarration.feedback = record.followUpNarration.feedback
+        }
       }
       const relation = followUpRelation(record.followUps, followUps)
       record.followUps = followUps.length > 0 ? mergeFollowUpRecords(record.followUps, followUps) : undefined
@@ -385,6 +434,11 @@ function resolveNarration(raw, { allowMarket = false } = {}) {
   const model = typeof raw.model === 'string' ? raw.model.slice(0, 100) : ''
 
   return { narration: { text, model, market: allowMarket ? resolveMarket(raw.market) : null, createdAt: new Date() } }
+}
+
+// 回饋給前端的樣子（沒有回饋時為 null）
+function toFeedbackJSON(feedback) {
+  return feedback?.value ? { value: feedback.value, reason: feedback.reason || null, at: feedback.at } : null
 }
 
 // 追問的 AI 延伸回答：規則同 narration，但不收行情資料

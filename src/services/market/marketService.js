@@ -136,6 +136,8 @@ const CACHE_MAX_ENTRIES = 500
 const SEARCH_CACHE_MAX_ENTRIES = 200
 // 外部來源失敗（含查無代號）時，這段時間內不再重打，避免被限流時越打越糟
 const FAILURE_TTL = 60 * 1000
+// 股票清單只抓到上市或上櫃其中一邊時，這份不完整的清單只快取這麼久，之後重抓
+const DIRECTORY_PARTIAL_TTL = 10 * 60 * 1000
 // 自訂追蹤一次最多同時查幾檔的歷史資料
 const WATCH_CONCURRENCY = 5
 // 選股技術面的歷史資料快取筆數（每筆 6 個月日 K，很小）
@@ -250,8 +252,20 @@ function createMarketService({ fetchImpl = (...args) => fetch(...args), now = ()
       return { entries: [], nameIndex: [] }
     }
 
+    // 只有一邊成功（2026-11-19 檢查個股分析時遇到上櫃清單暫時失敗）：以前照樣快取 12 小時，
+    // 這段時間所有上櫃股都「找不到這檔台股」。改成失敗那一邊沿用上一次的清單，並且只快取 DIRECTORY_PARTIAL_TTL 就重抓
+    const twseOk = twse.status === 'fulfilled' && Array.isArray(twse.value)
+    const tpexOk = tpex.status === 'fulfilled' && Array.isArray(tpex.value)
+    const partial = !twseOk || !tpexOk
+    if (partial) {
+      const failedExchange = twseOk ? 'otc' : 'tse'
+      const kept = (cache.stale('directory')?.entries || []).filter((entry) => entry.exchange === failedExchange)
+      entries.push(...kept)
+      console.error(`${failedExchange === 'otc' ? '上櫃' : '上市'}股票清單載入失敗，${kept.length ? '先沿用上一次的清單' : '暫時查不到這個市場'}：`, (twseOk ? tpex : twse).reason?.message)
+    }
+
     const directory = { entries, nameIndex: buildNameIndex(entries) }
-    cache.set('directory', directory, TTL.directory)
+    cache.set('directory', directory, partial ? DIRECTORY_PARTIAL_TTL : TTL.directory)
     return directory
   }
 
@@ -1605,14 +1619,18 @@ function formatItem(item, { research = true } = {}) {
   if (item.valuation) {
     const v = item.valuation
     const pct = (p) => (p === null ? '' : `，高於 ${p}% 的上市櫃公司`)
+    // 2026-11-19（100 支股票檢查，6547 高端疫苗）：沒配息時寫成「殖利率 0%，高於 0% 的上市櫃公司」、
+    // 同產業寫成「本益比—」，AI 看不懂。沒配息直接講沒配息，沒有數字的講「無法比較」
+    const noDividend = v.dividendYield === 0
+    const yieldText = v.dividendYield === null || v.dividendYield === undefined ? '無' : noDividend ? '0%（近一年沒有配息）' : `${v.dividendYield}%${pct(v.yieldPercentile)}`
     lines.push(
-      `估值：本益比 ${v.pe ?? '無'}${v.pe ? ` 倍${pct(v.pePercentile)}` : ''}；殖利率 ${v.dividendYield ?? '—'}%${pct(v.yieldPercentile)}；股價淨值比 ${v.pb ?? '—'}${pct(v.pbPercentile)}`,
+      `估值：本益比 ${v.pe ?? '無'}${v.pe ? ` 倍${pct(v.pePercentile)}` : ''}；殖利率 ${yieldText}；股價淨值比 ${v.pb ?? '無'}${v.pb ? pct(v.pbPercentile) : ''}`,
     )
     // 同產業比較：判讀（偏貴、偏便宜）以這組為準
     if (v.industry) {
-      const peer = (p) => (p === null ? '—' : `高於 ${p}%`)
+      const peer = (p) => (p === null || p === undefined ? '無法比較' : `高於 ${p}%`)
       lines.push(
-        `同產業（${v.industry.label}，${v.industry.count} 家）比較：本益比${peer(v.industry.pePercentile)}、殖利率${peer(v.industry.yieldPercentile)}、股價淨值比${peer(v.industry.pbPercentile)}；判斷貴或便宜以同產業為準`,
+        `同產業（${v.industry.label}，${v.industry.count} 家）比較：本益比${peer(v.industry.pePercentile)}、殖利率${noDividend ? '沒有配息' : peer(v.industry.yieldPercentile)}、股價淨值比${peer(v.industry.pbPercentile)}；判斷貴或便宜以同產業為準`,
       )
     }
   }
@@ -1643,9 +1661,18 @@ function formatResearch({ backtest, strategies, prediction }) {
       const note = (signal.sufficient ? '' : `（樣本不足 ${backtest.minSamples} 次，僅供參考）`) + consistency
       // 結論以 backtest.js 的 judgeSignal 為準，AI 不要自己用差幾個百分點重判
       const verdict = signal.verdict
+      // 寫出拿來比的「平常」是多少，以及範圍在它的哪一邊。只寫範圍時 AI 會寫成「47.1% 落在合理範圍內，結論是偏跌」，
+      // 讀起來前後矛盾（2026-11-19 檢查個股 AI 分析時看到）；結論其實是「整個範圍都低於平常」
+      const base10 = backtest.baseline.find((b) => b.days === 10)?.winRate ?? null
+      const sideText =
+        base10 === null
+          ? ''
+          : verdict?.reason === 'edge'
+            ? `，整個範圍都${verdict.direction > 0 ? '高於' : '低於'}平常的 ${pct(base10)}`
+            : `，平常的 ${pct(base10)} 落在範圍內`
       const verdictText =
         verdict?.counted && verdict.interval
-          ? `；10 日上漲的合理範圍 ${verdict.interval.low}～${verdict.interval.high}%，結論：${
+          ? `；10 日上漲的合理範圍 ${verdict.interval.low}～${verdict.interval.high}%${verdict.reason === 'horizonConflict' ? '' : sideText}，結論：${
               { edge: verdict.direction > 0 ? '之後偏漲' : '之後偏跌', noEdge: '沒有明顯優勢', horizonConflict: '5／20 日方向不一致，沒有明顯優勢' }[verdict.reason]
             }`
           : ''

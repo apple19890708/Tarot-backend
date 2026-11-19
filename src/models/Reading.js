@@ -1,4 +1,26 @@
 const mongoose = require('mongoose')
+const { checkNarration, PROMPT_VERSION } = require('../services/narrationCheck')
+const { analyzeQuestionType } = require('../services/rules/questionType')
+const { isTimingQuestion } = require('../services/rules/timingRules')
+
+// v25 階段 4：使用者對 AI 解讀的回饋（有幫助／沒幫助＋原因）
+const FEEDBACK_VALUES = ['up', 'down']
+const FEEDBACK_REASONS = ['off-topic', 'vague', 'timing', 'too-long', 'other']
+const feedbackSchema = new mongoose.Schema(
+  {
+    value: { type: String, enum: FEEDBACK_VALUES, required: true },
+    reason: { type: String, enum: [...FEEDBACK_REASONS, null], default: null },
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false },
+)
+
+// v25 階段 2：寫完的程式檢查結果與當時的提示詞版本（存檔前自動算，見下方 pre('validate')）
+const qualityFields = {
+  checks: { type: [String], default: undefined },
+  promptVersion: { type: Number, default: null },
+  feedback: { type: feedbackSchema, default: null },
+}
 
 // 每位使用者保留的紀錄上限。超過就從最舊的開始刪，避免單一帳號無限成長。
 const MAX_READINGS_PER_USER = 100
@@ -44,6 +66,7 @@ const readingSchema = new mongoose.Schema(
           // 解讀當下查到的市場資料（股市問題才有）。之後回頭看可以對照當時的數字與後來的走勢
           market: { type: mongoose.Schema.Types.Mixed, default: null },
           createdAt: { type: Date, default: Date.now },
+          ...qualityFields,
         },
         { _id: false },
       ),
@@ -73,6 +96,7 @@ const readingSchema = new mongoose.Schema(
           // 寫的時候涵蓋了幾次追問；之後又追問的話，畫面要提示這篇還沒包含新的
           rounds: { type: Number, default: 0 },
           createdAt: { type: Date, default: Date.now },
+          ...qualityFields,
         },
         { _id: false },
       ),
@@ -81,6 +105,32 @@ const readingSchema = new mongoose.Schema(
   },
   { timestamps: true },
 )
+
+// 解讀文字是新的（新紀錄、重新產生、補存）時才重算檢查與記下提示詞版本；
+// 只改回饋時文字沒變，不能把舊解讀標成新版本
+readingSchema.pre('validate', function assessNarrations() {
+  if (this.narration?.text && (this.isNew || this.isModified('narration.text'))) {
+    this.narration.checks = checkNarration(this.narration.text, {
+      kinds: analyzeQuestionType({ question: this.question }).kinds,
+      cardCount: this.cards.length,
+      // 行情資料太大或格式不對時不會存，但文字仍是股市版的結構，所以也看類別（api-reviewer L2）
+      market: Boolean(this.narration.market) || this.domain === 'stock',
+    })
+    this.narration.promptVersion = PROMPT_VERSION
+  }
+  if (this.followUpNarration?.text && (this.isNew || this.isModified('followUpNarration.text'))) {
+    // 只看這篇回答涵蓋的那幾次追問：寫的途中又追問時，紀錄裡的追問會比回答多（api-reviewer L1）
+    const all = Array.isArray(this.followUps) ? this.followUps : []
+    const rounds = this.followUpNarration.rounds || all.length
+    const covered = all.slice(0, rounds)
+    this.followUpNarration.checks = checkNarration(this.followUpNarration.text, {
+      kinds: covered.some((item) => isTimingQuestion(item.question)) ? ['timing'] : [],
+      followUp: true,
+      rounds,
+    })
+    this.followUpNarration.promptVersion = PROMPT_VERSION
+  }
+})
 
 // 列表固定以使用者 ＋ 時間倒序查詢
 readingSchema.index({ user: 1, createdAt: -1 })
@@ -109,3 +159,5 @@ const Reading = mongoose.model('Reading', readingSchema)
 
 module.exports = Reading
 module.exports.MAX_READINGS_PER_USER = MAX_READINGS_PER_USER
+module.exports.FEEDBACK_VALUES = FEEDBACK_VALUES
+module.exports.FEEDBACK_REASONS = FEEDBACK_REASONS

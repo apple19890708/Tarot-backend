@@ -895,7 +895,8 @@ test('v11：走向只看時間位置，負面影響這類格子不串進箭頭',
     ['past', 'present', 'future', 'outcome'],
   )
   // 問題、負面影響、正面影響只列出，不進箭頭
-  assert.match(stage.text, /其他格不是時間點，不算進走向：.*負面影響/)
+  assert.match(stage.text, /其他位置的數字：.*負面影響/)
+  assert.doesNotMatch(stage.text, /不算進走向/)
   const arrowPart = stage.text.split('。')[0]
   assert.ok(!arrowPart.includes('負面影響'), arrowPart)
 

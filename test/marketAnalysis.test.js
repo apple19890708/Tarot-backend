@@ -336,3 +336,10 @@ test('任何台股的個股分析：沒追蹤的沒有持股、watchId 是 null�
     assert.equal(again.latest.text, '## 現況\n偏多。')
   })
 })
+
+test('個股 AI 提示詞：方向照抄操作建議（觀望不能寫成偏空）、回測照資料的結論、不用 5 個百分點重判（2026-11-19）', () => {
+  assert.match(STOCK_ANALYSIS_PROMPT, /照抄操作建議的方向/)
+  assert.match(STOCK_ANALYSIS_PROMPT, /操作建議是觀望時就寫觀望/)
+  assert.match(STOCK_ANALYSIS_PROMPT, /照資料裡每個訊號的「結論」寫/)
+  assert.doesNotMatch(STOCK_ANALYSIS_PROMPT, /差距不到 5 個百分點/)
+})

@@ -4,6 +4,7 @@ const {
   NUMBER_STAGES,
   DIRECTION_LABELS,
   YES_NO_VERDICT_LABELS,
+  ADVICE_VERDICT_LABELS,
   DIMENSION_LABELS,
   QUANT,
 } = require('../data/ruleConfig')
@@ -280,6 +281,29 @@ const COURT_RANK_PERSONA = {
   king: '像個拿主意、扛責任的人',
 }
 
+// 皇后的作風依花色差很多（寶劍皇后是講話直接、判斷清楚，不是「用感受和照顧」），
+// 2026-11-19 前四個花色共用 cups 的說法，改成依花色；其他階級各花色差異不大，維持共用
+const QUEEN_PERSONA_BY_SUIT = {
+  wands: '像個用自信和熱情帶動大家的人',
+  cups: '像個用感受和照顧來掌握局面的人',
+  swords: '像個用清楚的判斷、直接的話來掌握局面的人',
+  pentacles: '像個用務實和把生活照顧好來掌握局面的人',
+}
+const QUEEN_REVERSED_BY_SUIT = {
+  wands: '逆位時自信容易變成想掌控一切，或表面強勢、心裡不安',
+  cups: '逆位時感受容易變成情緒化，照顧變成控制或疏遠',
+  swords: '逆位時清楚容易變成尖銳、冷淡，用理性把人推開',
+  pentacles: '逆位時照顧容易變成操心過度，或只顧著守住現有的東西',
+}
+
+function courtPersona(rank, suit) {
+  return (rank === 'queen' && QUEEN_PERSONA_BY_SUIT[suit]) || COURT_RANK_PERSONA[rank]
+}
+
+function courtReversed(rank, suit) {
+  return (rank === 'queen' && QUEEN_REVERSED_BY_SUIT[suit]) || COURT_RANK_REVERSED[rank]
+}
+
 // 宮廷牌所在的領域。SUITS.covers（感情和人、錢和實際的東西）接「在…上」讀起來不順，另外寫
 const COURT_ARENA = {
   wands: '在做事上',
@@ -347,7 +371,7 @@ function buildCourtText(court, entries, quant, showRole = false) {
   const entry = entries[court.index]
   const contribution = contributionOf(quant, court.index)
   const reversed = entry.orientation === 'reversed'
-  const lines = [`${cardLabel(entry)}：${COURT_ARENA[entry.profile.suit]}，${COURT_RANK_PERSONA[court.rank]}。`]
+  const lines = [`${cardLabel(entry)}：${COURT_ARENA[entry.profile.suit]}，${courtPersona(court.rank, entry.profile.suit)}。`]
 
   const level = contribution ? shareLevelOf(contribution.share).level : 'support'
   const notable = level !== 'support'
@@ -357,11 +381,11 @@ function buildCourtText(court, entries, quant, showRole = false) {
     const impact = shareText(contribution.share)
     lines.push(
       contribution.share > 0
-        ? `${COURT_RANK_REVERSED[court.rank]}；但整體來說，這張${level === 'lead' ? '仍' : '還是'}${impact}。`
-        : `${COURT_RANK_REVERSED[court.rank]}，這張${impact}。`,
+        ? `${courtReversed(court.rank, entry.profile.suit)}；但整體來說，這張${level === 'lead' ? '仍' : '還是'}${impact}。`
+        : `${courtReversed(court.rank, entry.profile.suit)}，這張${impact}。`,
     )
   } else if (reversed) {
-    lines.push(`${COURT_RANK_REVERSED[court.rank]}。`)
+    lines.push(`${courtReversed(court.rank, entry.profile.suit)}。`)
   } else if (notable) {
     // 階級輕（侍者）卻拉最多時用轉折
     const turn = !RANK_IS_HEAVY[court.rank] && level === 'lead' ? '不過這次' : '這次'
@@ -408,7 +432,7 @@ function buildCourtSummary(courts, entries, quant) {
 
 // 同型矛盾可能一次出現好幾組，句型輪替，不要整段都是同一句話
 const ENHANCE_BLOCKED_PATTERNS = [
-  (a, b, blocked) => `${a}和${b}本來能互相幫上忙，但${blocked}是逆位，這份助力現在使不出來。`,
+  (a, b, blocked) => `${a}和${b}本來能互相幫上忙，但${blocked}是逆位，現在還幫不上忙。`,
   (a, b, blocked) => `${a}和${b}是同一股力量，可惜${blocked}逆位，兩邊串不起來。`,
   (a, b, blocked) => `${a}原本接得上${b}，但${blocked}逆位，接力到這裡斷了。`,
 ]
@@ -420,7 +444,8 @@ function distanceNote(conflict, entries) {
   if (gap < 3 || !entries[conflict.from].hasPosition) {
     return ''
   }
-  return '這兩格隔得遠，是跨越好幾個階段的呼應，不是接連發生的事；'
+  // 2026-11-19：原本「是跨越好幾個階段的呼應」是規則用語，AI 會照抄，改成口語
+  return '這兩張中間隔了好幾步，不是緊接著發生的；'
 }
 
 // 矛盾要講得出「實際上會怎樣」：點名位置、不用系統術語、講後果而不只是狀態
@@ -528,9 +553,9 @@ function buildPositionText(finding, entries) {
     case 'supportBlocked':
       return `${a}：幫得上你的力量是有的，只是現在還沒真的出手。`
     case 'supportHollow':
-      return `${a}：這格是助力，抽到的卻是偏負面的牌——幫你的不會是順順的支持，而是一次打擊或被迫面對的事，熬過去才會發現它推了你一把。`
+      return `${a}：這格是幫你一把的位置，抽到的卻是偏負面的牌——幫你的不會是順順的支持，而是一次打擊或被迫面對的事，熬過去才會發現它推了你一把。`
     case 'supportHollowMild':
-      return `${a}：這格是助力，牌意有點猶豫——幫助會來，但要你先把卡住的那一點想清楚，它才幫得上。`
+      return `${a}：這格是幫你一把的位置，牌意有點猶豫——幫助會來，但要你先把卡住的那一點想清楚，它才幫得上。`
 
     // 阻力位（負面影響）
     case 'negativeActive':
@@ -586,9 +611,10 @@ function buildPositionText(finding, entries) {
 
     // 隱藏的影響
     case 'hiddenHelp':
-      return `${a}：你沒注意到的地方，其實有一股在幫你的力量。`
+      // 投資決策牌陣把這格叫「忽略的風險」，說法要兩種位置都通（2026-11-19）
+      return `${a}：你沒注意到的地方問題不大，甚至有幫得上你的東西。`
     case 'hiddenDormant':
-      return `${a}：有一份還沒浮上檯面的助力，時機到了才會發揮。`
+      return `${a}：有人或有件事幫得上你，只是還沒浮上檯面，時機到了才會出手。`
     case 'hiddenRisk':
       return `${a}：檯面下有你沒看到的麻煩，最好主動去查清楚，不要等它自己冒出來。`
     case 'hiddenDoubt':
@@ -705,7 +731,8 @@ function buildNumberStage(numberStage, entries, quant) {
   }
 
   if (others.length > 0) {
-    const head = timeline.length >= 2 ? '其他格不是時間點，不算進走向' : '各格'
+    // 2026-11-19：原本寫「其他格不是時間點，不算進走向」，AI 會照抄這句規則給提問者，改成只列出來
+    const head = timeline.length >= 2 ? '其他位置的數字' : '各格'
     pathLines.push(`${head}：${others.map((step) => stepText(step, entries)).join('、')}。`)
   }
 
@@ -791,7 +818,10 @@ function buildWeightText(weights, entries, dominance) {
 const NEGATIVE_DIRECTIONS = new Set(['strongNegative', 'negative'])
 
 // 規則 11：文字只講分級與傾向，不寫出 DI 數字（避免假精確感）
-function buildQuantText(quant, entries) {
+// 負面的位置：好牌落在這裡是「麻煩出在好事本身」（位置判定已經這樣寫），指向不能只說往順利拉
+const NEGATIVE_POSITION_KEYS = new Set(['negative', 'challenge'])
+
+function buildQuantText(quant, entries, positionKeys = null) {
   const lines = []
   const axes = Object.entries(quant.energy).sort((a, b) => b[1] - a[1])
   const [topAxis, secondAxis] = axes
@@ -835,7 +865,15 @@ function buildQuantText(quant, entries) {
       // 正位的牌卻往不順拉，光看「正位」像是前後矛盾，補一句原因在牌義本身
       const fromMeaning =
         top.share < 0 && entries[top.index].orientation === 'upright' ? '這張是正位，往不順拉是因為牌義本身就偏消極。' : ''
-      lines.push(`${toward}拉最多的是${card}。${fromMeaning}`)
+      // 逆位只打折、不翻向（規則 6），所以逆位的正向牌仍可能排第一；不講明會讀成「逆位戰車很順」（2026-11-19）
+      const discounted =
+        top.share > 0 && entries[top.index].orientation === 'reversed' ? '它是逆位，力道打了折，只是勉強往好的方向推。' : ''
+      // 2026-11-19：負面影響位的錢幣王牌被寫成「往順利拉最多」，和位置判定「麻煩出在好事本身」相反
+      const negativeSpot =
+        top.share > 0 && NEGATIVE_POSITION_KEYS.has(positionKeys?.[top.index])
+          ? `不過它落在${entries[top.index].label}，好事在這裡反而是要防的地方。`
+          : ''
+      lines.push(`${toward}拉最多的是${card}。${fromMeaning}${discounted}${negativeSpot}`)
     }
   }
 
@@ -956,15 +994,19 @@ const YES_MEANS_TEXT = {
   stay: (keyword) => `這是是非題，「會」指的是現狀會維持（${keyword}）。`,
   unfavorable: (keyword) => `這是是非題，「會」指的是你擔心的事會發生（${keyword}）。`,
   favorable: () => '這是是非題，「會」指的是事情會成。',
+  advice: () => '這是問該不該做的問題，「建議做」指的是這麼做會比較好。',
 }
 
 function buildYesNoText(yesNo, entries) {
   const name = (index) => `${entries[index].card.nameZh}${entries[index].orientation === 'reversed' ? '逆位' : '正位'}`
-  const lines = [YES_MEANS_TEXT[yesNo.yesMeans](yesNo.keyword), `牌面的答案：${YES_NO_VERDICT_LABELS[yesNo.verdict]}。`]
+  const advice = yesNo.yesMeans === 'advice'
+  const labels = advice ? ADVICE_VERDICT_LABELS : YES_NO_VERDICT_LABELS
+  const [yesWord, noWord] = advice ? ['建議做', '不建議'] : ['會', '不會']
+  const lines = [YES_MEANS_TEXT[yesNo.yesMeans](yesNo.keyword), `牌面的答案：${labels[yesNo.verdict]}。`]
   const towardYes = yesNo.contributions.find((item) => item.share > 0)
   const towardNo = yesNo.contributions.find((item) => item.share < 0)
-  if (towardYes) lines.push(`把答案往「會」拉最多的是${name(towardYes.index)}。`)
-  if (towardNo) lines.push(`往「不會」拉最多的是${name(towardNo.index)}。`)
+  if (towardYes) lines.push(`把答案往「${yesWord}」拉最多的是${name(towardYes.index)}。`)
+  if (towardNo) lines.push(`往「${noWord}」拉最多的是${name(towardNo.index)}。`)
   // 不寫「給不出答案」：兩邊力道相當，代表結果還握在提問者手上（2026-11-13 使用者要求給建設性的回覆）
   if (yesNo.verdict === 'unclear') lines.push('兩邊的力道相當，結果還沒定下來，接下來怎麼做會決定往哪邊走。')
   return lines.join('')
@@ -1015,12 +1057,15 @@ function formatAnalysis(result, rawEntries, pairTexts = null) {
       ? {
           ...result.quant,
           directionLabel: DIRECTION_LABELS[result.quant.direction],
-          text: buildQuantText(result.quant, entries),
+          text: buildQuantText(result.quant, entries, result.positionKeys),
         }
       : null,
     question: result.question ? { ...result.question, text: buildQuestionText(result.question) } : null,
     // 新增欄位（規則 13）：時間類問題的時間線索，只交給 AI；不是時間類問題時為 null
     timing: result.timing || null,
+    // 新增欄位（v25）：問題類型與最關鍵的牌，只交給 AI（決定系統提示放哪幾段）
+    questionType: result.questionType || null,
+    keyCards: result.keyCards || [],
     // 新增欄位（規則 12）：不是是非題時為 null
     yesNo: result.yesNo
       ? { ...result.yesNo, verdictLabel: YES_NO_VERDICT_LABELS[result.yesNo.verdict], text: buildYesNoText(result.yesNo, entries) }
@@ -1066,7 +1111,7 @@ const GUIDANCE_QUESTIONS = [
     fact: 'conflict',
     when: (ctx) => ctx.blockedConflict,
     ask: (ctx) =>
-      `${cardNameOnly(ctx.entries[ctx.blockedConflict.from])}那份使不出來的助力，是你還沒決定，還是在等別人表態？`,
+      `${cardNameOnly(ctx.entries[ctx.blockedConflict.from])}現在還幫不上忙，是你還沒決定，還是在等別人表態？`,
   },
   {
     // 影響結果最多的那張是逆位：力道出不來的原因在內還是在外
@@ -1134,7 +1179,7 @@ function lastCardText(last) {
   const name = `${last.label}落在${last.card.nameZh}${last.orientation === 'reversed' ? '逆位' : ''}`
   if (last.profile.kind === 'court') {
     const rank = last.profile.courtRank
-    const look = last.orientation === 'reversed' ? COURT_RANK_REVERSED[rank] : COURT_RANK_PERSONA[rank]
+    const look = last.orientation === 'reversed' ? courtReversed(rank, last.profile.suit) : courtPersona(rank, last.profile.suit)
     return `${name}：${COURT_ARENA[last.profile.suit]}，${look}。`
   }
   // 其他牌的牌義在牌卡上，這裡只指出要回頭看哪一張

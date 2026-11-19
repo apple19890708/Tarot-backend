@@ -289,7 +289,7 @@ test('時間類問題：辨識多久、什麼時候、何時；花色決定單�
   assert.match(getCardTiming(devil, profileOf(devil), U).text, /摩羯座.*12 月下旬到 1 月中旬/)
   const tower = major('The Tower', '塔', 16)
   assert.match(getCardTiming(tower, profileOf(tower), U).text, /突然/)
-  assert.match(getCardTiming(court('knight', 'wands'), profileOf(court('knight', 'wands')), U).text, /很快/)
+  assert.match(getCardTiming(court('knight', 'wands'), profileOf(court('knight', 'wands')), U).text, /^以天計（春天），在這個節奏裡算快的/)
 })
 
 test('時間推算：結果位置的牌是主要的時間牌；沒有位置時看最後一張；不是時間類問題回 null', () => {

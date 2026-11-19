@@ -2,7 +2,7 @@ const { analyzeCombination } = require('./combinationRules')
 const { formatAnalysis, buildGuidance } = require('./analysisFormatter')
 const { parseMeaningGroups, getCoreMessage } = require('./meaningSections')
 const { lookupPairs } = require('./pairDictionary')
-const { resolveRelationPairs } = require('./rules/relationPairs')
+const { resolveRelationPairs, relationsOfSpread } = require('./rules/relationPairs')
 
 function randomOrientation() {
   return Math.random() > 0.5 ? 'upright' : 'reversed'
@@ -89,7 +89,8 @@ function buildReading({
     entries: analysisEntries,
     question,
     positionKeys: positions ? entries.map((entry) => entry.position.key) : null,
-    relations: spread?.relations || null,
+    // 自訂位置有同名分組時，牌對改成組內＋組間（見 relationPairs.groupRelations）
+    relations: relationsOfSpread(spread),
     // 只有在每個位置都有權重時才採用，避免部分加權、部分均分造成比例失真
     positionWeights:
       positions && positions.every((position) => typeof position.weight === 'number')
@@ -126,7 +127,7 @@ async function buildReadingWithDictionary(options) {
 
   // 要查的配對必須和之後分析的配對一致。v6 之後牌陣可以宣告非相鄰的關係對
   // （例如直指核心的「問題核心 × 資源」），這裡若只查相鄰就會漏掉，辭典明明有卻退回規則文字。
-  const lookupTargets = resolveRelationPairs(cards.length, spread?.relations || null).map((pair) => ({
+  const lookupTargets = resolveRelationPairs(cards.length, relationsOfSpread(spread)).map((pair) => ({
     from: { slug: cards[pair.from].slug, orientation: orientations[pair.from] },
     to: { slug: cards[pair.to].slug, orientation: orientations[pair.to] },
   }))

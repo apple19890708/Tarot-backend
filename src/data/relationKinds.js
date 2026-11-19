@@ -31,6 +31,11 @@ const RELATION_KINDS = {
     label: '整體',
     frame: (a, b) => `從${a}到${b}這整條線`,
   },
+  // 自訂位置名稱相同的幾張牌（例如三張都叫「客觀事實」），是同一件事的不同面，不是前後關係
+  group: {
+    label: '同組',
+    frame: (a, b) => `${a}和${b}放在一起看`,
+  },
 }
 
 const DEFAULT_KIND = 'sequence'

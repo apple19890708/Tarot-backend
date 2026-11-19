@@ -15,11 +15,13 @@ const SUIT_TIMING = {
   pentacles: { unit: '年', season: '冬天', pace: '慢，要累積、按部就班' },
 }
 
+// 速度是「在這個花色的單位裡」相對的：錢幣騎士是以年計的事裡動得最快的，不是幾天內。
+// 2026-11-19 前寫成「很快…（以年計）」，同一句裡快和慢互相矛盾，改成先講單位再講相對速度
 const COURT_PACE = {
-  page: '剛起步，要先等一個消息或第一步',
-  knight: '很快，事情會突然動起來',
+  page: '要先等一個消息或第一步',
+  knight: '在這個節奏裡算快的，條件一到就會突然動起來',
   queen: '穩定醞釀，不急但會到',
-  king: '成熟、進展慢，要等局面定下來',
+  king: '在這個節奏裡偏慢，要等局面定下來',
 }
 
 // 大牌：星座的日期區間（約略，各年差一兩天），或沒有星座時的速度描述
@@ -145,7 +147,7 @@ function getCardTiming(card, profile, orientation, today = null) {
   const suit = SUIT_TIMING[profile.suit]
   if (!suit) return null
   if (profile.kind === 'court') {
-    return { kind: 'court', text: `${COURT_PACE[profile.courtRank] || '看人怎麼行動'}（以${suit.unit}計，${suit.season}）${delay}`, unit: suit.unit, season: suit.season }
+    return { kind: 'court', text: `以${suit.unit}計（${suit.season}），${COURT_PACE[profile.courtRank] || '看人怎麼行動'}${delay}`, unit: suit.unit, season: suit.season }
   }
   const amount = profile.pipNumber
   if (!Number.isInteger(amount) || amount < 1 || amount > 10) return null

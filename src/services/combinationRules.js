@@ -1,4 +1,4 @@
-const { SUITS, NUMBER_THEMES, OTHERS_KEYWORDS, getCardProfile } = require('../data/cardAttributes')
+const { SUITS, NUMBER_THEMES, OTHERS_KEYWORDS, OTHERS_PATTERNS, getCardProfile } = require('../data/cardAttributes')
 const {
   MAJOR_COUNT_FATE_THRESHOLD,
   MAJOR_RATIO_NATURAL,
@@ -14,6 +14,7 @@ const { analyzeWeights } = require('./rules/weightRules')
 const { analyzeQuant } = require('./rules/quantRules')
 const { analyzeYesNo } = require('./rules/yesNoRules')
 const { analyzeTiming } = require('./rules/timingRules')
+const { analyzeQuestionType, pickKeyCards } = require('./rules/questionType')
 const { resolveRelationPairs } = require('./rules/relationPairs')
 
 const DOMINANT_SUIT_MIN = 3
@@ -94,7 +95,7 @@ function analyzePair(from, to) {
 
 function hasOthersInQuestion(question) {
   const text = String(question || '').replace(/其他/g, '')
-  return OTHERS_KEYWORDS.some((keyword) => text.includes(keyword))
+  return OTHERS_KEYWORDS.some((keyword) => text.includes(keyword)) || OTHERS_PATTERNS.some((pattern) => pattern.test(text))
 }
 
 function pickFocus(items) {
@@ -234,6 +235,8 @@ function analyzeCombination({
   }
 
   return {
+    // 文字層要知道牌落在哪種位置（例如負面影響位的好牌，不能講成單純往順利拉）
+    positionKeys,
     theme: {
       focusIndex: focus.index,
       dominance,
@@ -259,6 +262,9 @@ function analyzeCombination({
     yesNo: analyzeYesNo({ question, items, positionKeys, positionWeights }),
     // 規則 13：時間類問題（多久、什麼時候…）的時間線索；不是時間類問題時為 null
     timing: analyzeTiming({ question, items, positionKeys }),
+    // v25：問題類型（決定系統提示放哪幾段）與這次最關鍵的牌（結果／未來位置＋焦點牌）
+    questionType: analyzeQuestionType({ question, domain: resolvedDomain, othersInvolved }),
+    keyCards: pickKeyCards({ positionKeys, focusIndex: focus.index, count: total }),
     positions: analyzePositions({ positionKeys, items }),
     numberStage: analyzeNumberStage(items, positionKeys),
     weights: analyzeWeights({

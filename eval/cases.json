@@ -1,0 +1,334 @@
+{
+  "note": "v25 塔羅 AI 評估題目。牌寫成「牌名＋正／逆」；spread 是 src/data/spreads.js 的 key，null＝自選牌。expect.yesNo：yes／no，只用來提醒人工對照，不是標準答案。followUps 的 base 指向前面的題目，會用那一題的 AI 解讀當作先前的解讀。題目都是編的或已匿名化，不含會員資料。",
+  "cases": [
+    {
+      "id": "yesno-ceo-2",
+      "question": "Nvdia 黃仁勳 會因為這次風波下台嗎",
+      "spread": null,
+      "cards": [
+        "權杖十逆",
+        "聖杯七正",
+        "聖杯國王逆"
+      ],
+      "expect": {
+        "yesNo": "yes"
+      },
+      "note": "2026-11-13 使用者回報的第二組，原本答不會"
+    },
+    {
+      "id": "yesno-ceo-1",
+      "question": "Nvdia 黃仁勳 會因為這次風波下台嗎",
+      "spread": null,
+      "cards": [
+        "錢幣皇后正",
+        "寶劍五逆",
+        "聖杯七正"
+      ],
+      "expect": {
+        "yesNo": "no"
+      },
+      "note": "2026-11-13 使用者回報的第一組"
+    },
+    {
+      "id": "yesno-interview",
+      "question": "這次面試會不會錄取？",
+      "spread": "action-outcome",
+      "cards": [
+        "錢幣三正",
+        "權杖八正",
+        "太陽正",
+        "錢幣八正"
+      ]
+    },
+    {
+      "id": "yesno-breakup",
+      "question": "我們會不會分手？",
+      "spread": "timeline",
+      "cards": [
+        "聖杯二逆",
+        "寶劍三正",
+        "聖杯八正"
+      ]
+    },
+    {
+      "id": "yesno-invest-loss",
+      "question": "這筆投資會不會虧錢？",
+      "spread": "investment-decision",
+      "cards": [
+        "錢幣五正",
+        "月亮正",
+        "錢幣王牌逆",
+        "錢幣四正",
+        "寶劍七正"
+      ]
+    },
+    {
+      "id": "yesno-layoff",
+      "question": "公司這次裁員會裁到我嗎？",
+      "spread": "cross",
+      "cards": [
+        "塔逆",
+        "寶劍十逆",
+        "錢幣五逆",
+        "死神正",
+        "寶劍六逆"
+      ]
+    },
+    {
+      "id": "yesno-exam",
+      "question": "這次考試能不能考上？",
+      "spread": "action-outcome",
+      "cards": [
+        "寶劍王牌正",
+        "錢幣八正",
+        "權杖六正",
+        "戰車逆"
+      ]
+    },
+    {
+      "id": "yesno-two-cards",
+      "question": "他會回來嗎",
+      "spread": null,
+      "cards": [
+        "聖杯八逆",
+        "審判正"
+      ]
+    },
+    {
+      "id": "timing-new-job",
+      "question": "什麼時候會找到新工作？",
+      "spread": "timeline",
+      "cards": [
+        "權杖四逆",
+        "錢幣騎士正",
+        "聖杯三正"
+      ]
+    },
+    {
+      "id": "timing-reply",
+      "question": "他多久會回訊息，會不會不回了？",
+      "spread": null,
+      "cards": [
+        "聖杯侍者正",
+        "權杖八逆",
+        "寶劍四正"
+      ]
+    },
+    {
+      "id": "timing-house",
+      "question": "房子什麼時候賣得掉？",
+      "spread": "cross",
+      "cards": [
+        "錢幣十逆",
+        "吊人正",
+        "錢幣四正",
+        "權杖六正",
+        "節制正"
+      ]
+    },
+    {
+      "id": "timing-love-majors",
+      "question": "我什麼時候會遇到對的人？",
+      "spread": "horseshoe",
+      "cards": [
+        "隱士正",
+        "戀人逆",
+        "月亮正",
+        "寶劍八正",
+        "聖杯王牌正",
+        "星星正",
+        "審判正"
+      ]
+    },
+    {
+      "id": "choice-startup",
+      "question": "該留在現在的公司還是去新創？",
+      "spread": "two-choice",
+      "cards": [
+        "權杖二正",
+        "錢幣九正",
+        "權杖騎士正",
+        "錢幣十正",
+        "塔正"
+      ]
+    },
+    {
+      "id": "choice-city",
+      "question": "台北還是台中，哪邊比較適合我發展？",
+      "spread": "core",
+      "cards": [
+        "錢幣六正",
+        "權杖五逆",
+        "寶劍二正",
+        "戰車正"
+      ]
+    },
+    {
+      "id": "relation-open",
+      "question": "我和他之間的關係接下來會怎麼走？",
+      "spread": "relationship",
+      "cards": [
+        "聖杯騎士正",
+        "聖杯二正",
+        "寶劍皇后正",
+        "寶劍國王逆",
+        "節制正",
+        "聖杯十正"
+      ]
+    },
+    {
+      "id": "relation-yesno",
+      "question": "他是不是還喜歡我？",
+      "spread": "relationship",
+      "cards": [
+        "聖杯九逆",
+        "聖杯六正",
+        "權杖皇后正",
+        "寶劍侍者逆",
+        "戀人正",
+        "聖杯四正"
+      ]
+    },
+    {
+      "id": "open-project",
+      "question": "新專案接下來要注意什麼？",
+      "spread": "core",
+      "cards": [
+        "錢幣二逆",
+        "寶劍騎士正",
+        "錢幣八正",
+        "魔術師正"
+      ]
+    },
+    {
+      "id": "open-celtic",
+      "question": "我下半年的整體運勢",
+      "spread": "celtic-cross",
+      "cards": [
+        "愚人正",
+        "寶劍九正",
+        "錢幣七正",
+        "權杖三正",
+        "女祭司正",
+        "權杖八正",
+        "力量逆",
+        "錢幣六逆",
+        "星星正",
+        "世界正"
+      ]
+    },
+    {
+      "id": "open-side-income",
+      "question": "這份副業收入能穩定下來嗎",
+      "spread": "action-outcome",
+      "cards": [
+        "錢幣騎士正",
+        "權杖七正",
+        "錢幣九正",
+        "正義正"
+      ]
+    },
+    {
+      "id": "open-family",
+      "question": "和家人的相處要怎麼改善？",
+      "spread": "guiding-star",
+      "cards": [
+        "聖杯五正",
+        "錢幣四逆",
+        "寶劍五正",
+        "聖杯皇后正",
+        "教皇正",
+        "聖杯六正",
+        "聖杯十正"
+      ]
+    },
+    {
+      "id": "open-health",
+      "question": "最近睡不好，身體有什麼要注意的？",
+      "spread": "timeline",
+      "cards": [
+        "寶劍九逆",
+        "權杖九逆",
+        "節制正"
+      ]
+    },
+    {
+      "id": "open-no-question",
+      "question": "",
+      "spread": null,
+      "cards": [
+        "命運之輪正",
+        "惡魔逆",
+        "權杖王牌正"
+      ]
+    },
+    {
+      "id": "custom-groups-stereotype",
+      "question": "我對一個人感到不舒服，但怕是自己的刻板印象造成，想了解真相",
+      "spread": null,
+      "positions": [
+        "主觀感受",
+        "主觀感受",
+        "客觀事實",
+        "客觀事實",
+        "客觀事實",
+        "塔羅建議"
+      ],
+      "cards": [
+        "錢幣九正",
+        "錢幣八逆",
+        "寶劍七正",
+        "聖杯王牌正",
+        "錢幣王牌逆",
+        "權杖侍者逆"
+      ],
+      "note": "2026-11-19 使用者的自訂位置分組。人工看：聖杯王牌要讀成提問者的直覺（客觀事實的一環），客觀事實三張各講一件事並串成推論；開場要回答「不是刻板印象」；宮廷牌以「那個人」為主"
+    }
+  ],
+  "followUps": [
+    {
+      "id": "follow-ceo-successor",
+      "base": "yesno-ceo-2",
+      "rounds": [
+        {
+          "question": "如果下台，接班的會是內部的人嗎？",
+          "cards": [
+            "權杖國王正"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "follow-job-two-rounds",
+      "base": "timing-new-job",
+      "rounds": [
+        {
+          "question": "新工作的薪水會比現在高嗎？",
+          "cards": [
+            "錢幣九正",
+            "錢幣六逆"
+          ]
+        },
+        {
+          "question": "那大概要等多久才會加薪？",
+          "cards": [
+            "寶劍騎士正"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "follow-relation-contact",
+      "base": "relation-open",
+      "rounds": [
+        {
+          "question": "我該主動聯絡他嗎？",
+          "cards": [
+            "權杖騎士逆",
+            "聖杯侍者正"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -162,7 +162,7 @@ const spreads = [
       { key: 'past', label: '過去影響', prompt: '該放下的舊影響', weight: 0.1, layout: { col: 2, row: 2 } },
       { key: 'negative', label: '負面影響', prompt: '需要看清與節制的能量', weight: 0.15, layout: { col: 3, row: 1 } },
       { key: 'present', label: '現在', prompt: '正在發生的事情', weight: 0.2, layout: { col: 3, row: 2 } },
-      { key: 'positive', label: '正面影響', prompt: '能支撐你的助力', weight: 0.15, layout: { col: 3, row: 3 } },
+      { key: 'positive', label: '正面影響', prompt: '能幫你一把的人或事', weight: 0.15, layout: { col: 3, row: 3 } },
       { key: 'future', label: '未來', prompt: '能量發展到高峰時的走向', weight: 0.15, layout: { col: 4, row: 2 } },
       { key: 'outcome', label: '終局', prompt: '這段經驗最後帶來的課題與收穫', weight: 0.15, layout: { col: 5, row: 2 } },
     ],

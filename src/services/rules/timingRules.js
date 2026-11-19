@@ -4,7 +4,7 @@
 const { getCardTiming } = require('../../data/cardTiming')
 const { taipeiDate } = require('../clock')
 
-const TIMING_PATTERN = /多久|什麼時候|甚麼時候|何時|幾時|哪時|多快|幾天|幾週|幾周|幾個月|幾年|要等|時間點|哪一天|哪個月|還要多|多長|多少時間|來得及|何日/
+const TIMING_PATTERN = /多久|什麼時候|甚麼時候|何時|幾時|哪時|多快|幾天|幾週|幾周|幾個月|幾年|要等多久|要等到|等多久|時間點|哪一天|哪個月|還要多|多長|多少時間|來得及|何日|幾號|幾月|哪天|哪段時間|哪段期間|哪個時候|哪時候|哪幾個月|哪一年/
 
 function isTimingQuestion(question) {
   return TIMING_PATTERN.test(String(question || ''))

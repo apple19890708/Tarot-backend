@@ -638,3 +638,67 @@ async function restoreForTest(record) {
   })
   return body
 }
+
+// ---- v25 階段 4：AI 解讀的回饋 ----
+async function putFeedback(base, id, body) {
+  return fetch(`${base}/api/readings/${id}/narration-feedback`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+test('回饋：存在自己紀錄的解讀或追問回答上；原因只在「沒幫助」時收；null 清掉', async () => {
+  let saves = 0
+  const record = makeRecord({
+    narration: { text: '解讀' },
+    followUpNarration: { text: '追問回答' },
+    save: async () => (saves += 1),
+  })
+  const Reading = makeFakeReading({ records: [record] })
+  await withServer(makeApp({ Reading }), async (base) => {
+    let response = await putFeedback(base, RECORD_ID, { target: 'narration', value: 'down', reason: 'timing' })
+    assert.strictEqual(response.status, 200)
+    assert.strictEqual((await response.json()).feedback.reason, 'timing')
+    assert.strictEqual(record.narration.feedback.value, 'down')
+
+    // 有幫助不收原因；不認得的原因當成沒選
+    await putFeedback(base, RECORD_ID, { target: 'followUp', value: 'up', reason: 'timing' })
+    assert.strictEqual(record.followUpNarration.feedback.value, 'up')
+    assert.strictEqual(record.followUpNarration.feedback.reason, null)
+    await putFeedback(base, RECORD_ID, { target: 'narration', value: 'down', reason: '亂寫' })
+    assert.strictEqual(record.narration.feedback.reason, null)
+
+    response = await putFeedback(base, RECORD_ID, { target: 'narration', value: null })
+    assert.strictEqual(response.status, 200)
+    assert.strictEqual(record.narration.feedback, null)
+    // 解讀文字不受影響
+    assert.strictEqual(record.narration.text, '解讀')
+  })
+  assert.strictEqual(saves, 4)
+  assert.strictEqual(String(Reading.calls.findOne[0].user), OWNER)
+})
+
+test('回饋：別人的紀錄 404、沒有解讀 409、值或對象不對 400，都不寫入', async () => {
+  let saves = 0
+  const record = makeRecord({ narration: null, save: async () => (saves += 1) })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    assert.strictEqual((await putFeedback(base, RECORD_ID, { target: 'narration', value: 'meh' })).status, 400)
+    assert.strictEqual((await putFeedback(base, RECORD_ID, { target: 'other', value: 'up' })).status, 400)
+    assert.strictEqual((await putFeedback(base, RECORD_ID, { target: 'narration', value: 'up' })).status, 409)
+  })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }), userId: OTHER }), async (base) => {
+    assert.strictEqual((await putFeedback(base, RECORD_ID, { target: 'narration', value: 'up' })).status, 404)
+  })
+  assert.strictEqual(saves, 0)
+})
+
+test('補存同一篇解讀時保留回饋；換成新的一篇就清掉', async () => {
+  const record = makeRecord({ narration: { text: '同一篇', feedback: { value: 'up', reason: null } }, save: async () => {} })
+  await withServer(makeApp({ Reading: makeFakeReading({ records: [record] }) }), async (base) => {
+    await putNarration(base, RECORD_ID, { text: '同一篇' })
+    assert.strictEqual(record.narration.feedback.value, 'up')
+    await putNarration(base, RECORD_ID, { text: '新的一篇' })
+    assert.strictEqual(record.narration.feedback, undefined)
+  })
+})
