@@ -6,12 +6,13 @@ on:
   pull_request:
     branches: [ main ]
 
+# 這個 repo 的根目錄就是後端專案，沒有 backend/ 子資料夾，
+# 所以不設 working-directory（原本設成 backend，每次都在 npm ci 之前就失敗）。
+# 後端部署在 Cloud Run（見 doc/deploy-cloud-run.md），這裡只負責把關：測試沒過就紅燈。
+# 原本的 Create Release（打包 backend/dist，但後端沒有 build 產物）與 Deploy to Render（已不使用）一併移除。
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -19,35 +20,13 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          # 與 package.json 的 engines（22.x）一致
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run lint
-        run: npm run lint --if-present
-
+      # 測試不需要 .env：用到 JWT 的測試會自己帶測試用密鑰，不連資料庫、不呼叫外部 AI
       - name: Run tests
-        run: npm test --if-present
-
-      - name: Build
-        run: npm run build --if-present
-
-      - name: Create Release
-        if: ${{ github.ref == 'refs/heads/main' }}
-        uses: ncipollo/release-action@v1
-        with:
-          tag: v${{ github.run_number }}
-          name: Backend Release ${{ github.run_number }}
-          files: backend/dist/**
-          draft: false
-          prerelease: false
-
-      - name: Deploy to Render
-        if: ${{ secrets.RENDER_API_KEY && secrets.RENDER_BACKEND_SERVICE_ID }}
-        run: |
-          curl -sS -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_BACKEND_SERVICE_ID }}/deploys" \
-            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            -H "Accept: application/json" \
-            -d '{}'
+        run: npm test

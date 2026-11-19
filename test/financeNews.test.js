@@ -352,7 +352,7 @@ const NEWS = [
   },
 ]
 
-function makeApp({ Model = fakeAnalysisModel(), role = 'member', aiAllowed = true, stream, news = NEWS, listCalls = [], MarketAiUsage = null, newsDigest = null } = {}) {
+function makeApp({ Model = fakeAnalysisModel(), role = 'member', aiAllowed = true, stream, news = NEWS, listCalls = [], MarketAiUsage = null, newsDigest = null, now } = {}) {
   const app = express()
   app.use(express.json())
   const auth = (req, _res, next) => {
@@ -382,6 +382,7 @@ function makeApp({ Model = fakeAnalysisModel(), role = 'member', aiAllowed = tru
       FinanceNewsAnalysis: Model,
       MarketAiUsage,
       newsDigest,
+      ...(now ? { now } : {}),
       ai: {
         isAvailable: () => true,
         stream:
@@ -508,15 +509,17 @@ test('POST /finance-news/analysis：範圍不正確 400、沒權限 403、沒有
     assert.equal(empty.status, 422)
   })
 
+  // 時間固定在台北今天中午，紀錄放在一小時前：一定算今天、也不在 10 分鐘冷卻內。
+  // 不能用實際時間：00:00～01:00 跑時一小時前是昨天（2026-11-08 凌晨失敗過），
+  // 改成「不早於 0 點」後，00:00～00:10 跑又會先撞到冷卻、回另一句話（2026-11-20 00:03 失敗過）。
+  const noon = startOfTaipeiDay(Date.now()).getTime() + 12 * 3600000
   const Model = fakeAnalysisModel()
   for (let i = 0; i < DAILY_LIMIT; i += 1) {
     const doc = new FinanceNewsAnalysis({ user: USER, text: 'x' })
-    // 一小時前，但不早於台北的今天 0 點：00:00～01:00 跑測試時，一小時前是昨天、不算今天的次數（2026-11-08 凌晨失敗過）。
-    // 不能直接用現在：會先撞到冷卻，回的是另一句話
-    doc.createdAt = new Date(Math.max(Date.now() - 60 * 60 * 1000, startOfTaipeiDay(Date.now()).getTime()))
+    doc.createdAt = new Date(noon - 60 * 60 * 1000)
     Model.docs.push(doc)
   }
-  await withServer(makeApp({ Model }), async (base) => {
+  await withServer(makeApp({ Model, now: () => noon }), async (base) => {
     const used = await fetch(`${base}/api/market/finance-news/analysis`, { method: 'POST' })
     assert.equal(used.status, 429)
     assert.match((await used.json()).message, /今天的新聞 AI 分析已用完/)
