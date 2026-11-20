@@ -16,6 +16,8 @@ const USER_DATA_MODELS = [
   'PasswordReset',
   'EmailVerification',
   'MarketAiUsage',
+  'DailyCard',
+  'JournalEntry',
 ]
 
 // models：{ 名稱: Model }，測試時換成假的

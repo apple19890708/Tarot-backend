@@ -68,6 +68,8 @@ function createMarketAnalysisRouter({
   ai,
   // AI 用量紀錄（每日次數）：AI 開始產生就記一筆，中途停止的也算。沒傳時改數存下來的分析（只有完整產生的）
   MarketAiUsage = null,
+  // 刪除分析（手動或超過上限汰除）時，它的日記一起刪（v26 計畫 2）；沒傳時略過（測試）
+  JournalEntry = null,
   now = () => Date.now(),
 }) {
   const router = express.Router()
@@ -330,7 +332,18 @@ function createMarketAnalysisRouter({
   async function trimOldest(userId) {
     const max = MarketAnalysis.MAX_ANALYSES_PER_USER || 100
     const extra = await MarketAnalysis.find({ user: userId }).sort({ createdAt: -1, _id: -1 }).skip(max).select('_id')
-    if (extra.length) await MarketAnalysis.deleteMany({ _id: { $in: extra.map((doc) => doc._id) } })
+    if (extra.length) {
+      await MarketAnalysis.deleteMany({ _id: { $in: extra.map((doc) => doc._id) } })
+      await deleteJournals(userId, extra.map((doc) => String(doc._id)))
+    }
+  }
+
+  // 失敗只記錄：分析已經刪了，留下的日記也只有本人看得到
+  async function deleteJournals(userId, ids) {
+    if (!JournalEntry || !ids.length) return
+    await JournalEntry.deleteMany({ user: userId, targetKind: 'stock', targetId: { $in: ids.map((id) => id.toLowerCase()) } }).catch((error) => {
+      console.error('[marketAnalysis] 刪除分析的日記失敗：', error.message)
+    })
   }
 
   // ---- 我的紀錄：股票分析 ----
@@ -369,7 +382,8 @@ function createMarketAnalysisRouter({
   router.delete('/analyses/:id', requireStockAccess, async (req, res, next) => {
     try {
       if (!ensureDatabase(res)) return
-      if (!mongoose.isValidObjectId(req.params.id)) {
+      // 只收 24 碼 hex，日記的 targetId 才對得上（同 readings 的刪除）
+      if (!/^[a-f0-9]{24}$/i.test(req.params.id)) {
         res.status(404).json({ message: '找不到這筆分析紀錄。' })
         return
       }
@@ -378,6 +392,7 @@ function createMarketAnalysisRouter({
         res.status(404).json({ message: '找不到這筆分析紀錄。' })
         return
       }
+      await deleteJournals(req.auth.userId, [req.params.id])
       res.json({ deleted: true })
     } catch (error) {
       next(error)

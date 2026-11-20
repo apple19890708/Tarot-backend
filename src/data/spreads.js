@@ -29,7 +29,7 @@ const spreads = [
     grid: { cols: 3, rows: 3 },
     positions: [
       { key: 'core', label: '問題核心', prompt: '事情真正的核心在哪裡', weight: 0.3, layout: { col: 2, row: 1 } },
-      { key: 'challenge', label: '障礙', prompt: '目前卡住你的阻力是什麼', weight: 0.2, layout: { col: 1, row: 2 } },
+      { key: 'challenge', label: '障礙', prompt: '現在擋在你前面的是什麼', weight: 0.2, layout: { col: 1, row: 2 } },
       { key: 'advice', label: '對策', prompt: '最應該採取的行動與方向', weight: 0.3, layout: { col: 3, row: 2 } },
       { key: 'resource', label: '資源', prompt: '你手上其實已經擁有的優勢', weight: 0.2, layout: { col: 2, row: 3 } },
     ],

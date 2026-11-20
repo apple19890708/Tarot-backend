@@ -104,7 +104,7 @@ const SNAPSHOT = {
   events: { exDividend: null, revenue: { month: '2026-10', revenue: 300000000, mom: 5, yoy: 30, cumYoy: 35, note: '' } },
 }
 
-function makeApp({ watches, MarketAnalysisModel = fakeAnalysisModel(), role = 'member', aiAllowed = true, stream } = {}) {
+function makeApp({ watches, MarketAnalysisModel = fakeAnalysisModel(), role = 'member', aiAllowed = true, stream, JournalEntry = null } = {}) {
   const app = express()
   app.use(express.json())
   const auth = (req, _res, next) => {
@@ -116,6 +116,7 @@ function makeApp({ watches, MarketAnalysisModel = fakeAnalysisModel(), role = 'm
     createMarketAnalysisRouter({
       requireStockAccess: auth,
       requireAiAccess: (req, res, next) => (aiAllowed ? auth(req, res, next) : res.status(403).json({ message: 'AI 解讀需要管理者開通，請聯絡管理者。' })),
+      JournalEntry,
       ensureDatabase: () => true,
       marketService: {
         buildTargetSnapshot: async () => SNAPSHOT,
@@ -249,15 +250,17 @@ test('AI 分析：服務還沒開始產生就失敗，不算冷卻、不存紀�
   assert.equal(MarketAnalysisModel.docs.length, 1)
 })
 
-test('股票分析紀錄：列表不含全文、單筆有全文與快照、只能刪自己的、超過上限刪最舊', async () => {
+test('股票分析紀錄：列表不含全文、單筆有全文與快照、只能刪自己的、超過上限刪最舊；刪掉的分析日記一起刪', async () => {
   const model = fakeAnalysisModel()
+  const journalCalls = []
+  const JournalEntry = { deleteMany: async (filter) => (journalCalls.push(filter), { deletedCount: 0 }) }
   const mine = []
   for (let i = 0; i < 3; i += 1) {
     mine.push(await model.create({ user: USER, watch: null, target: TARGET, text: `第 ${i + 1} 篇`, snapshot: SNAPSHOT }))
   }
   const others = await model.create({ user: OTHER, target: TARGET, text: '別人的' })
   const watch = makeWatch()
-  await withServer(makeApp({ watches: [watch], MarketAnalysisModel: model }).app, async (base) => {
+  await withServer(makeApp({ watches: [watch], MarketAnalysisModel: model, JournalEntry }).app, async (base) => {
     const list = await (await fetch(`${base}/api/market/analyses`)).json()
     assert.equal(list.analyses.length, 3)
     assert.equal(list.analyses[0].text, undefined)
@@ -269,6 +272,8 @@ test('股票分析紀錄：列表不含全文、單筆有全文與快照、只�
     assert.equal((await fetch(`${base}/api/market/analyses/${others._id}`)).status, 404)
     assert.equal((await fetch(`${base}/api/market/analyses/${others._id}`, { method: 'DELETE' })).status, 404)
     assert.equal((await fetch(`${base}/api/market/analyses/${mine[1]._id}`, { method: 'DELETE' })).status, 200)
+    // 刪自己的分析：它的日記一起刪；刪不到別人的就不動日記
+    assert.deepEqual(journalCalls, [{ user: USER, targetKind: 'stock', targetId: { $in: [String(mine[1]._id)] } }])
 
     // 上限 3 筆（測試用）：目前 2 筆，再跑兩次 AI 後只留最新 3 筆
     const response = await fetch(`${base}/api/market/watchlist/${watch._id}/analysis/ai`, { method: 'POST' })
@@ -276,12 +281,18 @@ test('股票分析紀錄：列表不含全文、單筆有全文與快照、只�
   })
   await model.create({ user: USER, target: TARGET, text: '第 5 篇' })
   const watch2 = makeWatch()
-  await withServer(makeApp({ watches: [watch2], MarketAnalysisModel: model }).app, async (base) => {
+  journalCalls.length = 0
+  await withServer(makeApp({ watches: [watch2], MarketAnalysisModel: model, JournalEntry }).app, async (base) => {
     await (await fetch(`${base}/api/market/watchlist/${watch2._id}/analysis/ai`, { method: 'POST' })).text()
   })
   const left = model.docs.filter((d) => String(d.user) === USER)
   assert.equal(left.length, 3)
   assert.ok(!left.some((d) => d.text === '第 1 篇'))
+  // 超過上限汰除最舊的：那幾筆的日記一起刪
+  assert.equal(journalCalls.length, 1)
+  assert.equal(journalCalls[0].targetKind, 'stock')
+  assert.ok(journalCalls[0].targetId.$in.length >= 1)
+  assert.ok(journalCalls[0].targetId.$in.every((id) => !left.some((d) => String(d._id) === id)))
 })
 
 test('AI 分析的提示：附上行情、持股、事件與重大訊息，並要求只用資料裡的數字', () => {

@@ -533,7 +533,7 @@ function buildPositionText(finding, entries) {
         stuck: `${plain.join('、')}都是逆位：這些事大多還悶著、卡著，從外面不太看得出來。`,
         unblock: `${nb}還是逆位，到了${nc}轉成正位：之前悶著、卡住的事，接下來會開始動起來。`,
         blockAhead: `${nb}還是正位，到了${nc}變成逆位：現在看得到的動作，接下來可能慢下來或收回去。`,
-        mixed: `${reversedNames.join('、')}是逆位，那裡的事還悶著、沒完全表現出來；其他格都是攤在檯面上的。`,
+        mixed: `${reversedNames.join('、')}是逆位，那裡的事還悶著、沒完全表現出來；其他幾張是正位，事情已經擺在眼前。`,
       }[finding.value]
     }
     // 助力位（資源／正面影響）
@@ -664,14 +664,14 @@ function endsAtRestart(steps) {
 const SHAPE_TEXT = {
   // 同階段不等於停滯。數字相同是「同一個主題被重複強調」，
   // 這也是 NEUTRAL_CLUES 的 numberRepeat 一直在用的說法。
-  flat: ({ first }) => `時間線上都在${first}，同一個主題被重複強調。`,
+  flat: ({ first }) => `照時間順序看，都在${first}，同一個主題被重複強調。`,
   rising: ({ first, last, count }) => (count > 2 ? `從${first}一路往前，走到${last}。` : `從${first}走到${last}。`),
   falling: ({ first, last, restart }) =>
     restart ? `從${first}退回${last}，像是一輪走完、要重新起步。` : `從${first}退回${last}，像是要回頭重新整理。`,
   peak: ({ last, extreme, restart }) =>
     restart ? `中間走到${extreme}，最後回到${last}，像是一輪走完、要重新起步。` : `中間走到${extreme}，最後收在${last}。`,
   dip: ({ last, extreme }) => `中間退回${extreme}，後面又拉回來，收在${last}。`,
-  zigzag: () => '時間線上一下前進、一下後退，節奏不太穩。',
+  zigzag: () => '照時間順序看，一下前進、一下後退，節奏不太穩。',
 }
 
 // 每張牌在階段裡的記號：大牌寫出化簡過程（13→4），宮廷牌寫階級，讀者才知道數字從哪來
@@ -706,7 +706,7 @@ function buildNumberStage(numberStage, entries, quant) {
 
   if (timeline.length >= 2) {
     pathLines.push(
-      `${hasPositions ? '時間線' : '依抽牌順序'}：${timeline.map((step) => stepText(step, entries)).join(' → ')}。`,
+      `${hasPositions ? '照時間順序' : '依抽牌順序'}：${timeline.map((step) => stepText(step, entries)).join(' → ')}。`,
     )
 
     const orders = timeline.map((step) => NUMBER_STAGES[step.stage].order)
@@ -1092,15 +1092,15 @@ function formatAnalysis(result, rawEntries, pairTexts = null) {
 // 和 SHAPE_TEXT 一樣，下降到 1～3 是「重新起步」不是「收尾」。
 // 之前只改了階段區塊，結語這份漏掉，是同一個 bug 的兩個出口。
 const SHAPE_SUMMARY = {
-  flat: () => '時間線上都落在同一個階段，同一個主題被重複強調。',
+  flat: () => '照時間順序看，都落在同一個階段，同一個主題被重複強調。',
   // 不說「方向是對的」：往前推進不等於好事，好壞看的是上面的走向
-  rising: () => '時間線上一路往前推進。',
+  rising: () => '照時間順序看，一路往前推進。',
   falling: (restart) =>
-    restart ? '時間線上走回起點，像是一輪走完、要重新開始。' : '時間線上在往回走，像是要回頭重新整理。',
+    restart ? '照時間順序看，走回起點，像是一輪走完、要重新開始。' : '照時間順序看，在往回走，像是要回頭重新整理。',
   peak: (restart) =>
-    restart ? '時間線上中間衝到最高，最後回到起點，像是一輪走完了。' : '時間線上中間衝到最高，後面要收尾。',
-  dip: () => '時間線上中間掉下去過，後來又拉回來。',
-  zigzag: () => '時間線上一下前進、一下後退，節奏不太穩。',
+    restart ? '照時間順序看，中間衝到最高，最後回到起點，像是一輪走完了。' : '照時間順序看，中間衝到最高，後面要收尾。',
+  dip: () => '照時間順序看，中間掉下去過，後來又拉回來。',
+  zigzag: () => '照時間順序看，一下前進、一下後退，節奏不太穩。',
 }
 
 // 規則版的提問。依序比對，最多取兩題 —— 問題一多就失焦，反而沒人回答。

@@ -1,4 +1,5 @@
 const ReadingModel = require('../models/Reading')
+const JournalEntryModel = require('../models/JournalEntry')
 const { MAX_READINGS_PER_USER } = ReadingModel
 
 // 建立一筆占卜紀錄。只存重算需要的輸入，分析文字不存（見 models/Reading.js）。
@@ -16,6 +17,7 @@ async function saveReading({
   followUps = [],
   followUpNarration = null,
   Reading = ReadingModel,
+  JournalEntry = JournalEntryModel,
 }) {
   const record = await Reading.create({
     user: userId,
@@ -39,7 +41,7 @@ async function saveReading({
     followUpNarration: followUps.length > 0 && followUpNarration ? { ...followUpNarration, rounds: followUps.length } : null,
   })
 
-  await trimHistory(userId, Reading)
+  await trimHistory(userId, Reading, JournalEntry)
 
   return record
 }
@@ -85,7 +87,8 @@ function mergeFollowUpRecords(recordFollowUps, followUps) {
 
 // 超過上限就從最舊的開始刪。用 _id 清單刪，避免 skip 期間有新資料插入導致誤刪。
 // createdAt 只到毫秒，同一毫秒的多筆順序未定義，所以再用 _id 當第二個排序鍵。
-async function trimHistory(userId, Reading = ReadingModel) {
+// 被刪掉的紀錄底下的日記一起刪（v26 計畫 2，api-reviewer 2026-11-20：原本只有手動刪除會清，自動汰除會留下孤兒日記）
+async function trimHistory(userId, Reading = ReadingModel, JournalEntry = JournalEntryModel) {
   const total = await Reading.countDocuments({ user: userId })
   if (total <= MAX_READINGS_PER_USER) {
     return
@@ -99,6 +102,9 @@ async function trimHistory(userId, Reading = ReadingModel) {
 
   if (stale.length > 0) {
     await Reading.deleteMany({ _id: { $in: stale.map((item) => item._id) }, user: userId })
+    await JournalEntry.deleteMany({ user: userId, targetKind: 'reading', targetId: { $in: stale.map((item) => String(item._id)) } }).catch((error) => {
+      console.error('[readings] 汰除舊紀錄時刪除日記失敗：', error.message)
+    })
   }
 }
 

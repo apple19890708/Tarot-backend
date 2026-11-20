@@ -878,7 +878,9 @@ test('v7 需求 4：數字階段不再輸出分布與主軸', () => {
 
   assert.ok(!text.includes('分布在'), '分布句已廢除')
   assert.ok(!text.includes('為主'), '主軸句已廢除')
-  assert.match(text, /時間線/)
+  assert.match(text, /照時間順序：/)
+  // 2026-11-20 口語化：畫面與資料不再出現「時間線」「其他格」
+  assert.doesNotMatch(text, /時間線|其他格/)
   assert.match(text, /過去 錢幣二（2．抉擇、平衡）/)
 })
 
