@@ -120,6 +120,7 @@ Cloud Run 服務 → **記錄**。可以用上方的嚴重性篩選「錯誤」�
 | `JWT_SECRET 未設定，伺服器不啟動` | 環境變數缺了 | 第三節補上 |
 | `STARTUP TCP probe failed … on port 8080` | 程式沒在時間內啟動（通常是上一行的原因，或程式一啟動就丟錯） | 往上找第一個錯誤訊息 |
 | `MongoServerSelectionError` | 連不到資料庫 | Atlas 的 Network Access 是否還有 `0.0.0.0/0`、`MONGO_URI` 是否正確 |
+| 健康檢查回 `ok` 但「MongoDB 尚未連線」，log 有 `MongoDB connection failed（第 N 次）…秒後重試` | 新版本啟動那幾秒網路不穩，第一次連線失敗 | 程式會在背景重試（5 秒起、每次加倍、最多 60 秒一次），通常一兩分鐘內自己連上；一直連不上再查 Atlas 的 Network Access。2026-11-19 之前第一次失敗就不再重連，整個執行個體一直沒有資料庫（00020 版本遇過，靠下一次部署才恢復） |
 | `來源不在 CLIENT_URL 允許清單內` | 前端網域沒列在 `CLIENT_URL` | 第三節修改 `CLIENT_URL` |
 
 ### 用 gcloud 看記錄

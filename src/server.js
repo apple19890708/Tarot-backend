@@ -967,7 +967,14 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ message: '伺服器發生錯誤，請稍後再試。' })
 })
 
-async function connectDatabase() {
+// 第一次連線失敗時在背景重試（5 秒起、每次加倍、最多 60 秒一次）。
+// 2026-11-19：新版本在 Cloud Run 啟動那幾秒網路不穩，第一次連線失敗後就再也沒重連，
+// 整個執行個體一直「MongoDB 尚未連線」（健康檢查仍回 ok，Cloud Run 不會換掉它）。
+// mongoose 只會在「連上之後斷線」時自己重連，第一次就失敗不會重試，所以要自己排。
+const DB_RETRY_FIRST_MS = 5000
+const DB_RETRY_MAX_MS = 60000
+
+async function connectDatabase(attempt = 1) {
   const mongoUri = process.env.MONGO_URI
 
   if (!mongoUri) {
@@ -978,9 +985,11 @@ async function connectDatabase() {
   try {
     const dbName = process.env.MONGO_DB_NAME || 'tarot-divination'
     await mongoose.connect(mongoUri, { dbName })
-    console.log(`MongoDB connected (db: ${dbName})`)
+    console.log(`MongoDB connected (db: ${dbName})${attempt > 1 ? `，第 ${attempt} 次嘗試` : ''}`)
   } catch (error) {
-    console.error('MongoDB connection failed:', error.message)
+    const delay = Math.min(DB_RETRY_MAX_MS, DB_RETRY_FIRST_MS * 2 ** (attempt - 1))
+    console.error(`MongoDB connection failed（第 ${attempt} 次）：${error.message}；${delay / 1000} 秒後重試`)
+    setTimeout(() => void connectDatabase(attempt + 1), delay)
   }
 }
 
