@@ -3,12 +3,47 @@
 // - Discord Webhook：只給 admin（設定要貼 webhook 網址，不適合一般會員）。綁定、顯示、送出都檢查 admin
 //
 // Webhook 網址等於密碼，只存在資料庫，對外只回遮罩後的提示。
+//
+// 通知中心（v26 計畫 5）：每一則在送推播之前先存進通知中心（notifications.record），推播失敗或沒開推播也照樣存。
+// 存失敗只記 log，不擋推播
 const { alertMessage, alertPushPayload } = require('./alertChecker')
 const { maskWebhook, parseWebhookUrl } = require('../discord')
 const { PushGoneError, parseSubscription } = require('../webPush')
 
 // MarketAlert：有傳時用條件式更新搶 notifiedAt，網頁與排程同時觸發也只推播一次
-function createNotifier({ discord, webPush, MarketProfile, PushSubscription, User, MarketAlert = null, now = () => new Date() }) {
+function createNotifier({ discord, webPush, MarketProfile, PushSubscription, User, MarketAlert = null, notifications = null, now = () => new Date() }) {
+  // 存進通知中心；回傳有沒有新存一則（同一個 key 存過、沒接通知中心、存失敗都是 false）
+  async function store(userId, entry) {
+    if (!notifications) return false
+    try {
+      return await notifications.record(userId, entry)
+    } catch (error) {
+      console.error('通知中心存檔失敗：', error.message)
+      return false
+    }
+  }
+
+  // 給沒開推播的人用（除息前提醒）：只存進通知中心。和 store 不同，存失敗會丟錯，呼叫的一方才知道要重試
+  async function record(userId, entry) {
+    if (!notifications) return false
+    return notifications.record(userId, entry)
+  }
+
+  // 一則價位提醒＝一次觸發（重新啟用後再觸發是新的一則）
+  function alertKey(alert) {
+    const at = alert.triggeredAt ? new Date(alert.triggeredAt).getTime() : 0
+    return `alert:${String(alert._id ?? alert.id)}:${at}`
+  }
+
+  // 已觸發的提醒存進通知中心（網頁上的「檢查提醒」回應前先存，鈴鐺的未讀數馬上對得上）
+  async function recordAlerts(alerts) {
+    let created = 0
+    for (const alert of alerts) {
+      if (await store(alert.user, { kind: 'price-alert', ...alertPushPayload(alert), key: alertKey(alert) })) created += 1
+    }
+    return created
+  }
+
   async function claim(alert) {
     if (!MarketAlert) return true
     const result = await MarketAlert.updateOne({ _id: alert._id, notifiedAt: null }, { $set: { notifiedAt: now() } })
@@ -125,7 +160,8 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
   // 測試通知：送到所有已開啟的管道。回傳 { push: 台數, discord: 是否送出 }
   // 測試通知：送到所有已開啟的管道。失敗的原因放在 errors，畫面上才知道是哪裡出問題
   async function sendTest(userId) {
-    const push = await pushToUser(userId, { title: '測試通知', body: '價位提醒到價時會像這樣通知你。', url: 'market?tab=alerts' })
+    const message = { title: '測試通知', body: '價位提醒到價時會像這樣通知你。', url: 'market?tab=alerts' }
+    const push = await pushToUser(userId, message)
     const errors = [...push.errors]
     if (push.removed) errors.push(`有 ${push.removed} 台裝置的通知已經失效（可能關掉了通知或清除了瀏覽器資料），已自動移除，請重新開啟。`)
     let sentDiscord = false
@@ -138,6 +174,8 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
         errors.push(`Discord：${error.message}`)
       }
     }
+    // 有送出才進通知中心（沒開任何推播時畫面會說「還沒開啟」，通知中心不要多一則測試）
+    if (push.sent || sentDiscord) await store(userId, { kind: 'test', ...message })
     return { push: push.sent, discord: sentDiscord, errors }
   }
 
@@ -156,9 +194,12 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
   }
 
   // 已觸發、還沒通知過的提醒逐一推播；任一管道成功就記 notifiedAt。回傳送出的提醒數
-  async function notifyAlerts(alerts) {
+  // recorded：呼叫的一方已經存過通知中心（網頁的檢查提醒回應前先存），這裡不再存一次
+  async function notifyAlerts(alerts, { recorded = false } = {}) {
     const pending = alerts.filter((alert) => !alert.notifiedAt)
     if (pending.length === 0) return 0
+    // 先進通知中心（同一次觸發只存一則），推播送不出去也看得到
+    if (!recorded) await recordAlerts(pending)
     const discordUrls = new Map()
     for (const userId of new Set(pending.map((alert) => String(alert.user)))) {
       discordUrls.set(userId, await discordUrlOf(userId))
@@ -193,8 +234,10 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
     return sent
   }
 
-  // 一則一般通知（v20 除息前推播）：瀏覽器推播＋admin 的 Discord。任一管道送出回 true
-  async function notifyUser(userId, { title, body, url }) {
+  // 一則一般通知（v20 除息前推播）：先存進通知中心，再送瀏覽器推播＋admin 的 Discord。任一推播管道送出回 true
+  // kind、key：通知中心的種類與去重用的鍵（除息前提醒是 exDividend:代號:除息日）
+  async function notifyUser(userId, { title, body, url }, { kind = 'system', key = null } = {}) {
+    await store(userId, { kind, title, body, url, key })
     let delivered = (await pushToUser(userId, { title, body, url })).sent > 0
     const discordUrl = await discordUrlOf(userId)
     if (discordUrl) {
@@ -209,7 +252,7 @@ function createNotifier({ discord, webPush, MarketProfile, PushSubscription, Use
     return delivered
   }
 
-  return { status, addDevice, removeDevice, linkDiscord, unlinkDiscord, sendTest, subscriberIds, notifyAlerts, notifyUser }
+  return { status, addDevice, removeDevice, linkDiscord, unlinkDiscord, sendTest, subscriberIds, notifyAlerts, notifyUser, recordAlerts, record }
 }
 
 module.exports = { createNotifier }

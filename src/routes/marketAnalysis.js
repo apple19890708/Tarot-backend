@@ -11,6 +11,7 @@ const { computePosition, normalizeFees, tradesOf, DEFAULT_FEES } = require('../s
 const { buildStockAnalysisMessages } = require('../services/market/stockAnalysis')
 const { NarrationRefusedError } = require('../services/narrationService')
 const { startNdjson } = require('../lib/ndjsonStream')
+const { parseStockKey, findForStock, stockKeyOf } = require('../services/stockJournal')
 
 // 每人每天最多幾次 AI 深度分析（admin 不限）；同一檔要隔多久才能再跑一次
 const DAILY_LIMIT = 20
@@ -68,8 +69,6 @@ function createMarketAnalysisRouter({
   ai,
   // AI 用量紀錄（每日次數）：AI 開始產生就記一筆，中途停止的也算。沒傳時改數存下來的分析（只有完整產生的）
   MarketAiUsage = null,
-  // 刪除分析（手動或超過上限汰除）時，它的日記一起刪（v26 計畫 2）；沒傳時略過（測試）
-  JournalEntry = null,
   now = () => Date.now(),
 }) {
   const router = express.Router()
@@ -333,18 +332,48 @@ function createMarketAnalysisRouter({
     const max = MarketAnalysis.MAX_ANALYSES_PER_USER || 100
     const extra = await MarketAnalysis.find({ user: userId }).sort({ createdAt: -1, _id: -1 }).skip(max).select('_id')
     if (extra.length) {
+      // 日記屬於這檔股票、不屬於某一次分析（v26 計畫 2-2），汰除舊分析不動日記
       await MarketAnalysis.deleteMany({ _id: { $in: extra.map((doc) => doc._id) } })
-      await deleteJournals(userId, extra.map((doc) => String(doc._id)))
     }
   }
 
-  // 失敗只記錄：分析已經刪了，留下的日記也只有本人看得到
-  async function deleteJournals(userId, ids) {
-    if (!JournalEntry || !ids.length) return
-    await JournalEntry.deleteMany({ user: userId, targetKind: 'stock', targetId: { $in: ids.map((id) => id.toLowerCase()) } }).catch((error) => {
-      console.error('[marketAnalysis] 刪除分析的日記失敗：', error.message)
-    })
-  }
+  // ---- 股票日記頁（v26 計畫 2-2）：這檔的名稱與最新股價 ----
+  // 只回自己分析過或追蹤中的股票（和日記的新增規則一樣，也避免變成公開的報價查詢）。
+  // 股價拿來帶入「寫的時候的股價」與列表的「到現在漲跌」；查不到回 null，頁面照樣能寫
+  router.get('/stock-journal', requireStockAccess, async (req, res, next) => {
+    try {
+      if (!ensureDatabase(res)) return
+      const stock = parseStockKey(req.query.stock)
+      if (!stock) {
+        res.status(400).json({ message: '股票格式要是 <市場>:<代號>，例如 tw:0050。' })
+        return
+      }
+      // 追蹤項目的 target 最新（含交易所，台股才能查即時報價）；沒追蹤就用最近一次分析的。
+      // 比對一律用 stockKeyOf（指數、別名、大小寫，api-reviewer 2026-11-20），只讀 target
+      const [watches, analyses] = await Promise.all([
+        findForStock(MarketWatch, req.auth.userId, stock),
+        findForStock(MarketAnalysis, req.auth.userId, stock, { sort: { createdAt: -1 } }),
+      ])
+      const watch = watches[0] ?? null
+      const target = watch?.target ?? analyses[0]?.target
+      if (!target) {
+        res.status(404).json({ message: '這檔股票要先分析過或加入追蹤，才能寫日記。' })
+        return
+      }
+      let quote = null
+      try {
+        const found = marketService.getQuote ? await marketService.getQuote(target) : null
+        if (found && Number.isFinite(found.price)) quote = { price: found.price, time: found.time ? new Date(found.time).toISOString() : null }
+      } catch (error) {
+        console.error('[股票日記] 報價失敗：', error.message)
+      }
+      const { symbol = null, code = null, exchange = null, market, kind, name = '' } = target
+      // key 用 stockKeyOf 算（和比對同一套），不回查詢字串
+      res.json({ stock: { key: stockKeyOf(target) ?? stock.key, target: { symbol, code, exchange, market, kind, name }, tracked: Boolean(watch), quote } })
+    } catch (error) {
+      next(error)
+    }
+  })
 
   // ---- 我的紀錄：股票分析 ----
   // 看紀錄只要股市權限，不看 AI 權限：權限收回後，已經付費產生的紀錄還是看得到
@@ -352,9 +381,20 @@ function createMarketAnalysisRouter({
   router.get('/analyses', requireStockAccess, async (req, res, next) => {
     try {
       if (!ensureDatabase(res)) return
-      const records = await MarketAnalysis.find({ user: req.auth.userId })
-        .sort({ createdAt: -1, _id: -1 })
-        .select('-snapshot -text')
+      // ?stock=tw:0050：只要這檔的（股票日記頁的左欄）；格式不對回 400，不要默默回全部
+      let records
+      if (req.query.stock !== undefined) {
+        const stock = parseStockKey(req.query.stock)
+        if (!stock) {
+          res.status(400).json({ message: '股票格式要是 <市場>:<代號>，例如 tw:0050。' })
+          return
+        }
+        records = await findForStock(MarketAnalysis, req.auth.userId, stock, { sort: { createdAt: -1, _id: -1 }, select: '-snapshot -text', lean: false })
+      } else {
+        records = await MarketAnalysis.find({ user: req.auth.userId })
+          .sort({ createdAt: -1, _id: -1 })
+          .select('-snapshot -text')
+      }
       res.json({ analyses: records.map((record) => record.toSummaryJSON()) })
     } catch (error) {
       next(error)
@@ -392,7 +432,7 @@ function createMarketAnalysisRouter({
         res.status(404).json({ message: '找不到這筆分析紀錄。' })
         return
       }
-      await deleteJournals(req.auth.userId, [req.params.id])
+      // 不刪日記：日記屬於這檔股票（v26 計畫 2-2），刪掉其中一次分析，日記還在那檔的日記頁
       res.json({ deleted: true })
     } catch (error) {
       next(error)

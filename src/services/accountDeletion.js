@@ -18,6 +18,7 @@ const USER_DATA_MODELS = [
   'MarketAiUsage',
   'DailyCard',
   'JournalEntry',
+  'Notification',
 ]
 
 // models：{ 名稱: Model }，測試時換成假的

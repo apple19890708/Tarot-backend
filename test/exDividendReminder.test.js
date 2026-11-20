@@ -69,9 +69,10 @@ test('跨年：休市日表只有今年，元旦一律當休市；元旦後第�
   assert.equal(reminder.lastTradingDayBefore('2027-01-04', thisYear), '2026-12-31')
 })
 
-function makeRun({ open = true, sendOk = true, subscribed = ['u1'], holidays = new Set(), throwOnSend = false } = {}) {
+function makeRun({ open = true, sendOk = true, subscribed = ['u1'], holidays = new Set(), throwOnSend = false, recordFails = false } = {}) {
   const claimed = new Set()
   const sent = []
+  const recorded = []
   const deleted = []
   const run = reminder.createExDividendReminder({
     MarketProfile: { find: async () => [{ user: 'u1' }, { user: 'u2' }] },
@@ -90,7 +91,14 @@ function makeRun({ open = true, sendOk = true, subscribed = ['u1'], holidays = n
     User: { findById: async (id) => ({ _id: id, canUseStock: () => true }) },
     notifier: {
       subscriberIds: async () => subscribed,
-      notifyUser: async (userId, message) => {
+      // 沒開推播的人只存進通知中心（v26 計畫 5）
+      record: async (userId, entry) => {
+        if (recordFails) throw new Error('資料庫掛了')
+        recorded.push([userId, entry.kind, entry.title, entry.key])
+        return true
+      },
+      notifyUser: async (userId, message, options) => {
+        assert.deepEqual(options, { kind: 'ex-dividend', key: 'exDividend:2330:2026-11-17' })
         sent.push([userId, message.title])
         if (throwOnSend) throw new Error('推播服務掛了')
         return sendOk
@@ -104,16 +112,24 @@ function makeRun({ open = true, sendOk = true, subscribed = ['u1'], holidays = n
     // 2026-11-16（一）09:10 台北
     now: () => new Date('2026-11-16T01:10:00Z'),
   })
-  return { run, sent, deleted }
+  return { run, sent, deleted, recorded }
 }
 
-test('排程：只送有訂閱推播的人；同一次除息只送一次', async () => {
-  const { run, sent } = makeRun()
-  assert.deepEqual(await run.run(), { users: 2, sent: 1, failed: 0 })
+test('排程：推播只送有訂閱的人，沒訂閱的存進通知中心；同一次除息只處理一次', async () => {
+  const { run, sent, recorded } = makeRun()
+  assert.deepEqual(await run.run(), { users: 2, sent: 2, failed: 0 })
   assert.deepEqual(sent, [['u1', '明天除息：股票2330（2330）']])
-  // 下一次排程（10 分鐘後）：已經送過，不再送
+  assert.deepEqual(recorded, [['u2', 'ex-dividend', '明天除息：股票2330（2330）', 'exDividend:2330:2026-11-17']])
+  // 下一次排程（10 分鐘後）：已經處理過，不再送也不再存
   assert.deepEqual(await run.run(), { users: 2, sent: 0, failed: 0 })
   assert.equal(sent.length, 1)
+  assert.equal(recorded.length, 1)
+})
+
+test('排程：沒訂閱推播的人存進通知中心失敗就放掉，下一次再試', async () => {
+  const { run, deleted } = makeRun({ subscribed: [], recordFails: true })
+  assert.deepEqual(await run.run(), { users: 2, sent: 0, failed: 0 })
+  assert.deepEqual(deleted, ['exDividend:2330:2026-11-17', 'exDividend:2330:2026-11-17'])
 })
 
 test('排程：全部管道都送失敗就放掉，下一次再試；沒開盤不跑', async () => {

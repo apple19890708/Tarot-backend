@@ -108,7 +108,8 @@ function createExDividendReminder({ MarketProfile, MarketWatch, MarketReminder, 
     let failed = 0
     for (const profile of profiles) {
       const userId = profile.user
-      if (!subscribed.has(String(userId))) continue
+      // 沒開推播的人也要進通知中心（v26 計畫 5）：照樣處理，只是不送推播
+      const pushing = subscribed.has(String(userId))
       // 每位會員各自處理：一個人查詢失敗不影響其他人（下一輪會再試）
       try {
         const user = await User.findById(userId)
@@ -129,7 +130,13 @@ function createExDividendReminder({ MarketProfile, MarketWatch, MarketReminder, 
           try {
             const quantity = computePosition({ target: watch.target, trades: tradesOf(watch) }).quantity
             const message = reminderMessage({ name: watch.target.name, code: watch.target.code, event, quantity, today })
-            delivered = await notifier.notifyUser(userId, message)
+            if (pushing) {
+              delivered = await notifier.notifyUser(userId, message, { kind: 'ex-dividend', key })
+            } else {
+              // 沒開推播：存進通知中心就算送到（同一個 key 已經存過也算）；存失敗會丟錯 → 放掉佔位，下一輪再試
+              await notifier.record(userId, { kind: 'ex-dividend', ...message, key })
+              delivered = true
+            }
           } catch (error) {
             console.error('除息前推播失敗：', error.message)
           }

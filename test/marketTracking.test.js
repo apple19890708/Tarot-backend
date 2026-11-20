@@ -238,7 +238,7 @@ function fakeAlertModel() {
   }
 }
 
-function makeApp({ MarketAlert, quotes = {} }) {
+function makeApp({ MarketAlert, quotes = {}, notifier = null }) {
   const app = express()
   app.use(express.json())
   app.use(
@@ -261,6 +261,7 @@ function makeApp({ MarketAlert, quotes = {} }) {
       },
       MarketCall: {},
       MarketAlert,
+      ...(notifier ? { notifier } : {}),
     }),
   )
   return app
@@ -298,6 +299,23 @@ test('提醒：檢查時到價的標成已觸發，沒到的維持', async () =>
   })
   assert.equal(MarketAlert.docs[0].active, false)
   assert.equal(MarketAlert.docs[1].active, true)
+})
+
+test('提醒：檢查時到價的在回應前先存進通知中心，推播那邊不再存一次（v26 計畫 5）', async () => {
+  const MarketAlert = fakeAlertModel()
+  await MarketAlert.create({ user: 'u1', target: { symbol: '2330.TW', market: 'tw', kind: 'stock' }, condition: 'below', price: 2235 })
+  const events = []
+  const notifier = {
+    recordAlerts: async (alerts) => events.push(['record', alerts.length]),
+    notifyAlerts: async (alerts, options) => events.push(['notify', alerts.length, options]),
+  }
+  await withServer(makeApp({ MarketAlert, quotes: { '2330.TW': 2230 }, notifier }), async (base) => {
+    const response = await post(base, '/api/market/alerts/check', {})
+    assert.equal(response.status, 200)
+    // 回應前已經存好
+    assert.deepEqual(events[0], ['record', 1])
+  })
+  assert.deepEqual(events[1], ['notify', 1, { recorded: true }])
 })
 
 test('提醒：標的欄位格式不對（交易所、代號、symbol）一律擋下', async () => {

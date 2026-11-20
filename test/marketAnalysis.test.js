@@ -50,6 +50,7 @@ function fakeAnalysisModel() {
   const docs = []
   const match = (doc, filter) =>
     Object.entries(filter).every(([key, value]) => {
+      if (key === '$or') return value.some((sub) => match(doc, sub))
       if (key === 'createdAt') return doc.createdAt >= value.$gte
       if (key === '_id' && value?.$in) return value.$in.some((id) => String(id) === String(doc._id))
       // 'target.code' 這種巢狀欄位
@@ -123,6 +124,11 @@ function makeApp({ watches, MarketAnalysisModel = fakeAnalysisModel(), role = 'm
         // 任何台股的分析（v19）：只認得 2330 與 2317
         resolveTarget: async (code) =>
           ({ 2330: TARGET, 2317: { symbol: '2317.TW', code: '2317', exchange: 'tse', market: 'tw', kind: 'stock', name: '鴻海' } })[code] || null,
+        // 股票日記頁的最新股價：MU 故意查不到（報價失敗也要回 200）
+        getQuote: async (target) => {
+          if (target.symbol === 'MU') throw new Error('Yahoo 逾時')
+          return { price: 1015, time: '2026-11-20T05:30:00Z' }
+        },
       },
       MarketWatch: {
         findOne: async (filter) =>
@@ -131,6 +137,8 @@ function makeApp({ watches, MarketAnalysisModel = fakeAnalysisModel(), role = 'm
               ? String(w._id) === String(filter._id) && w.user === filter.user
               : w.user === filter.user && w.target.market === filter['target.market'] && w.target.code === filter['target.code'],
           ) || null,
+        // 股票日記：先用市場縮小範圍，再由 stockKeyOf 比對
+        find: (filter) => query(() => watches.filter((w) => w.user === filter.user && w.target.market === filter['target.market'])),
       },
       MarketAnalysis: MarketAnalysisModel,
       ai: {
@@ -250,7 +258,7 @@ test('AI 分析：服務還沒開始產生就失敗，不算冷卻、不存紀�
   assert.equal(MarketAnalysisModel.docs.length, 1)
 })
 
-test('股票分析紀錄：列表不含全文、單筆有全文與快照、只能刪自己的、超過上限刪最舊；刪掉的分析日記一起刪', async () => {
+test('股票分析紀錄：列表不含全文、單筆有全文與快照、只能刪自己的、超過上限刪最舊；刪分析不刪日記（日記屬於這檔股票）', async () => {
   const model = fakeAnalysisModel()
   const journalCalls = []
   const JournalEntry = { deleteMany: async (filter) => (journalCalls.push(filter), { deletedCount: 0 }) }
@@ -265,6 +273,12 @@ test('股票分析紀錄：列表不含全文、單筆有全文與快照、只�
     assert.equal(list.analyses.length, 3)
     assert.equal(list.analyses[0].text, undefined)
 
+    // ?stock=：只回這檔（股票日記頁的左欄）；別檔是空的；格式不對回 400
+    assert.equal((await (await fetch(`${base}/api/market/analyses?stock=tw:2330`)).json()).analyses.length, 3)
+    assert.equal((await (await fetch(`${base}/api/market/analyses?stock=tw:0050`)).json()).analyses.length, 0)
+    assert.equal((await (await fetch(`${base}/api/market/analyses?stock=us:2330`)).json()).analyses.length, 0)
+    assert.equal((await fetch(`${base}/api/market/analyses?stock=2330`)).status, 400)
+
     const detail = await (await fetch(`${base}/api/market/analyses/${mine[0]._id}`)).json()
     assert.equal(detail.analysis.text, '第 1 篇')
     assert.equal(detail.analysis.snapshot.items[0].code, '2330')
@@ -272,8 +286,8 @@ test('股票分析紀錄：列表不含全文、單筆有全文與快照、只�
     assert.equal((await fetch(`${base}/api/market/analyses/${others._id}`)).status, 404)
     assert.equal((await fetch(`${base}/api/market/analyses/${others._id}`, { method: 'DELETE' })).status, 404)
     assert.equal((await fetch(`${base}/api/market/analyses/${mine[1]._id}`, { method: 'DELETE' })).status, 200)
-    // 刪自己的分析：它的日記一起刪；刪不到別人的就不動日記
-    assert.deepEqual(journalCalls, [{ user: USER, targetKind: 'stock', targetId: { $in: [String(mine[1]._id)] } }])
+    // 刪分析不刪日記：日記屬於這檔股票（v26 計畫 2-2）
+    assert.deepEqual(journalCalls, [])
 
     // 上限 3 筆（測試用）：目前 2 筆，再跑兩次 AI 後只留最新 3 筆
     const response = await fetch(`${base}/api/market/watchlist/${watch._id}/analysis/ai`, { method: 'POST' })
@@ -288,11 +302,8 @@ test('股票分析紀錄：列表不含全文、單筆有全文與快照、只�
   const left = model.docs.filter((d) => String(d.user) === USER)
   assert.equal(left.length, 3)
   assert.ok(!left.some((d) => d.text === '第 1 篇'))
-  // 超過上限汰除最舊的：那幾筆的日記一起刪
-  assert.equal(journalCalls.length, 1)
-  assert.equal(journalCalls[0].targetKind, 'stock')
-  assert.ok(journalCalls[0].targetId.$in.length >= 1)
-  assert.ok(journalCalls[0].targetId.$in.every((id) => !left.some((d) => String(d._id) === id)))
+  // 超過上限汰除最舊的分析：日記照樣不動
+  assert.deepEqual(journalCalls, [])
 })
 
 test('AI 分析的提示：附上行情、持股、事件與重大訊息，並要求只用資料裡的數字', () => {
@@ -353,4 +364,46 @@ test('個股 AI 提示詞：方向照抄操作建議（觀望不能寫成偏空�
   assert.match(STOCK_ANALYSIS_PROMPT, /操作建議是觀望時就寫觀望/)
   assert.match(STOCK_ANALYSIS_PROMPT, /照資料裡每個訊號的「結論」寫/)
   assert.doesNotMatch(STOCK_ANALYSIS_PROMPT, /差距不到 5 個百分點/)
+})
+
+test('股票日記頁：回這檔的名稱與最新股價；報價失敗回 null；沒分析也沒追蹤回 404（v26 計畫 2-2）', async () => {
+  const model = fakeAnalysisModel()
+  await model.create({ user: USER, watch: null, target: { symbol: 'MU', code: null, exchange: null, market: 'us', kind: 'stock', name: 'Micron' }, text: 'x' })
+  const watch = makeWatch()
+  await withServer(makeApp({ watches: [watch], MarketAnalysisModel: model }).app, async (base) => {
+    // 追蹤中的台積電：用追蹤項目的 target、查到股價
+    const tracked = await (await fetch(`${base}/api/market/stock-journal?stock=tw:2330`)).json()
+    assert.equal(tracked.stock.key, 'tw:2330')
+    assert.equal(tracked.stock.target.name, '台積電')
+    assert.equal(tracked.stock.tracked, true)
+    assert.deepEqual(tracked.stock.quote, { price: 1015, time: '2026-11-20T05:30:00.000Z' })
+    // 只分析過、沒追蹤：用分析的 target；報價失敗照樣 200
+    const analysed = await (await fetch(`${base}/api/market/stock-journal?stock=us:mu`)).json()
+    assert.equal(analysed.stock.target.name, 'Micron')
+    assert.equal(analysed.stock.tracked, false)
+    assert.equal(analysed.stock.quote, null)
+    assert.equal((await fetch(`${base}/api/market/stock-journal?stock=tw:0050`)).status, 404)
+    assert.equal((await fetch(`${base}/api/market/stock-journal?stock=0050`)).status, 400)
+    assert.equal((await fetch(`${base}/api/market/stock-journal`)).status, 400)
+    // 別名 tw:2330.TW 對不到（不能另開一本，api-reviewer 2026-11-20）
+    assert.equal((await fetch(`${base}/api/market/stock-journal?stock=tw:2330.TW`)).status, 404)
+  })
+})
+
+test('股票鍵用真實的指數資料：加權指數 code t00＋^TWII、櫃買指數 o00 沒有 symbol（api-reviewer 2026-11-20）', async () => {
+  const model = fakeAnalysisModel()
+  await model.create({ user: USER, watch: null, target: { symbol: '^TWII', code: 't00', exchange: null, market: 'tw', kind: 'index', name: '加權指數' }, text: 'x' })
+  const otc = makeWatch(USER, { target: { symbol: null, code: 'o00', exchange: 'otc', market: 'tw', kind: 'index', name: '櫃買指數' } })
+  await withServer(makeApp({ watches: [otc], MarketAnalysisModel: model }).app, async (base) => {
+    const list = await (await fetch(`${base}/api/market/analyses`)).json()
+    assert.equal(list.analyses[0].stockKey, 'tw:^TWII')
+    const taiex = await (await fetch(`${base}/api/market/stock-journal?stock=tw:%5ETWII`)).json()
+    assert.equal(taiex.stock.key, 'tw:^TWII')
+    assert.equal((await (await fetch(`${base}/api/market/analyses?stock=tw:%5ETWII`)).json()).analyses.length, 1)
+    // 用代號 t00 不算同一本
+    assert.equal((await fetch(`${base}/api/market/stock-journal?stock=tw:t00`)).status, 404)
+    const tpex = await (await fetch(`${base}/api/market/stock-journal?stock=tw:o00`)).json()
+    assert.equal(tpex.stock.key, 'tw:O00')
+    assert.equal(tpex.stock.tracked, true)
+  })
 })

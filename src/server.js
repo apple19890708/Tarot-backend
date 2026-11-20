@@ -22,6 +22,10 @@ const { createAdminRouter } = require('./routes/admin')
 const { createReadingsRouter } = require('./routes/readings')
 const { createDailyCardRouter } = require('./routes/dailyCard')
 const { createJournalRouter } = require('./routes/journal')
+const { createNotificationsRouter } = require('./routes/notifications')
+const { createNotificationCenter } = require('./services/notificationCenter')
+const Notification = require('./models/Notification')
+const { migrateStockJournalTargets } = require('./services/stockJournal')
 const { isSameCards, followUpRelation, mergeFollowUpRecords } = require('./services/readingHistory')
 const {
   FOLLOW_UP_MAX_ROUNDS,
@@ -195,6 +199,8 @@ app.use('/api/readings', createReadingsRouter({ ensureDatabase, requireAuth, ens
 app.use('/api', createDailyCardRouter({ ensureDatabase, requireAuth, optionalAuth }))
 // 占卜日記（v26 計畫 2）
 app.use('/api', createJournalRouter({ ensureDatabase, requireAuth }))
+// 通知中心（v26 計畫 5）：鈴鐺的列表、未讀數、已讀、刪除；寫入由 notifier 負責
+app.use('/api', createNotificationsRouter({ ensureDatabase, requireAuth, Notification }))
 
 app.get('/api/health', async (_req, res) => {
   const cardCount = isDatabaseReady() ? await Card.countDocuments() : 0
@@ -444,8 +450,17 @@ async function saveFollowUpNarration({ readingId, userId, text, model, drawn, fo
   }
 }
 
-// 到價推播：瀏覽器推播（所有會員；VAPID 金鑰沒設定時自動關閉）與 Discord Webhook（只給 admin）
-const notifier = createNotifier({ discord: createDiscord(), webPush: createWebPush(), MarketProfile, PushSubscription, User, MarketAlert })
+// 到價推播：瀏覽器推播（所有會員；VAPID 金鑰沒設定時自動關閉）與 Discord Webhook（只給 admin）；
+// 每一則也存進通知中心（v26 計畫 5），推播失敗或沒開推播也看得到
+const notifier = createNotifier({
+  discord: createDiscord(),
+  webPush: createWebPush(),
+  MarketProfile,
+  PushSubscription,
+  User,
+  MarketAlert,
+  notifications: createNotificationCenter({ Notification }),
+})
 // 重大訊息：公開資訊觀測站只給當天的，抓到就存 30 天（排程與使用者開頁面時都會觸發，30 分鐘最多一次）
 const newsSync = createNewsSync({
   MarketNews,
@@ -553,7 +568,6 @@ app.use(
     MarketAnalysis,
     MarketProfile,
     MarketAiUsage,
-    JournalEntry: require('./models/JournalEntry'),
     news: newsSync,
     ai: { isAvailable: isNarrationAvailable, stream: streamMarketChat },
   }),
@@ -997,6 +1011,10 @@ async function connectDatabase(attempt = 1) {
     require('./models/DailyCard')
       .init()
       .catch((error) => console.error('每日一牌唯一索引建立失敗（重複抽牌可能存成兩筆）：', error.message))
+    // 股票日記改成一檔一本（v26 計畫 2-2、D9）：舊的 stock:<分析 id> 轉成 stock:<市場>:<代號>；可重複執行，轉過的不再符合
+    migrateStockJournalTargets({ JournalEntry: require('./models/JournalEntry'), MarketAnalysis: require('./models/MarketAnalysis') }).catch(
+      (error) => console.error('[股票日記] 舊格式轉換失敗（舊日記暫時看不到，下次啟動會再試）：', error.message),
+    )
   } catch (error) {
     const delay = Math.min(DB_RETRY_MAX_MS, DB_RETRY_FIRST_MS * 2 ** (attempt - 1))
     console.error(`MongoDB connection failed（第 ${attempt} 次）：${error.message}；${delay / 1000} 秒後重試`)

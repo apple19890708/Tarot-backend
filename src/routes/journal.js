@@ -1,8 +1,9 @@
-// 占卜日記 API（v26 計畫 2）。全部要登入，只看得到、只改得到自己的：
-//   GET    /journal?target=reading:<id> | stock:<id>  這個對象的日記（依日期排的時間軸）
+// 占卜日記 API（v26 計畫 2、2-2）。全部要登入，只看得到、只改得到自己的：
+//   GET    /journal?target=reading:<id> | stock:<市場>:<代號>  這個對象的日記（依日期排的時間軸）
 // 每日一牌的日記（daily:<日期>）2026-11-20 使用者決定拿掉：不再接受，月曆也不列（資料表的 enum 留著，舊資料讀得出來）
-//   POST   /journal                                          新增一篇 { target, title?, content, outcome?, entryDate? }
-//   PUT    /journal/:id                                      修改 { title?, content?, outcome?, entryDate? }
+// 股票日記一檔一本（stock:tw:0050）；每篇可帶 stock（記錄股票的欄位），只有股票日記收
+//   POST   /journal                                          新增一篇 { target, title?, content, outcome?, entryDate?, stock? }
+//   PUT    /journal/:id                                      修改 { title?, content?, outcome?, entryDate?, stock? }
 //   DELETE /journal/:id
 // 日記內容不送給 AI（v26 不做的事）。依賴可以注入，測試不必連資料庫
 const express = require('express')
@@ -12,8 +13,10 @@ const { rateLimit } = require('express-rate-limit')
 const JournalEntryModel = require('../models/JournalEntry')
 const ReadingModel = require('../models/Reading')
 const MarketAnalysisModel = require('../models/MarketAnalysis')
+const MarketWatchModel = require('../models/MarketWatch')
 const { OUTCOMES, TITLE_MAX } = JournalEntryModel
 const { validateJournalContent, summaryOf } = require('../services/journalContent')
+const { parseStockKey, findForStock, parseStockFields, hasStockRecord } = require('../services/stockJournal')
 const { taipeiDayKey } = require('../services/dailyCard')
 
 // 一個對象最多幾篇（一般後續追蹤用不到這麼多，只是擋灌資料）
@@ -33,12 +36,19 @@ function defaultWriteLimiter() {
   })
 }
 
-// "reading:<id>" / "stock:<id>" → { kind, id } 或 null
+// "reading:<id>" / "stock:<市場>:<代號>" → { kind, id }（股票另帶 stock）或 null。
+// 舊的 stock:<分析 id> 不再收（啟動時已轉成股票鍵；前端舊網址會先查分析再轉到新網址）
 function parseTarget(value) {
   if (typeof value !== 'string') return null
-  const [kind, id, ...rest] = value.split(':')
-  if (rest.length || !id) return null
-  if ((kind === 'reading' || kind === 'stock') && /^[a-f0-9]{24}$/i.test(id)) return { kind, id: id.toLowerCase() }
+  const index = value.indexOf(':')
+  if (index < 0) return null
+  const kind = value.slice(0, index)
+  const rest = value.slice(index + 1)
+  if (kind === 'reading') return /^[a-f0-9]{24}$/i.test(rest) ? { kind, id: rest.toLowerCase() } : null
+  if (kind === 'stock') {
+    const stock = parseStockKey(rest)
+    return stock ? { kind, id: stock.key, stock } : null
+  }
   return null
 }
 
@@ -58,8 +68,23 @@ function viewOf(entry) {
     text: entry.text || '',
     outcome: entry.outcome || null,
     entryDate: entry.entryDate,
+    stock: entry.targetKind === 'stock' && hasStockRecord(entry.stock) ? stockView(entry.stock) : null,
     createdAt: new Date(entry.createdAt).toISOString(),
     updatedAt: new Date(entry.updatedAt || entry.createdAt).toISOString(),
+  }
+}
+
+function stockView(stock) {
+  const pick = (key) => stock[key] ?? null
+  return {
+    action: pick('action'),
+    price: pick('price'),
+    quantity: pick('quantity'),
+    unit: pick('unit'),
+    quoteAtWrite: pick('quoteAtWrite'),
+    quoteDate: pick('quoteDate'),
+    targetPrice: pick('targetPrice'),
+    stopPrice: pick('stopPrice'),
   }
 }
 
@@ -85,15 +110,34 @@ function createJournalRouter({
   JournalEntry = JournalEntryModel,
   Reading = ReadingModel,
   MarketAnalysis = MarketAnalysisModel,
+  MarketWatch = MarketWatchModel,
   now = () => new Date(),
   writeLimiter = defaultWriteLimiter(),
 }) {
   const router = express.Router()
 
-  // 對象要是自己的：自己的塔羅紀錄、自己的股票分析
+  // 對象要是自己的：自己的塔羅紀錄；股票要是自己分析過或追蹤中的（不能寫任意代號灌資料）
   async function ownsTarget(userId, target) {
     if (target.kind === 'reading') return Boolean(await Reading.findOne({ _id: target.id, user: userId }).select('_id').lean())
-    return Boolean(await MarketAnalysis.findOne({ _id: target.id, user: userId }).select('_id').lean())
+    const [analyses, watches] = await Promise.all([
+      findForStock(MarketAnalysis, userId, target.stock),
+      findForStock(MarketWatch, userId, target.stock),
+    ])
+    return analyses.length > 0 || watches.length > 0
+  }
+
+  // 記錄股票的欄位只有股票日記收；回傳 false 時已回 400
+  function readStockFields(body, kind, res) {
+    const parsed = parseStockFields(body.stock)
+    if (parsed.error) {
+      res.status(400).json({ message: parsed.error })
+      return null
+    }
+    if (parsed.value && kind !== 'stock') {
+      res.status(400).json({ message: '只有股票日記可以記錄股票。' })
+      return null
+    }
+    return parsed
   }
 
   function checkEntryDate(value, res) {
@@ -150,7 +194,10 @@ function createJournalRouter({
         res.status(400).json({ message: title.error })
         return
       }
-      if (!checked.text && !outcome.value && !title.value) {
+      const stock = readStockFields(body, target.kind, res)
+      if (!stock) return
+      // 只填了股票欄位（例如買進 1 張）也算有寫
+      if (!checked.text && !outcome.value && !title.value && !stock.value) {
         res.status(400).json({ message: '日記是空的。' })
         return
       }
@@ -160,7 +207,7 @@ function createJournalRouter({
       const userId = req.auth.userId
       // 別人的紀錄、沒抽過的那天一律當成不存在
       if (!(await ownsTarget(userId, target))) {
-        res.status(404).json({ message: '找不到這筆紀錄。' })
+        res.status(404).json({ message: target.kind === 'stock' ? '這檔股票要先分析過或加入追蹤，才能寫日記。' : '找不到這筆紀錄。' })
         return
       }
       const count = await JournalEntry.countDocuments({ user: userId, targetKind: target.kind, targetId: target.id })
@@ -178,6 +225,7 @@ function createJournalRouter({
         text: summaryOf(checked.text),
         outcome: outcome.value ?? null,
         entryDate,
+        stock: stock.value ?? null,
       })
       res.status(201).json({ entry: viewOf(entry) })
     } catch (error) {
@@ -219,7 +267,7 @@ function createJournalRouter({
         if (!checkEntryDate(body.entryDate, res)) return
         update.entryDate = body.entryDate
       }
-      if (!Object.keys(update).length) {
+      if (!Object.keys(update).length && body.stock === undefined) {
         res.status(400).json({ message: '沒有要修改的內容。' })
         return
       }
@@ -230,10 +278,15 @@ function createJournalRouter({
         res.status(404).json({ message: '找不到這篇日記。' })
         return
       }
+      // 股票欄位要看這篇是不是股票日記才知道收不收；帶了就整組換掉，null＝清掉
+      const stock = readStockFields(body, entry.targetKind, res)
+      if (!stock) return
+      if (stock.value !== undefined) update.stock = stock.value
       const nextText = update.text ?? entry.text
       const nextOutcome = update.outcome !== undefined ? update.outcome : entry.outcome
       const nextTitle = update.title ?? entry.title
-      if (!nextText && !nextOutcome && !nextTitle) {
+      const nextStock = update.stock !== undefined ? update.stock : entry.stock
+      if (!nextText && !nextOutcome && !nextTitle && !hasStockRecord(nextStock)) {
         res.status(400).json({ message: '日記是空的。' })
         return
       }

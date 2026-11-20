@@ -527,9 +527,12 @@ function createMarketRouter({
         Model: MarketAlert,
         getSignals: marketService.getAlertSignals ? (target) => marketService.getAlertSignals(target) : null,
       })
-      // 有開啟推播的話也送出（手機上不一定開著這個網頁）（手機上不一定開著這個網頁）；失敗不影響回應
+      // 先存進通知中心（回應前存好，網頁收到到價提示時鈴鐺的未讀數也對得上；失敗只記 log）
+      const recorded = Boolean(notifier?.recordAlerts && triggered.length)
+      if (recorded) await notifier.recordAlerts(triggered)
+      // 有開啟推播的話也送出（手機上不一定開著這個網頁）；失敗不影響回應
       if (notifier && triggered.length) {
-        notifier.notifyAlerts(triggered).catch((error) => console.error('提醒推播失敗：', error.message))
+        notifier.notifyAlerts(triggered, { recorded }).catch((error) => console.error('提醒推播失敗：', error.message))
       }
 
       const all = await MarketAlert.find({ user: req.auth.userId }).sort({ createdAt: -1 })

@@ -5,6 +5,7 @@ const express = require('express')
 
 const { validateJournalContent, summaryOf } = require('../src/services/journalContent')
 const { createJournalRouter, parseTarget } = require('../src/routes/journal')
+const { stockKeyOf, parseStockFields, migrateStockJournalTargets } = require('../src/services/stockJournal')
 const { USER_DATA_MODELS } = require('../src/services/accountDeletion')
 
 const OWNER = '507f1f77bcf86cd799439011'
@@ -86,12 +87,41 @@ test('內容：超過 50KB 或層次太深都拒絕', () => {
   assert.match(validateJournalContent(doc(deep)).error, /太深/)
 })
 
-test('對象格式：reading:<ObjectId> 或 stock:<ObjectId>；每日一牌（daily）已經不收', () => {
+test('對象格式：reading:<ObjectId> 或 stock:<市場>:<代號>；每日一牌（daily）與舊的 stock:<分析 id> 已經不收', () => {
   assert.deepStrictEqual(parseTarget(`reading:${READING_ID}`), { kind: 'reading', id: READING_ID })
   assert.strictEqual(parseTarget('daily:2026-11-20'), null)
-  assert.deepStrictEqual(parseTarget(`stock:${READING_ID.toUpperCase()}`), { kind: 'stock', id: READING_ID })
-  for (const value of [undefined, '', 'reading:', 'reading:abc', 'daily:2026/11/20', 'stock:2330', `reading:${READING_ID}:x`, { $ne: 1 }]) {
-    assert.strictEqual(parseTarget(value), null, String(value))
+  assert.strictEqual(parseTarget('stock:tw:0050').id, 'tw:0050')
+  assert.strictEqual(parseTarget('stock:us:nvda').id, 'us:NVDA')
+  assert.strictEqual(parseTarget('stock:tw:^TWII').id, 'tw:^TWII')
+  assert.strictEqual(parseTarget('stock:TW:00679b').id, 'tw:00679B')
+  const bad = [undefined, '', 'reading:', 'reading:abc', 'daily:2026/11/20', 'stock:2330', `stock:${ANALYSIS_ID}`, `reading:${READING_ID}:x`,
+    'stock:jp:7203', 'stock:tw:', 'stock:tw:a b', 'stock:tw:<script>', 'stock:tw:12345678901234567', { $ne: 1 }]
+  for (const value of bad) assert.strictEqual(parseTarget(value), null, String(value))
+})
+
+test('股票鍵：台股用代號、美股與指數用 symbol；和分析紀錄的 target 對得上', () => {
+  assert.strictEqual(stockKeyOf({ market: 'tw', code: '0050', symbol: '0050.TW' }), 'tw:0050')
+  assert.strictEqual(stockKeyOf({ market: 'us', code: null, symbol: 'nvda' }), 'us:NVDA')
+  assert.strictEqual(stockKeyOf({ market: 'tw', code: null, symbol: '^TWII' }), 'tw:^TWII')
+  // 真實的指數資料：加權 code 't00'＋symbol '^TWII'，櫃買 'o00' 沒有 symbol
+  assert.strictEqual(stockKeyOf({ market: 'tw', kind: 'index', code: 't00', symbol: '^TWII' }), 'tw:^TWII')
+  assert.strictEqual(stockKeyOf({ market: 'tw', kind: 'index', code: 'o00', symbol: null }), 'tw:O00')
+  assert.strictEqual(stockKeyOf({ market: 'jp', symbol: '7203' }), null)
+  assert.strictEqual(stockKeyOf(null), null)
+})
+
+test('記錄股票的欄位：可選填、數值要大於 0、動作與單位只收清單裡的', () => {
+  assert.deepStrictEqual(parseStockFields(undefined), { value: undefined })
+  assert.deepStrictEqual(parseStockFields(null), { value: null })
+  // 全部沒填＝沒有
+  assert.deepStrictEqual(parseStockFields({ action: null, price: '' }), { value: null })
+  const ok = parseStockFields({ action: 'buy', price: 152.35, quantity: 2, unit: 'lot', quoteAtWrite: 150, quoteDate: '2026-11-20', targetPrice: 180, stopPrice: 140 })
+  assert.deepStrictEqual(ok.value, { action: 'buy', unit: 'lot', quoteDate: '2026-11-20', price: 152.35, quantity: 2, quoteAtWrite: 150, targetPrice: 180, stopPrice: 140 })
+  for (const bad of [{ action: 'short' }, { unit: 'kg' }, { price: -1 }, { price: '100' }, { price: 0 }, { quantity: Infinity },
+    { targetPrice: 1e9 }, { quoteDate: '20261120' }, { extra: 1 }, [], 'buy', { action: { $ne: null } },
+    // 四捨五入到小數 4 位後是 0 的也不收（api-reviewer）
+    { price: 0.00001 }, { quantity: 0.00004 }]) {
+    assert.ok(parseStockFields(bad).error, JSON.stringify(bad))
   }
 })
 
@@ -133,8 +163,19 @@ function fakeModels({ entries = [] } = {}) {
   }
   const Reading = { findOne: (filter) => query(filter._id === READING_ID && String(filter.user) === OWNER ? { _id: READING_ID } : null) }
   const DailyCard = { findOne: (filter) => query(filter.date === '2026-11-19' && String(filter.user) === OWNER ? { _id: 'd1' } : null) }
-  const MarketAnalysis = { findOne: (filter) => query(filter._id === ANALYSIS_ID && String(filter.user) === OWNER ? { _id: ANALYSIS_ID } : null) }
-  return { JournalEntry, Reading, DailyCard, MarketAnalysis }
+  // OWNER 分析過台積電與加權指數（真實資料：code t00、symbol ^TWII），追蹤 NVDA 與櫃買指數（o00，沒有 symbol）
+  const analyses = [
+    { user: OWNER, target: { market: 'tw', kind: 'stock', code: '2330', symbol: '2330.TW' } },
+    { user: OWNER, target: { market: 'tw', kind: 'index', code: 't00', symbol: '^TWII' } },
+  ]
+  const watches = [
+    { user: OWNER, target: { market: 'us', kind: 'stock', code: null, symbol: 'NVDA' } },
+    { user: OWNER, target: { market: 'tw', kind: 'index', code: 'o00', symbol: null } },
+  ]
+  const byMarket = (rows) => (filter) => query(rows.filter((r) => r.user === String(filter.user) && r.target.market === filter['target.market']))
+  const MarketAnalysis = { find: byMarket(analyses) }
+  const MarketWatch = { find: byMarket(watches) }
+  return { JournalEntry, Reading, DailyCard, MarketAnalysis, MarketWatch }
 }
 
 function appWith(models) {
@@ -245,16 +286,72 @@ test('新增與修改依帳號限速：每分鐘 30 次，換一個帳號不受�
   })
 })
 
-test('股票分析也能寫日記：只能寫在自己的分析底下（2026-11-20）', async () => {
+test('股票日記一檔一本：分析過或追蹤中的股票才能寫，任意代號不行（v26 計畫 2-2）', async () => {
   const models = fakeModels()
   await withServer(appWith(models), async (base) => {
-    const mine = await fetch(`${base}/api/journal`, json(OWNER, { target: `stock:${ANALYSIS_ID}`, content: doc(p('跌破月線就出場')), outcome: 'partial' }))
+    const mine = await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:2330', content: doc(p('跌破月線就出場')), outcome: 'partial' }))
     assert.strictEqual(mine.status, 201)
-    assert.strictEqual((await mine.json()).entry.target, `stock:${ANALYSIS_ID}`)
-    assert.strictEqual((await fetch(`${base}/api/journal`, json(OTHER, { target: `stock:${ANALYSIS_ID}`, content: doc(p('x')) }))).status, 404)
-    const list = await (await fetch(`${base}/api/journal?target=stock:${ANALYSIS_ID}`, { headers: { 'x-user': OWNER } })).json()
+    const { entry } = await mine.json()
+    assert.strictEqual(entry.target, 'stock:tw:2330')
+    assert.strictEqual(entry.stock, null)
+    // 只追蹤、沒分析過的也可以
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:us:nvda', content: doc(p('x')) }))).status, 201)
+    // 沒分析也沒追蹤：404；別人不能寫我的股票
+    const unknown = await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:0050', content: doc(p('x')) }))
+    assert.strictEqual(unknown.status, 404)
+    assert.match((await unknown.json()).message, /分析過或加入追蹤/)
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OTHER, { target: 'stock:tw:2330', content: doc(p('x')) }))).status, 404)
+    // 指數：加權用 ^TWII、櫃買用 O00；代號 t00 或別名 2330.TW 不能另開一本（api-reviewer 2026-11-20）
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:^TWII', content: doc(p('x')) }))).status, 201)
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:o00', content: doc(p('x')) }))).status, 201)
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:t00', content: doc(p('x')) }))).status, 404)
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:2330.TW', content: doc(p('x')) }))).status, 404)
+    const list = await (await fetch(`${base}/api/journal?target=stock:tw:2330`, { headers: { 'x-user': OWNER } })).json()
     assert.strictEqual(list.entries.length, 1)
   })
+})
+
+test('記錄股票：只有股票日記收，可以只填股票欄位，修改時整組換掉或清掉（D8）', async () => {
+  const models = fakeModels()
+  await withServer(appWith(models), async (base) => {
+    const stock = { action: 'buy', price: 1000, quantity: 1, unit: 'lot', quoteAtWrite: 998, quoteDate: '2026-11-20', targetPrice: 1200, stopPrice: 900 }
+    const created = await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:2330', content: doc({ type: 'paragraph' }), stock }))
+    assert.strictEqual(created.status, 201)
+    const { entry } = await created.json()
+    assert.deepStrictEqual(entry.stock, stock)
+    // 塔羅紀錄的日記不收股票欄位；欄位不對回 400
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: `reading:${READING_ID}`, content: doc(p('x')), stock: { action: 'buy' } }))).status, 400)
+    assert.strictEqual((await fetch(`${base}/api/journal`, json(OWNER, { target: 'stock:tw:2330', content: doc(p('x')), stock: { action: 'short' } }))).status, 400)
+    // 修改：整組換掉
+    const changed = await (await fetch(`${base}/api/journal/${entry.id}`, json(OWNER, { stock: { action: 'sell', price: 1100 } }, 'PUT'))).json()
+    assert.deepStrictEqual(changed.entry.stock, { action: 'sell', price: 1100, quantity: null, unit: null, quoteAtWrite: null, quoteDate: null, targetPrice: null, stopPrice: null })
+    // 清掉之後什麼都沒寫：400；塔羅日記帶股票欄位：400
+    assert.strictEqual((await fetch(`${base}/api/journal/${entry.id}`, json(OWNER, { stock: null }, 'PUT'))).status, 400)
+    const reading = await (await fetch(`${base}/api/journal`, json(OWNER, { target: `reading:${READING_ID}`, content: doc(p('x')) }))).json()
+    assert.strictEqual((await fetch(`${base}/api/journal/${reading.entry.id}`, json(OWNER, { stock: { action: 'buy' } }, 'PUT'))).status, 400)
+  })
+})
+
+test('舊格式轉換（D9）：stock:<分析 id> 改成那筆分析的股票；找不到分析的保留；重跑不會再動', async () => {
+  const OLD_ID = '507f1f77bcf86cd799439055'
+  const GONE_ID = '507f1f77bcf86cd799439066'
+  const rows = [
+    { _id: 'j1', user: OWNER, targetKind: 'stock', targetId: OLD_ID },
+    { _id: 'j2', user: OWNER, targetKind: 'stock', targetId: GONE_ID },
+    { _id: 'j3', user: OWNER, targetKind: 'stock', targetId: 'tw:2330' },
+    { _id: 'j4', user: OWNER, targetKind: 'reading', targetId: READING_ID },
+  ]
+  const JournalEntry = {
+    find: (filter) => query(rows.filter((r) => r.targetKind === filter.targetKind && filter.targetId.test(r.targetId))),
+    updateOne: async (filter, update) => Object.assign(rows.find((r) => r._id === filter._id), update.$set),
+  }
+  const analyses = { [OLD_ID]: { user: OWNER, target: { market: 'us', code: null, symbol: 'MU' } } }
+  // 別人的分析對不上（user 也要符合）
+  const MarketAnalysis = { findOne: (filter) => query(analyses[filter._id]?.user === filter.user ? analyses[filter._id] : null) }
+  const silent = { log() {} }
+  assert.deepStrictEqual(await migrateStockJournalTargets({ JournalEntry, MarketAnalysis, log: silent }), { converted: 1, orphaned: 1 })
+  assert.deepStrictEqual(rows.map((r) => r.targetId), ['us:MU', GONE_ID, 'tw:2330', READING_ID])
+  assert.deepStrictEqual(await migrateStockJournalTargets({ JournalEntry, MarketAnalysis, log: silent }), { converted: 0, orphaned: 1 })
 })
 
 test('標題：存下來、可以改、只有標題也算有寫；太長或不是字串回 400（2026-11-20）', async () => {

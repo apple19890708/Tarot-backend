@@ -1,4 +1,5 @@
 const mongoose = require('mongoose')
+const { stockKeyOf } = require('../services/stockJournal')
 
 // 每位使用者保留的筆數上限（和塔羅紀錄一樣）。超過就從最舊的開始刪
 const MAX_ANALYSES_PER_USER = 100
@@ -43,6 +44,8 @@ marketAnalysisSchema.methods.toSummaryJSON = function toSummaryJSON() {
   return {
     id: String(this._id),
     watch: this.watch ? String(this.watch) : null,
+    // 股票日記的鍵（tw:0050、us:NVDA；v26 計畫 2-2）：由後端算，前端不用重算規則
+    stockKey: stockKeyOf(this.target),
     target: {
       symbol: this.target.symbol,
       code: this.target.code,
