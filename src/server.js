@@ -20,6 +20,8 @@ const { createMailer } = require('./services/mailer')
 const { createGoogleVerifier } = require('./services/googleAuth')
 const { createAdminRouter } = require('./routes/admin')
 const { createReadingsRouter } = require('./routes/readings')
+const { createDailyCardRouter } = require('./routes/dailyCard')
+const { createJournalRouter } = require('./routes/journal')
 const { isSameCards, followUpRelation, mergeFollowUpRecords } = require('./services/readingHistory')
 const {
   FOLLOW_UP_MAX_ROUNDS,
@@ -189,6 +191,10 @@ async function ensureDomainAllowed(req, res, domain) {
 }
 
 app.use('/api/readings', createReadingsRouter({ ensureDatabase, requireAuth, ensureDomainAllowed }))
+// 每日一牌與月曆（v26 計畫 1）：/api/daily-card/today、/api/daily-card/draw、/api/calendar
+app.use('/api', createDailyCardRouter({ ensureDatabase, requireAuth, optionalAuth }))
+// 占卜日記（v26 計畫 2）
+app.use('/api', createJournalRouter({ ensureDatabase, requireAuth }))
 
 app.get('/api/health', async (_req, res) => {
   const cardCount = isDatabaseReady() ? await Card.countDocuments() : 0
@@ -547,6 +553,7 @@ app.use(
     MarketAnalysis,
     MarketProfile,
     MarketAiUsage,
+    JournalEntry: require('./models/JournalEntry'),
     news: newsSync,
     ai: { isAvailable: isNarrationAvailable, stream: streamMarketChat },
   }),
@@ -986,6 +993,10 @@ async function connectDatabase(attempt = 1) {
     const dbName = process.env.MONGO_DB_NAME || 'tarot-divination'
     await mongoose.connect(mongoUri, { dbName })
     console.log(`MongoDB connected (db: ${dbName})${attempt > 1 ? `，第 ${attempt} 次嘗試` : ''}`)
+    // 每日一牌的 user＋date 唯一索引擋住重複抽牌；建索引失敗只會靜靜地發 error 事件，這裡明確等它建好並記 log（api-reviewer 2026-11-20）
+    require('./models/DailyCard')
+      .init()
+      .catch((error) => console.error('每日一牌唯一索引建立失敗（重複抽牌可能存成兩筆）：', error.message))
   } catch (error) {
     const delay = Math.min(DB_RETRY_MAX_MS, DB_RETRY_FIRST_MS * 2 ** (attempt - 1))
     console.error(`MongoDB connection failed（第 ${attempt} 次）：${error.message}；${delay / 1000} 秒後重試`)

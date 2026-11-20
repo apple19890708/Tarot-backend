@@ -107,7 +107,13 @@ function makeFakeReading({ records = [makeRecord()] } = {}) {
 }
 
 // userId 固定成 OWNER，等於「已登入的那位使用者」
-function makeApp({ Reading, userId = OWNER, ensureDomainAllowed } = {}) {
+// 假的 JournalEntry：記下刪除條件（刪紀錄時它的日記一起刪）
+function makeFakeJournal() {
+  const calls = []
+  return { calls, deleteMany: async (where) => (calls.push(where), { deletedCount: 0 }) }
+}
+
+function makeApp({ Reading, userId = OWNER, ensureDomainAllowed, JournalEntry = makeFakeJournal() } = {}) {
   const app = express()
   app.use(express.json())
   app.use(
@@ -119,6 +125,7 @@ function makeApp({ Reading, userId = OWNER, ensureDomainAllowed } = {}) {
         next()
       },
       Reading,
+      JournalEntry,
       ensureDomainAllowed,
       // 不連資料庫，牌名直接給假的
       loadCardsInOrder: async (drawn) => ({
@@ -163,13 +170,15 @@ test('刪別人的紀錄刪不掉，回 404', async () => {
   assert.strictEqual(String(Reading.calls.deleteOne[0].user), OWNER)
 })
 
-test('刪自己的紀錄成功', async () => {
+test('刪自己的紀錄成功，它的日記一起刪（v26 計畫 2）', async () => {
   const Reading = makeFakeReading()
-  await withServer(makeApp({ Reading }), async (base) => {
+  const JournalEntry = makeFakeJournal()
+  await withServer(makeApp({ Reading, JournalEntry }), async (base) => {
     const response = await fetch(`${base}/api/readings/${RECORD_ID}`, { method: 'DELETE' })
     assert.strictEqual(response.status, 200)
     assert.deepStrictEqual(await response.json(), { deleted: true })
   })
+  assert.deepStrictEqual(JournalEntry.calls, [{ user: OWNER, targetKind: 'reading', targetId: RECORD_ID }])
 })
 
 test('id 不合法時當成找不到，不送出刪除', async () => {
@@ -329,13 +338,17 @@ function makeTrimModel(total) {
 
 test('紀錄沒超過上限時不刪東西', async () => {
   const model = makeTrimModel(MAX_READINGS_PER_USER)
-  await trimHistory(OWNER, model)
+  const journal = makeFakeJournal()
+  await trimHistory(OWNER, model, journal)
   assert.strictEqual(model.state.deleted, null)
+  assert.deepStrictEqual(journal.calls, [])
 })
 
-test('超過上限時刪掉最舊的，且只刪自己的', async () => {
+test('超過上限時刪掉最舊的，且只刪自己的；它們的日記一起刪（api-reviewer 2026-11-20）', async () => {
   const model = makeTrimModel(MAX_READINGS_PER_USER + 2)
-  await trimHistory(OWNER, model)
+  const journal = makeFakeJournal()
+  await trimHistory(OWNER, model, journal)
+  assert.deepStrictEqual(journal.calls, [{ user: OWNER, targetKind: 'reading', targetId: { $in: ['old-0', 'old-1'] } }])
 
   // 由新到舊排序後跳過上限筆數，剩下的才是要刪的「最舊的」
   assert.strictEqual(model.state.sort.createdAt, -1)

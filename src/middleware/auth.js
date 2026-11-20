@@ -14,7 +14,8 @@ function createAuthMiddleware({ findUserById, secret, touchUser = null, now = ()
   // 解析 token 並回資料庫確認：帳號還在、沒被停用、版本號一致。任何一項不符回 null（當成沒登入）
   async function resolveUser(req) {
     const payload = verifyToken(readBearerToken(req.headers.authorization), { secret })
-    if (!payload) return null
+    // 有 purpose 的是別的用途的憑證（例如每日一牌的領取憑證），不能當登入 token
+    if (!payload || !payload.sub || payload.purpose) return null
     const user = await findUserById(payload.sub)
     if (!user || user.disabled || versionOf(payload.ver) !== versionOf(user.tokenVersion)) return null
     markActive(user)

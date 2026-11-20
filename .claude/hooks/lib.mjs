@@ -44,8 +44,13 @@ export function saveState(state) {
 // gate.json：要把關的 repo（本 repo 與相鄰的另一個 repo，因為兩者常一起改）
 export function loadTargets() {
   const config = JSON.parse(readFileSync(join(HOOK_DIR, 'gate.json'), 'utf8'))
+  // dir 可以是字串或候選清單：相鄰 repo 的資料夾名稱在各台電腦不一定一樣（Tarot-backend／Tbackend），
+  // 取第一個存在的。都找不到就略過（2026-11-20：寫死一個名稱時，另一台電腦上跨 repo 的把關會悄悄失效）
   return config.targets
-    .map((t) => ({ ...t, dir: resolve(REPO_ROOT, t.dir) }))
+    .map((t) => {
+      const dirs = (Array.isArray(t.dir) ? t.dir : [t.dir]).map((dir) => resolve(REPO_ROOT, dir))
+      return { ...t, dir: dirs.find((dir) => existsSync(join(dir, 'package.json'))) ?? dirs[0] }
+    })
     .filter((t) => existsSync(join(t.dir, 'package.json')))
 }
 

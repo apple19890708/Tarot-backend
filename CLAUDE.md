@@ -90,11 +90,18 @@
 
 ## 自動把關（hooks，`.claude/settings.json`）
 
-規範裡「一定要做」的幾件事由 hook 強制執行，不靠記憶。前後端是同一套（`.claude/hooks/`：`lib.mjs`／`guard.mjs`／`stop-gate.mjs` 兩邊內容相同，差別只在 `gate.json`），改一邊要同步另一邊。
+規範裡「一定要做」的幾件事由 hook 強制執行，不靠記憶。前後端是同一套（`.claude/hooks/`：`lib.mjs`／`guard.mjs`／`stop-gate.mjs` 兩邊內容相同，差別只在 `gate.json`），改一邊要同步另一邊。`gate.json` 的相鄰 repo 路徑寫成候選清單（`Tarot-fontEnd`／`Tfontend`），資料夾名稱在各台電腦不同也找得到；都找不到時那個 repo 會被略過。
 
-- **結束回合前（Stop）**：前後端任一 repo 的監看路徑有未 commit 的改動，就跑該 repo 的驗證（後端 `npm test`、前端 `npm run build`）。沒過會被擋回來繼續修；連續 3 次仍沒過才放行，並在畫面上提醒使用者。通過的結果依改動內容記指紋，內容沒變不重跑。
+- **結束回合前（Stop）**：前後端任一 repo 的監看路徑有未 commit 的改動，就跑該 repo 的驗證（後端 `npm test`、前端 `npm run check:rules && npm run build && npm test`）。沒過會被擋回來繼續修；連續 3 次仍沒過才放行，並在畫面上提醒使用者。通過的結果依改動內容記指紋，內容沒變不重跑。
 - **commit 前（PreToolUse）**：同樣的驗證沒過，`git commit` 直接被拒絕。
 - **保護**：不能讀 `.env*`（`.env.example` 可以）；不能結束 4000／5173 的程序、它的上層與子程序，也不能依名稱結束 node。
 - 被擋下時照訊息修正，**不要繞過**（例如換別的指令讀 `.env`）。真的是誤擋就回報使用者，並修 `.claude/hooks/` 的判斷、補測試案例。
 - 已知限制：shell 指令裡只要出現 `.env` 檔名就會被擋（分不出是讀還是寫文件），要在文件裡提到它時改用 Edit／Write。
 - 推上 GitHub 後還有 CI（後端 `npm test`、前端 build）。CI 不需要 `.env`：測試自帶測試用密鑰、不連資料庫。
+
+## 推送流程（2026-11-20 使用者決定：PR＋CI 通過才能合併）
+
+- 改動一律開分支（例如 `claude/<主題>`）、push 分支、開 PR，CI 綠了才合併到 `main`；不要直接 push `main`。
+- 開 PR：這台電腦沒有 `gh`，push 分支後把 GitHub 給的 `pull/new/<分支>` 連結交給使用者開，或請使用者合併。
+- 合併到 `main` 之後才部署：前端由 `deploy-pages.yml` 部署 GitHub Pages，後端由 Cloud Build 部署 Cloud Run。
+- 分支保護在 GitHub 的 repo 設定（Settings → Branches／Rules），必要的檢查：前端 `Frontend CI` 的 `build`、後端 `Backend CI` 的 `test`。

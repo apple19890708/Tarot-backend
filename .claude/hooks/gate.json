@@ -4,13 +4,33 @@
       "name": "後端",
       "dir": ".",
       "run": "npm test",
-      "watch": ["src", "test", "scripts", "package.json", "package-lock.json"]
+      "watch": [
+        "src",
+        "test",
+        "scripts",
+        "package.json",
+        "package-lock.json"
+      ]
     },
     {
       "name": "前端",
-      "dir": "../Tarot-fontEnd",
-      "run": "npm run check:rules && npm run build",
-      "watch": ["src", "public", "scripts", "index.html", "vite.config.ts", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json"]
+      "dir": [
+        "../Tarot-fontEnd",
+        "../Tfontend"
+      ],
+      "run": "npm run check:rules && npm run build && npm test",
+      "watch": [
+        "src",
+        "public",
+        "scripts",
+        "index.html",
+        "vite.config.ts",
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json"
+      ]
     }
   ]
 }

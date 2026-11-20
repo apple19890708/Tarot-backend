@@ -18,10 +18,10 @@ netstat -ano | grep -E ":(4000|4100|5173|5180) "
 ## 2. 啟動（不加 --watch，避免改檔重啟中斷請求）
 
 ```bash
-PORT=4100 node src/server.js
+PORT=4100 CLIENT_URL=http://localhost:5180 node src/server.js
 ```
 
-背景執行，並記下 PID。需要前端畫面時，前端用 5180 指向 4100（見 `../Tfontend/.claude/skills/dev-server`）。
+背景執行，並記下 PID。`CLIENT_URL` 要含前端測試伺服器的 5180：瀏覽器送 POST 會帶 Origin，不在允許清單就被 CORS 擋掉（GET 不會，所以只看畫面時不會發現；2026-11-20 每日一牌彈窗抽牌時踩到）。要註冊測試帳號時另外帶 `GMAIL_REFRESH_TOKEN=`（空值），寄信功能視為未設定、不會寄出驗證信；測完用 `DELETE /api/auth/me` 刪掉測試帳號。需要前端畫面時，前端用 5180 指向 4100（見 `../Tfontend/.claude/skills/dev-server`）。
 
 ## 3. 收尾（必做）
 

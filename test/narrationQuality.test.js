@@ -563,3 +563,14 @@ test('第八批 10000 題：否定＋吧、口語尾音、還是＝仍然、期�
   assert.ok(qt('要去還是不去？').kinds.includes('choice'))
   for (const question of ['幾號會放榜？', '要到幾月才會好轉？', '他哪天會回覆我？']) assert.ok(isTimingQuestion(question), question)
 })
+
+test('版本 15 口語化：位置判定、障礙說明、提示詞範例不再用「其他格」「阻力」「推力」（2026-11-20）', () => {
+  assert.ok(PROMPT_VERSION >= 15)
+  const challenge = spreads.flatMap((spread) => spread.positions).find((position) => position.key === 'challenge' && position.label === '障礙')
+  assert.strictEqual(challenge.prompt, '現在擋在你前面的是什麼')
+  assert.doesNotMatch(narration.BASE_PROMPT, /做了就算數的推力|時間線上一下/)
+  assert.match(narration.BASE_PROMPT, /那股衝勁/)
+  const mixed = buildReading({ question: '', spread: spreadOf('timeline'), cards: CARDS, drawOrientation: (i) => (i === 0 ? 'reversed' : 'upright') })
+  const text = JSON.stringify(mixed.analysis)
+  assert.doesNotMatch(text, /其他格|時間線上/)
+})

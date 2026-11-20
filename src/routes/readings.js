@@ -6,6 +6,7 @@ const express = require('express')
 const mongoose = require('mongoose')
 
 const ReadingModel = require('../models/Reading')
+const JournalEntryModel = require('../models/JournalEntry')
 const { FEEDBACK_VALUES, FEEDBACK_REASONS } = ReadingModel
 const spreads = require('../data/spreads')
 const { loadCardsInOrder: defaultLoadCardsInOrder } = require('../services/cardLoader')
@@ -35,6 +36,8 @@ function createReadingsRouter({
   ensureDatabase,
   requireAuth,
   Reading = ReadingModel,
+  // 刪紀錄時它的日記一起刪（v26 計畫 2）
+  JournalEntry = JournalEntryModel,
   loadCardsInOrder = defaultLoadCardsInOrder,
   // 股市諮詢這類限 AI 權限的問題類型，由 server 注入檢查；測試沒注入時一律放行
   ensureDomainAllowed = async () => true,
@@ -130,6 +133,7 @@ function createReadingsRouter({
         followUps,
         followUpNarration,
         Reading,
+        JournalEntry,
       })
 
       res.status(201).json({ id: String(record._id), createdAt: record.createdAt })
@@ -370,7 +374,8 @@ function createReadingsRouter({
         return
       }
 
-      if (!mongoose.isValidObjectId(req.params.id)) {
+      // 只收 24 碼 hex（isValidObjectId 連 12 個字元的字串都放行，那樣日記的 targetId 會對不上、刪不到，api-reviewer 2026-11-20）
+      if (!/^[a-f0-9]{24}$/i.test(req.params.id)) {
         res.status(404).json({ message: '找不到這筆紀錄。' })
         return
       }
@@ -381,6 +386,10 @@ function createReadingsRouter({
         res.status(404).json({ message: '找不到這筆紀錄。' })
         return
       }
+      // 這筆的日記一起刪（v26 計畫 2）；失敗只記錄，紀錄已經刪了，留下的日記也只有本人看得到
+      await JournalEntry.deleteMany({ user: req.auth.userId, targetKind: 'reading', targetId: String(req.params.id).toLowerCase() }).catch((error) => {
+        console.error('[readings] 刪除紀錄的日記失敗：', error.message)
+      })
 
       res.json({ deleted: true })
     } catch (error) {
