@@ -659,7 +659,7 @@ function breakdownOf(position) {
   }
 }
 
-// 「獲利與股利」頁的整份資料。items 是 routes/market.js 的 watchJSON（含 position、summary）；
+// 「獲利與股利」頁的整份資料。items 是 routes/marketWatchlist.js 的 watchJSON（含 position、summary）；
 // histories、notices 與 items 同順序／以代號查；usdTwd 取不到時美股不併入台幣合計
 // barsList：每檔的日 K（填息追蹤用，與 items 同順序；沒有就不算）
 // industries：台股代號 → { code, label }（集中度用）；concentration：集中度門檻（使用者設定）

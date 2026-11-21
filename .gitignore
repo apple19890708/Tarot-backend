@@ -11,3 +11,9 @@ scratchpad/
 env.yaml
 # v25 評估結果（含 AI 全文，不進版控）
 eval/results/
+
+# graphify 產生的知識圖（本機用，不進 git）
+graphify-out/
+
+# 含資料庫帳密的筆記檔，不進 git（2026-11-21 發現曾公開在 GitHub）
+data-text.md

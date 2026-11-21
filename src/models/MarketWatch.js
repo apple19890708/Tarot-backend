@@ -67,7 +67,7 @@ const marketWatchSchema = new mongoose.Schema(
     },
     // 自選清單（MarketWatchGroup）：一檔可以同時放在好幾個清單（2026-11-08 起），空陣列＝「未分類」
     groups: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'MarketWatchGroup' }], default: [] },
-    // 舊格式：一檔只屬於一個清單。讀取時當成 groups 的唯一一個（routes/market.js 的 watchGroupIds）；
+    // 舊格式：一檔只屬於一個清單。讀取時當成 groups 的唯一一個（routes/marketWatchlist.js 的 watchGroupIds）；
     // 寫入 groups 時一律清成 null，不再使用
     group: { type: mongoose.Schema.Types.ObjectId, ref: 'MarketWatchGroup', default: null },
     // 自訂順序（越小越前面）；同順序時依加入時間
