@@ -137,9 +137,13 @@ app.use(express.json())
 // JSON 回應 gzip（Cloud Run 不會替回應壓縮；傳出流量是唯一可能超過免費額度的項目）。串流與圖片不經過，見 lib/jsonCompression.js
 app.use(jsonCompression())
 
-// 牌卡圖片（公共領域 RWS 1909），放在 public/cards/。每張約 200KB、內容不會變：
-// 讓瀏覽器快取 7 天，期間不再回來問（原本 max-age=0 每次都要跨太平洋問一次 304）
-app.use('/cards', express.static(path.join(__dirname, '..', 'public', 'cards'), { maxAge: '7d' }))
+// 牌卡圖片，放在 public/cards/，內容不會變：讓瀏覽器快取 7 天，期間不再回來問（原本 max-age=0 每次都要跨太平洋問一次 304）
+// - 原版：公共領域 RWS 1909 的 jpg（每張約 200KB），資料庫 Card.image 存的是這個
+// - 水彩：v28 原創 SVG（scripts/tarot/buildCardArt.js 產生，同 slug 換副檔名），前端選水彩時自己把 .jpg 換成 .svg
+// SVG 先過 gzipStatic（只處理 .svg，啟動時壓好放記憶體，78 張合計約 955KB，壓縮後約 170KB）；jpg 與不接受 gzip 的請求交給 express.static
+const CARDS_DIR = path.join(__dirname, '..', 'public', 'cards')
+app.use('/cards', gzipStatic(CARDS_DIR, { maxAgeSeconds: 7 * 24 * 60 * 60 }))
+app.use('/cards', express.static(CARDS_DIR, { maxAge: '7d' }))
 // 雷諾曼牌面（v27）：原創 SVG（scripts/lenormand/buildCardArt.js 產生），每張 7～21KB，快取設定同 /cards。
 // SVG 是純文字，先過 gzipStatic 送預先壓好的版本（約只剩 2 成）；不接受 gzip 的才交給 express.static 送原檔。
 // 跨網域載入靠 securityHeaders 的 Cross-Origin-Resource-Policy: cross-origin（全站共用，和塔羅一樣）

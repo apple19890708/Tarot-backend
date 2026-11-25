@@ -51,19 +51,20 @@ function cornerOrnament() {
   )
 }
 
-function buildCardSvg(card, motifSvg) {
-  const id = `ln${String(card.id).padStart(2, '0')}`
-  // 背景水彩暈染的顏色：奇數牌偏灰綠、偶數牌偏淡紫，排在一起時有一點變化
-  const washColor = card.id % 2 ? P.sageLight : P.lavLight
-  const corner = cornerOrnament()
+// 牌面共用的底：背景漸層、水彩紙紋、中央水彩暈染、雙層金框、四角花飾（塔羅 v28 也用這一套，見 scripts/tarot/lib/frame.js）
+// id：這張牌的 id 前綴（同一頁多張 SVG 時不能撞）；seed：紙紋雜訊的種子；washColor：中央暈染的顏色
+function paperDefs(id, { seed, washColor }) {
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${escapeXml(`${card.id} ${card.nameZh} ${card.nameEn}`)}">`,
-    `<defs>`,
     `<radialGradient id="${id}bg" cx=".5" cy=".45" r=".75"><stop offset="0" stop-color="${P.paper}"/><stop offset="1" stop-color="${P.cream}"/></radialGradient>`,
     `<radialGradient id="${id}w"><stop offset="0" stop-color="${washColor}" stop-opacity=".85"/><stop offset=".7" stop-color="${washColor}" stop-opacity=".35"/><stop offset="1" stop-color="${washColor}" stop-opacity="0"/></radialGradient>`,
     // 水彩紙紋：一層很淡的雜訊，只在背景用一次，手機上也不會太重
-    `<filter id="${id}p" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="2" seed="${card.id}"/><feColorMatrix values="0 0 0 0 .55 0 0 0 0 .47 0 0 0 0 .33 .2 0 0 0 0"/></filter>`,
-    `</defs>`,
+    `<filter id="${id}p" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="2" seed="${seed}"/><feColorMatrix values="0 0 0 0 .55 0 0 0 0 .47 0 0 0 0 .33 .2 0 0 0 0"/></filter>`,
+  ].join('')
+}
+
+function paperLayers(id) {
+  const corner = cornerOrnament()
+  return [
     `<rect width="${W}" height="${H}" rx="16" fill="url(#${id}bg)"/>`,
     `<rect width="${W}" height="${H}" rx="16" filter="url(#${id}p)" opacity=".7"/>`,
     `<ellipse cx="175" cy="262" rx="132" ry="168" fill="url(#${id}w)"/>`,
@@ -73,20 +74,47 @@ function buildCardSvg(card, motifSvg) {
     `<g transform="translate(${W} 0) scale(-1 1)">${corner}</g>`,
     `<g transform="translate(0 ${H}) scale(1 -1)">${corner}</g>`,
     `<g transform="translate(${W} ${H}) scale(-1 -1)">${corner}</g>`,
-    // 上方牌號
-    `<path d="M128 45H156M194 45H222" stroke="${P.gold}" stroke-width=".9"/>`,
-    `<circle cx="125" cy="45" r="1.6" fill="${P.gold}"/><circle cx="225" cy="45" r="1.6" fill="${P.gold}"/>`,
-    `<text x="175" y="51" text-anchor="middle" font-family="${FONT_EN}" font-size="18" font-weight="600" fill="${P.goldDeep}" letter-spacing="1">${card.id}</text>`,
-    pip(card.playingCard),
-    // 主圖
-    `<g transform="translate(${f(MOTIF_X)} ${MOTIF_Y}) scale(${MOTIF_SCALE})">${motifSvg}</g>`,
-    // 下方名稱
+  ].join('')
+}
+
+// 主圖區塊（240×330 座標）放到牌號與名稱之間
+const motifGroup = (motifSvg) => `<g transform="translate(${f(MOTIF_X)} ${MOTIF_Y}) scale(${MOTIF_SCALE})">${motifSvg}</g>`
+
+// 下方名稱：花飾分隔線、中文名、英文名（英文太長時縮字距，不換行）
+function nameBlock(nameZh, nameEn) {
+  const en = nameEn.toUpperCase()
+  const spacing = en.length > 16 ? 2.2 : 3.5
+  return [
     `<path d="M112 447H162M188 447H238" stroke="${P.gold}" stroke-width=".9"/>`,
     flower(175, 447, 6, { rot: 36 }),
-    `<text x="175" y="487" text-anchor="middle" font-family="${FONT_ZH}" font-size="29" fill="${P.ink}" letter-spacing="5">${escapeXml(card.nameZh)}</text>`,
-    `<text x="175" y="514" text-anchor="middle" font-family="${FONT_EN}" font-size="13" fill="${P.goldDeep}" letter-spacing="3.5">${escapeXml(card.nameEn.toUpperCase())}</text>`,
+    `<text x="175" y="487" text-anchor="middle" font-family="${FONT_ZH}" font-size="29" fill="${P.ink}" letter-spacing="5">${escapeXml(nameZh)}</text>`,
+    `<text x="175" y="514" text-anchor="middle" font-family="${FONT_EN}" font-size="13" fill="${P.goldDeep}" letter-spacing="${spacing}">${escapeXml(en)}</text>`,
+  ].join('')
+}
+
+// 上方牌號兩側的金線與圓點（中間放文字或徽記）
+const topRule = () =>
+  `<path d="M128 45H156M194 45H222" stroke="${P.gold}" stroke-width=".9"/>` +
+  `<circle cx="125" cy="45" r="1.6" fill="${P.gold}"/><circle cx="225" cy="45" r="1.6" fill="${P.gold}"/>`
+
+function buildCardSvg(card, motifSvg) {
+  const id = `ln${String(card.id).padStart(2, '0')}`
+  // 背景水彩暈染的顏色：奇數牌偏灰綠、偶數牌偏淡紫，排在一起時有一點變化
+  const washColor = card.id % 2 ? P.sageLight : P.lavLight
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${escapeXml(`${card.id} ${card.nameZh} ${card.nameEn}`)}">`,
+    `<defs>`,
+    paperDefs(id, { seed: card.id, washColor }),
+    `</defs>`,
+    paperLayers(id),
+    // 上方牌號
+    topRule(),
+    `<text x="175" y="51" text-anchor="middle" font-family="${FONT_EN}" font-size="18" font-weight="600" fill="${P.goldDeep}" letter-spacing="1">${card.id}</text>`,
+    pip(card.playingCard),
+    motifGroup(motifSvg),
+    nameBlock(card.nameZh, card.nameEn),
     `</svg>`,
   ].join('')
 }
 
-module.exports = { buildCardSvg, W, H, MOTIF_X, MOTIF_Y }
+module.exports = { buildCardSvg, paperDefs, paperLayers, motifGroup, nameBlock, topRule, escapeXml, FONT_ZH, FONT_EN, W, H, MOTIF_X, MOTIF_Y, MOTIF_SCALE }
