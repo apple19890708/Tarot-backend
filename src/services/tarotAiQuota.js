@@ -4,8 +4,9 @@
 // 中途被使用者停止的也算；伺服器或 AI 那邊出錯時退還。v21 點數制上線後，這裡留著當防濫用的天花板
 const { startOfTaipeiDay } = require('../routes/marketAnalysis')
 
-const TAROT_AI_DAILY_LIMITS = { tarot: 30, followUp: 30 }
-const LABELS = { tarot: 'AI 解讀', followUp: 'AI 追問' }
+// lenormand：雷諾曼 AI 解讀（v27 D6），和塔羅分開計
+const TAROT_AI_DAILY_LIMITS = { tarot: 30, followUp: 30, lenormand: 30 }
+const LABELS = { tarot: 'AI 解讀', followUp: 'AI 追問', lenormand: '雷諾曼 AI 解讀' }
 
 function createTarotAiQuota({ Usage, now = () => Date.now() } = {}) {
   // { allowed, used, limit }；admin 或沒有用量表時一律放行（limit 為 null）

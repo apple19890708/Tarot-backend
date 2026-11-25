@@ -3,6 +3,7 @@
 //   POST /daily-card/draw       抽今天的牌；登入的存起來、當天固定（D1 不能重抽），訪客只回傳不存、附領取憑證
 //   POST /daily-card/claim      訪客抽的牌在登入或註冊後存進月曆（要登入，只收今天的憑證）
 //   GET  /calendar?month=YYYY-MM 這個月每一天的每日一牌與占卜紀錄摘要（要登入，只看自己的）
+//        v27：占卜紀錄每筆帶 deck（tarot／lenormand）；雷諾曼紀錄與日記只列給有雷諾曼權限的人
 // 每日一牌不呼叫 AI（v26 不做的事）。依賴可以注入，測試不必連資料庫。
 const express = require('express')
 const { rateLimit } = require('express-rate-limit')
@@ -11,6 +12,9 @@ const DailyCardModel = require('../models/DailyCard')
 const CardModel = require('../models/Card')
 const ReadingModel = require('../models/Reading')
 const JournalEntryModel = require('../models/JournalEntry')
+const LenormandReadingModel = require('../models/LenormandReading')
+const { cardById: lenormandCardById } = require('../data/lenormand/cards')
+const { userCanUseLenormand } = require('../middleware/auth')
 const { taipeiDayKey, monthRange, streakOf, dailyCardView } = require('../services/dailyCard')
 const { signDailyClaim, verifyDailyClaim } = require('../lib/jwt')
 
@@ -18,6 +22,8 @@ const { signDailyClaim, verifyDailyClaim } = require('../lib/jwt')
 const STREAK_LOOKBACK = 400
 // 月曆每天最多列幾筆占卜紀錄（一天問很多次時，面板只列最近的）
 const READINGS_PER_DAY = 20
+// 月曆上雷諾曼紀錄列幾張牌名（和紀錄列表一樣）
+const { PREVIEW_CARDS: LENORMAND_PREVIEW_CARDS } = LenormandReadingModel
 
 async function defaultPickCard(Card) {
   const [card] = await Card.aggregate([{ $sample: { size: 1 } }])
@@ -47,6 +53,7 @@ function createDailyCardRouter({
   Card = CardModel,
   Reading = ReadingModel,
   JournalEntry = JournalEntryModel,
+  LenormandReading = LenormandReadingModel,
   pickCard = () => defaultPickCard(Card),
   randomOrientation = () => (Math.random() < 0.5 ? 'upright' : 'reversed'),
   now = () => new Date(),
@@ -213,7 +220,10 @@ function createDailyCardRouter({
       }
       const userId = req.auth.userId
       const today = taipeiDayKey(now())
-      const [dailyRows, readings, streak, journals] = await Promise.all([
+      // 雷諾曼（v27）：沒開通或被收回的人不列雷諾曼紀錄與日記（資料本身不刪，重新開通後又看得到）
+      const lenormand = userCanUseLenormand(req.user)
+      const journalKinds = lenormand ? ['reading', 'stock', 'lenormand'] : ['reading', 'stock']
+      const [dailyRows, readings, streak, journals, lenormandReadings] = await Promise.all([
         DailyCard.find({ user: userId, date: { $gte: range.firstDay, $lt: range.nextFirstDay } }).lean(),
         Reading.find({ user: userId, createdAt: { $gte: range.start, $lt: range.end } })
           .sort({ createdAt: -1 })
@@ -222,10 +232,16 @@ function createDailyCardRouter({
         streakFor(userId, today),
         // 當天寫的日記（v26 計畫 2）：依日記的日期放，不是依它寫在哪一筆底下
         // 每日一牌的日記 2026-11-20 拿掉，舊資料不列
-        JournalEntry.find({ user: userId, targetKind: { $in: ['reading', 'stock'] }, entryDate: { $gte: range.firstDay, $lt: range.nextFirstDay } })
+        JournalEntry.find({ user: userId, targetKind: { $in: journalKinds }, entryDate: { $gte: range.firstDay, $lt: range.nextFirstDay } })
           .sort({ entryDate: 1, createdAt: 1 })
           .select('targetKind targetId title text outcome entryDate')
           .lean(),
+        lenormand
+          ? LenormandReading.find({ user: userId, createdAt: { $gte: range.start, $lt: range.end } })
+              .sort({ createdAt: -1 })
+              .select('question spreadName createdAt cards')
+              .lean()
+          : [],
       ])
 
       const cardIds = [...new Set(dailyRows.map((row) => String(row.cardId)))]
@@ -245,16 +261,30 @@ function createDailyCardRouter({
         // detail：和 /daily-card/today 同一個格式（快照時沒有牌義文字）
         dayOf(row.date).dailyCard = { nameZh: card.nameZh, image: card.image || '', orientation: row.orientation, detail: dailyCardView(card, row.orientation, row.date) }
       }
-      for (const reading of readings) {
-        const day = dayOf(taipeiDayKey(new Date(reading.createdAt)))
-        if (day.readings.length >= READINGS_PER_DAY) continue
-        day.readings.push({
+      // 塔羅與雷諾曼混在一起，依時間新到舊，每天最多 READINGS_PER_DAY 筆
+      const entries = [
+        ...readings.map((reading) => ({
           id: String(reading._id),
+          deck: 'tarot',
           question: reading.question || '',
           spreadName: reading.spreadName || '',
           createdAt: new Date(reading.createdAt).toISOString(),
           cards: (reading.cards || []).map((card) => `${card.nameZh || ''}${card.orientation === 'reversed' ? '逆' : '正'}`),
-        })
+        })),
+        ...lenormandReadings.map((reading) => ({
+          id: String(reading._id),
+          deck: 'lenormand',
+          question: reading.question || '',
+          spreadName: reading.spreadName || '',
+          createdAt: new Date(reading.createdAt).toISOString(),
+          // 雷諾曼沒有正逆位；大藍圖 36 張只列前 5 張
+          cards: (reading.cards || []).slice(0, LENORMAND_PREVIEW_CARDS).map((id) => lenormandCardById.get(id)?.nameZh || ''),
+        })),
+      ].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      for (const entry of entries) {
+        const day = dayOf(taipeiDayKey(new Date(entry.createdAt)))
+        if (day.readings.length >= READINGS_PER_DAY) continue
+        day.readings.push(entry)
       }
 
       for (const entry of journals) {

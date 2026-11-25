@@ -479,4 +479,4 @@ async function findOwnReading(Reading, id, userId) {
   return Reading.findOne({ _id: id, user: userId })
 }
 
-module.exports = { createReadingsRouter, findOwnReading }
+module.exports = { createReadingsRouter, findOwnReading, resolveNarration }

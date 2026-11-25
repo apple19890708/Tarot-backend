@@ -8,7 +8,7 @@ const marketAiUsageSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     // stock：個股 AI 深度分析；news：財經新聞 AI 影響分析；tarot：塔羅 AI 解讀；followUp：抽牌追問（v24 1-4）。各自計算每日上限
-    kind: { type: String, enum: ['stock', 'news', 'tarot', 'followUp'], required: true },
+    kind: { type: String, enum: ['stock', 'news', 'tarot', 'followUp', 'lenormand'], required: true },
     expireAt: { type: Date, required: true },
   },
   { timestamps: true },

@@ -4,12 +4,9 @@
 // 只包 res.json：AI 串流（NDJSON，res.write 一段一段送）、牌卡圖片（jpg 本身已壓縮）都不經過這裡，
 // 串流不會被壓縮緩衝卡住。太小的回應（< minBytes）壓了也省不了多少，照原樣送。
 const zlib = require('zlib')
+const { acceptsGzip } = require('./acceptEncoding')
 
 const MIN_BYTES = 1024
-
-function acceptsGzip(req) {
-  return /\bgzip\b/i.test(req.headers['accept-encoding'] || '')
-}
 
 function jsonCompression({ minBytes = MIN_BYTES } = {}) {
   return (req, res, next) => {

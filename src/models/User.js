@@ -31,6 +31,8 @@ const userSchema = new mongoose.Schema(
     aiAccess: { type: Boolean, default: false },
     // 金融股市（股市諮詢、股市追蹤）也要由管理者逐一開通，和 AI 權限分開；admin 一律放行
     stockAccess: { type: Boolean, default: false },
+    // 雷諾曼（v27）也要由管理者逐一開通，和 AI、股市權限分開；admin 一律放行
+    lenormandAccess: { type: Boolean, default: false },
     // 登入憑證的版本號：重設密碼、登出所有裝置時加 1，之前發出的 token 全部失效（見 middleware/auth.js）
     tokenVersion: { type: Number, default: 0 },
     // 最後一次登入（密碼、Google、註冊）的時間與方式；舊帳號沒有
@@ -62,6 +64,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
     emailVerified: Boolean(this.emailVerified),
     aiAccess: this.role === 'admin' ? true : Boolean(this.aiAccess),
     stockAccess: this.role === 'admin' ? true : Boolean(this.stockAccess),
+    lenormandAccess: this.role === 'admin' ? true : Boolean(this.lenormandAccess),
     createdAt: this.createdAt,
   }
 }
@@ -91,6 +94,12 @@ userSchema.methods.canUseAi = function canUseAi() {
 userSchema.methods.canUseStock = function canUseStock() {
   if (this.disabled) return false
   return this.role === 'admin' || Boolean(this.stockAccess)
+}
+
+// 能不能用雷諾曼：admin 一律可以，member 要被開通
+userSchema.methods.canUseLenormand = function canUseLenormand() {
+  if (this.disabled) return false
+  return this.role === 'admin' || Boolean(this.lenormandAccess)
 }
 
 const User = mongoose.model('User', userSchema)

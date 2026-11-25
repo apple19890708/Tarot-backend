@@ -34,6 +34,7 @@ const FILTERS = {
   admin: () => ({ role: 'admin' }),
   ai: () => ({ role: 'member', aiAccess: true }),
   stock: () => ({ role: 'member', stockAccess: true }),
+  lenormand: () => ({ role: 'member', lenormandAccess: true }),
   // 沒有活動紀錄（功能上線前的舊帳號、註冊後沒再用）也算
   inactive: (now) => ({ $or: [{ lastActiveAt: { $lt: new Date(now - INACTIVE_DAYS * DAY_MS) } }, { lastActiveAt: null }] }),
   disabled: () => ({ disabled: true }),
@@ -116,13 +117,15 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
           User.countDocuments({ createdAt: { $gte: startOfTaipeiMonth(nowMs) } }),
           User.countDocuments({ role: 'member', aiAccess: true }),
           User.countDocuments({ role: 'member', stockAccess: true }),
+          User.countDocuments({ role: 'member', lenormandAccess: true }),
           User.countDocuments({ disabled: true }),
-        ]).then(([total, active7d, newThisMonth, aiMembers, stockMembers, disabled]) => ({
+        ]).then(([total, active7d, newThisMonth, aiMembers, stockMembers, lenormandMembers, disabled]) => ({
           total,
           active7d,
           newThisMonth,
           aiMembers,
           stockMembers,
+          lenormandMembers,
           disabled,
         })),
       ])
@@ -154,7 +157,7 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
       const today = startOfTaipeiDay(nowMs)
       const since30 = new Date(nowMs - INACTIVE_DAYS * DAY_MS)
       const count = (Model, where) => (Model ? Model.countDocuments(where) : Promise.resolve(null))
-      const [readings, readings30, stockAiToday, newsAiToday, tarotAiToday, followUpAiToday, stockAnalyses, newsAnalyses, watches, activeAlerts, pushDevices, logs] =
+      const [readings, readings30, stockAiToday, newsAiToday, tarotAiToday, followUpAiToday, lenormandAiToday, stockAnalyses, newsAnalyses, watches, activeAlerts, pushDevices, logs] =
         await Promise.all([
           count(models.Reading, { user: id }),
           count(models.Reading, { user: id, createdAt: { $gte: since30 } }),
@@ -162,6 +165,7 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
           count(models.MarketAiUsage, { user: id, kind: 'news', createdAt: { $gte: today } }),
           count(models.MarketAiUsage, { user: id, kind: 'tarot', createdAt: { $gte: today } }),
           count(models.MarketAiUsage, { user: id, kind: 'followUp', createdAt: { $gte: today } }),
+          count(models.MarketAiUsage, { user: id, kind: 'lenormand', createdAt: { $gte: today } }),
           count(models.MarketAnalysis, { user: id }),
           count(models.FinanceNewsAnalysis, { user: id }),
           count(models.MarketWatch, { user: id }),
@@ -185,6 +189,9 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
             followUpToday: followUpAiToday,
             tarotLimit: user.role === 'admin' ? null : TAROT_AI_DAILY_LIMITS.tarot,
             followUpLimit: user.role === 'admin' ? null : TAROT_AI_DAILY_LIMITS.followUp,
+            // 雷諾曼 AI 解讀（v27 階段 7）
+            lenormandToday: lenormandAiToday,
+            lenormandLimit: user.role === 'admin' ? null : TAROT_AI_DAILY_LIMITS.lenormand,
             stockAnalyses,
             newsAnalyses,
           },
@@ -197,9 +204,10 @@ function createAdminRouter({ ensureDatabase, requireAdmin, models = DEFAULT_MODE
     }
   })
 
-  // 開通／收回會員的權限：AI 解析（aiAccess）、金融股市（stockAccess）
+  // 開通／收回會員的權限：AI 解析（aiAccess）、金融股市（stockAccess）、雷諾曼（lenormandAccess，v27）
   router.patch('/users/:id/ai-access', updateAccess('aiAccess', 'AI 解析'))
   router.patch('/users/:id/stock-access', updateAccess('stockAccess', '金融股市功能'))
+  router.patch('/users/:id/lenormand-access', updateAccess('lenormandAccess', '雷諾曼'))
 
   function updateAccess(field, label) {
     return async (req, res, next) => {

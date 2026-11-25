@@ -6,7 +6,8 @@ const mongoose = require('mongoose')
 // stock：一檔股票一本（v26 計畫 2-2），targetId 是股票鍵 <市場>:<代號>（tw:0050、us:NVDA）。
 //   2026-11-20 第一版是「每筆分析一本」（targetId＝分析的 _id），啟動時由 services/stockJournal.js 轉成股票鍵。
 // daily（每日一牌）2026-11-20 使用者決定拿掉：API 不再接受，enum 留著讓舊資料讀得出來
-const TARGET_KINDS = ['reading', 'daily', 'stock']
+// lenormand：雷諾曼紀錄（v27），targetId 是 LenormandReading 的 _id
+const TARGET_KINDS = ['reading', 'daily', 'stock', 'lenormand']
 const { STOCK_ACTIONS, QUANTITY_UNITS } = require('../services/stockJournal')
 
 // 股票日記每篇可選填的「記錄股票」欄位（D8）：只是紀錄，不會改股市追蹤的持股

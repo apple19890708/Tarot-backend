@@ -3,6 +3,7 @@
 // 新增有 user 欄位的 model 時要加進這個清單，不然刪帳號會留下孤兒資料（test/accountSecurity.test.js 會檢查）
 const USER_DATA_MODELS = [
   'Reading',
+  'LenormandReading',
   'MarketWatch',
   'MarketWatchGroup',
   'MarketAlert',

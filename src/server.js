@@ -23,6 +23,7 @@ const { createReadingsRouter } = require('./routes/readings')
 const { createDailyCardRouter } = require('./routes/dailyCard')
 const { createJournalRouter } = require('./routes/journal')
 const { createNotificationsRouter } = require('./routes/notifications')
+const { createLenormandRouter } = require('./routes/lenormand')
 const { createNotificationCenter } = require('./services/notificationCenter')
 const Notification = require('./models/Notification')
 const { migrateStockJournalTargets } = require('./services/stockJournal')
@@ -53,6 +54,7 @@ const {
 const streamMarketChat = (options) => streamChat({ ...options, model: MARKET_MODEL })
 const { startNdjson } = require('./lib/ndjsonStream')
 const { jsonCompression } = require('./lib/jsonCompression')
+const { gzipStatic } = require('./lib/gzipStatic')
 const { buildMarketSnapshot, warmUpMarket, defaultMarketService } = require('./services/market/marketService')
 const { recordCalls } = require('./services/market/tracking')
 const { createMarketRouter } = require('./routes/market')
@@ -138,6 +140,12 @@ app.use(jsonCompression())
 // 牌卡圖片（公共領域 RWS 1909），放在 public/cards/。每張約 200KB、內容不會變：
 // 讓瀏覽器快取 7 天，期間不再回來問（原本 max-age=0 每次都要跨太平洋問一次 304）
 app.use('/cards', express.static(path.join(__dirname, '..', 'public', 'cards'), { maxAge: '7d' }))
+// 雷諾曼牌面（v27）：原創 SVG（scripts/lenormand/buildCardArt.js 產生），每張 7～21KB，快取設定同 /cards。
+// SVG 是純文字，先過 gzipStatic 送預先壓好的版本（約只剩 2 成）；不接受 gzip 的才交給 express.static 送原檔。
+// 跨網域載入靠 securityHeaders 的 Cross-Origin-Resource-Policy: cross-origin（全站共用，和塔羅一樣）
+const LENORMAND_DIR = path.join(__dirname, '..', 'public', 'lenormand')
+app.use('/lenormand', gzipStatic(LENORMAND_DIR, { maxAgeSeconds: 7 * 24 * 60 * 60 }))
+app.use('/lenormand', express.static(LENORMAND_DIR, { maxAge: '7d' }))
 
 function isDatabaseReady() {
   return mongoose.connection.readyState === 1
@@ -155,7 +163,15 @@ function ensureDatabase(res) {
   return false
 }
 
-const { optionalAuth, requireAuth, requireAdmin, requireAiAccess, requireStockAccess, hasStockAccess } = createAuthMiddleware({
+const {
+  optionalAuth,
+  requireAuth,
+  requireAdmin,
+  requireAiAccess,
+  requireStockAccess,
+  hasStockAccess,
+  requireLenormandAccess,
+} = createAuthMiddleware({
   // token 裡的 sub 不一定是合法的 ObjectId（偽造或舊資料），先擋掉避免 CastError。
   // 每個需要登入的請求都會查一次（比對憑證版本號）；資料庫沒連上時直接失敗，不要等 mongoose 緩衝 10 秒
   findUserById: (id) => {
@@ -201,6 +217,8 @@ app.use('/api', createDailyCardRouter({ ensureDatabase, requireAuth, optionalAut
 app.use('/api', createJournalRouter({ ensureDatabase, requireAuth }))
 // 通知中心（v26 計畫 5）：鈴鐺的列表、未讀數、已讀、刪除；寫入由 notifier 負責
 app.use('/api', createNotificationsRouter({ ensureDatabase, requireAuth, Notification }))
+// 雷諾曼（v27）：整個 router 只給 admin 與開通 lenormandAccess 的會員；刪除自己的紀錄只要登入
+app.use('/api/lenormand', createLenormandRouter({ requireLenormandAccess, requireAuth, ensureDatabase, aiQuota: tarotAiQuota }))
 
 app.get('/api/health', async (_req, res) => {
   const cardCount = isDatabaseReady() ? await Card.countDocuments() : 0

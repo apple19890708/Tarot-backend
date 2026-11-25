@@ -1,10 +1,11 @@
 // 占卜日記 API（v26 計畫 2、2-2）。全部要登入，只看得到、只改得到自己的：
-//   GET    /journal?target=reading:<id> | stock:<市場>:<代號>  這個對象的日記（依日期排的時間軸）
+//   GET    /journal?target=reading:<id> | lenormand:<id> | stock:<市場>:<代號>  這個對象的日記（依日期排的時間軸）
 // 每日一牌的日記（daily:<日期>）2026-11-20 使用者決定拿掉：不再接受，月曆也不列（資料表的 enum 留著，舊資料讀得出來）
 // 股票日記一檔一本（stock:tw:0050）；每篇可帶 stock（記錄股票的欄位），只有股票日記收
 //   POST   /journal                                          新增一篇 { target, title?, content, outcome?, entryDate?, stock? }
 //   PUT    /journal/:id                                      修改 { title?, content?, outcome?, entryDate?, stock? }
 //   DELETE /journal/:id
+// 雷諾曼紀錄（v27）：target 是 lenormand:<紀錄 id>；列表、新增、修改要雷諾曼權限（403），刪除自己的日記不檢查
 // 日記內容不送給 AI（v26 不做的事）。依賴可以注入，測試不必連資料庫
 const express = require('express')
 const mongoose = require('mongoose')
@@ -14,6 +15,8 @@ const JournalEntryModel = require('../models/JournalEntry')
 const ReadingModel = require('../models/Reading')
 const MarketAnalysisModel = require('../models/MarketAnalysis')
 const MarketWatchModel = require('../models/MarketWatch')
+const LenormandReadingModel = require('../models/LenormandReading')
+const { userCanUseLenormand, LENORMAND_DENIED } = require('../middleware/auth')
 const { OUTCOMES, TITLE_MAX } = JournalEntryModel
 const { validateJournalContent, summaryOf } = require('../services/journalContent')
 const { parseStockKey, findForStock, parseStockFields, hasStockRecord } = require('../services/stockJournal')
@@ -44,7 +47,7 @@ function parseTarget(value) {
   if (index < 0) return null
   const kind = value.slice(0, index)
   const rest = value.slice(index + 1)
-  if (kind === 'reading') return /^[a-f0-9]{24}$/i.test(rest) ? { kind, id: rest.toLowerCase() } : null
+  if (kind === 'reading' || kind === 'lenormand') return /^[a-f0-9]{24}$/i.test(rest) ? { kind, id: rest.toLowerCase() } : null
   if (kind === 'stock') {
     const stock = parseStockKey(rest)
     return stock ? { kind, id: stock.key, stock } : null
@@ -111,6 +114,7 @@ function createJournalRouter({
   Reading = ReadingModel,
   MarketAnalysis = MarketAnalysisModel,
   MarketWatch = MarketWatchModel,
+  LenormandReading = LenormandReadingModel,
   now = () => new Date(),
   writeLimiter = defaultWriteLimiter(),
 }) {
@@ -119,11 +123,19 @@ function createJournalRouter({
   // 對象要是自己的：自己的塔羅紀錄；股票要是自己分析過或追蹤中的（不能寫任意代號灌資料）
   async function ownsTarget(userId, target) {
     if (target.kind === 'reading') return Boolean(await Reading.findOne({ _id: target.id, user: userId }).select('_id').lean())
+    if (target.kind === 'lenormand') return Boolean(await LenormandReading.findOne({ _id: target.id, user: userId }).select('_id').lean())
     const [analyses, watches] = await Promise.all([
       findForStock(MarketAnalysis, userId, target.stock),
       findForStock(MarketWatch, userId, target.stock),
     ])
     return analyses.length > 0 || watches.length > 0
+  }
+
+  // 雷諾曼日記要雷諾曼權限；回傳 false 時已回 403
+  function checkKindAccess(req, kind, res) {
+    if (kind !== 'lenormand' || userCanUseLenormand(req.user)) return true
+    res.status(403).json({ message: LENORMAND_DENIED })
+    return false
   }
 
   // 記錄股票的欄位只有股票日記收；回傳 false 時已回 400
@@ -160,6 +172,7 @@ function createJournalRouter({
         res.status(400).json({ message: '要指定是哪一筆紀錄。' })
         return
       }
+      if (!checkKindAccess(req, target.kind, res)) return
       const entries = await JournalEntry.find({ user: req.auth.userId, targetKind: target.kind, targetId: target.id })
         .sort({ entryDate: 1, createdAt: 1 })
         .limit(MAX_ENTRIES_PER_TARGET)
@@ -179,6 +192,7 @@ function createJournalRouter({
         res.status(400).json({ message: '要指定是哪一筆紀錄。' })
         return
       }
+      if (!checkKindAccess(req, target.kind, res)) return
       const checked = validateJournalContent(body.content)
       if (checked.error) {
         res.status(400).json({ message: checked.error })
@@ -278,6 +292,7 @@ function createJournalRouter({
         res.status(404).json({ message: '找不到這篇日記。' })
         return
       }
+      if (!checkKindAccess(req, entry.targetKind, res)) return
       // 股票欄位要看這篇是不是股票日記才知道收不收；帶了就整組換掉，null＝清掉
       const stock = readStockFields(body, entry.targetKind, res)
       if (!stock) return

@@ -9,6 +9,23 @@ const versionOf = (value) => (Number.isInteger(value) ? value : 0)
 // 最後活動時間同一小時內只寫一次：每個請求都寫資料庫太浪費，管理頁看「多久沒來」小時級就夠
 const ACTIVE_WRITE_MS = 60 * 60 * 1000
 
+// 雷諾曼沒開通時的訊息（前端照這句顯示，改字要通知前端）
+const LENORMAND_DENIED = '雷諾曼功能需要管理者開通，請聯絡管理者。'
+
+// 能不能用 AI 解析：雷諾曼 AI 解讀在 router 層已經過雷諾曼權限，這裡直接用已掛好的 req.user 判斷，不再多查一次（api-reviewer 2026-11-25）
+function userCanUseAi(user) {
+  if (!user) return false
+  if (typeof user.canUseAi === 'function') return user.canUseAi()
+  return !user.disabled && (user.role === 'admin' || Boolean(user.aiAccess))
+}
+
+// 能不能用雷諾曼：middleware 之外（月曆、日記這類共用端點）也用這個判斷，不要各寫一份
+function userCanUseLenormand(user) {
+  if (!user) return false
+  if (typeof user.canUseLenormand === 'function') return user.canUseLenormand()
+  return !user.disabled && (user.role === 'admin' || Boolean(user.lenormandAccess))
+}
+
 // touchUser(id, date)：更新最後活動時間（可省略，測試不用連資料庫）
 function createAuthMiddleware({ findUserById, secret, touchUser = null, now = () => Date.now() } = {}) {
   // 解析 token 並回資料庫確認：帳號還在、沒被停用、版本號一致。任何一項不符回 null（當成沒登入）
@@ -87,15 +104,16 @@ function createAuthMiddleware({ findUserById, secret, touchUser = null, now = ()
 
   const requireAdmin = createUserGuard((user) => user.role === 'admin', '沒有權限。')
 
-  // AI 解析：admin 一律可以，member 要被管理者開通
-  const canUseAi = (user) =>
-    typeof user.canUseAi === 'function' ? user.canUseAi() : user.role === 'admin' || Boolean(user.aiAccess)
-  const requireAiAccess = createUserGuard(canUseAi, 'AI 解讀需要管理者開通，請聯絡管理者。')
+  // AI 解析：admin 一律可以，member 要被管理者開通（判斷和雷諾曼 AI 解讀共用 userCanUseAi）
+  const requireAiAccess = createUserGuard(userCanUseAi, 'AI 解讀需要管理者開通，請聯絡管理者。')
 
   // 金融股市（股市諮詢、股市追蹤）：admin 一律可以，member 要被管理者開通，和 AI 權限分開
   const canUseStock = (user) =>
     typeof user.canUseStock === 'function' ? user.canUseStock() : user.role === 'admin' || Boolean(user.stockAccess)
   const requireStockAccess = createUserGuard(canUseStock, '金融股市功能需要管理者開通，請聯絡管理者。')
+
+  // 雷諾曼（v27）：admin 一律可以，member 要被管理者開通，和 AI、股市權限分開
+  const requireLenormandAccess = createUserGuard(userCanUseLenormand, LENORMAND_DENIED)
 
   // 不擋請求、只回答「這個請求的使用者有沒有某個權限」。給 optionalAuth 的端點判斷個別欄位用（例如股市諮詢）
   function createChecker(isAllowed) {
@@ -104,10 +122,19 @@ function createAuthMiddleware({ findUserById, secret, touchUser = null, now = ()
       return Boolean(found && isAllowed(found.user))
     }
   }
-  const hasAiAccess = createChecker(canUseAi)
+  const hasAiAccess = createChecker(userCanUseAi)
   const hasStockAccess = createChecker(canUseStock)
 
-  return { optionalAuth, requireAuth, requireAdmin, requireAiAccess, hasAiAccess, requireStockAccess, hasStockAccess }
+  return {
+    optionalAuth,
+    requireAuth,
+    requireAdmin,
+    requireAiAccess,
+    hasAiAccess,
+    requireStockAccess,
+    hasStockAccess,
+    requireLenormandAccess,
+  }
 }
 
-module.exports = { createAuthMiddleware, versionOf, ACTIVE_WRITE_MS }
+module.exports = { createAuthMiddleware, versionOf, ACTIVE_WRITE_MS, LENORMAND_DENIED, userCanUseLenormand, userCanUseAi }
