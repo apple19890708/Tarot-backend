@@ -1,7 +1,7 @@
 // 股票日記（v26 計畫 2-2）：一檔股票一本日記，不是每次分析一本。
 // - 股票鍵：<市場>:<代號>，台股用代號（tw:0050），美股與指數用 symbol（us:NVDA、tw:^TWII）
 // - 每篇可選填「記錄股票」的欄位（動作、價格、數量、寫的時候的股價、目標價、停損價），只是紀錄，不改持股
-// - 2026-11-20 以前寫在單一分析底下的日記（stock:<分析 id>）在啟動時轉成那筆分析的股票（D9）
+// - 2026-11-20 以前寫在單一分析底下的日記（stock:<分析 id>）用 scripts/migrateStockJournal.js 轉成那筆分析的股票（D9；v29 從啟動流程移到腳本）
 
 const MARKETS = ['tw', 'us']
 // 觀察／買進／加碼／減碼／賣出／停損
@@ -98,27 +98,6 @@ function hasStockRecord(stock) {
   return Boolean(stock && STOCK_FIELDS.some((key) => stock[key] !== null && stock[key] !== undefined))
 }
 
-// D9：舊的 stock:<分析 id> 轉成 stock:<市場>:<代號>。可以重複執行（轉過的不會再符合 24 碼 hex）。
-// 分析已經被刪掉的（照舊規則刪分析時日記會一起刪，理論上沒有）留著不動、記 log
-async function migrateStockJournalTargets({ JournalEntry, MarketAnalysis, log = console }) {
-  const old = await JournalEntry.find({ targetKind: 'stock', targetId: /^[a-f0-9]{24}$/i }).select('_id user targetId').lean()
-  let converted = 0
-  let orphaned = 0
-  for (const entry of old) {
-    const analysis = await MarketAnalysis.findOne({ _id: entry.targetId, user: entry.user }).select('target').lean()
-    const key = analysis ? stockKeyOf(analysis.target) : null
-    if (!key) {
-      orphaned += 1
-      continue
-    }
-    // 條件帶上舊的 targetId：別的實例已經轉過就不再動
-    await JournalEntry.updateOne({ _id: entry._id, targetId: entry.targetId }, { $set: { targetId: key } })
-    converted += 1
-  }
-  if (converted || orphaned) log.log(`[股票日記] 舊格式轉換：${converted} 篇轉成一檔一本，${orphaned} 篇找不到分析、保留原樣`)
-  return { converted, orphaned }
-}
-
 module.exports = {
   MARKETS,
   STOCK_ACTIONS,
@@ -128,5 +107,4 @@ module.exports = {
   findForStock,
   parseStockFields,
   hasStockRecord,
-  migrateStockJournalTargets,
 }

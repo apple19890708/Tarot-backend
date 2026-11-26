@@ -26,7 +26,6 @@ const { createLenormandRouter } = require('./routes/lenormand')
 const { createTarotRouter } = require('./routes/tarot')
 const { createNotificationCenter } = require('./services/notificationCenter')
 const Notification = require('./models/Notification')
-const { migrateStockJournalTargets } = require('./services/stockJournal')
 const { loadCardsInOrder } = require('./services/cardLoader')
 const Reading = require('./models/Reading')
 const { buildReadingWithDictionary } = require('./services/readingService')
@@ -425,10 +424,7 @@ async function connectDatabase(attempt = 1) {
     require('./models/DailyCard')
       .init()
       .catch((error) => console.error('每日一牌唯一索引建立失敗（重複抽牌可能存成兩筆）：', error.message))
-    // 股票日記改成一檔一本（v26 計畫 2-2、D9）：舊的 stock:<分析 id> 轉成 stock:<市場>:<代號>；可重複執行，轉過的不再符合
-    migrateStockJournalTargets({ JournalEntry: require('./models/JournalEntry'), MarketAnalysis: require('./models/MarketAnalysis') }).catch(
-      (error) => console.error('[股票日記] 舊格式轉換失敗（舊日記暫時看不到，下次啟動會再試）：', error.message),
-    )
+    // 股票日記的舊格式轉換（v26 D9）原本在這裡每次啟動跑一次，v29 項目 12 移到 scripts/migrateStockJournal.js 手動執行
   } catch (error) {
     const delay = Math.min(DB_RETRY_MAX_MS, DB_RETRY_FIRST_MS * 2 ** (attempt - 1))
     console.error(`MongoDB connection failed（第 ${attempt} 次）：${error.message}；${delay / 1000} 秒後重試`)

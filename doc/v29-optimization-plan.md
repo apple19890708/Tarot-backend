@@ -1,7 +1,7 @@
 # v29　後端優化（專案評估找到的項目）
 
 建立日期：2026-11-26
-狀態：進行中
+狀態：完成（第 7 項評估後不做；Secret Manager 只寫建議）
 
 > 版號：原本編 v28，2026-11-26 合併遠端時發現遠端已有 v28（塔羅原創水彩牌面，`doc/v28-tarot-original-art-plan.md`），這份改成 v29；程式註解裡的「v28 項目 N」一併改成「v29 項目 N」。
 
@@ -13,7 +13,7 @@
 
 - **回傳給前端的形狀不變**。萬一一定要變，先通知前端 session。
 - 每一項做完都跑 `npm test`；最後跑 `verify`、`heuristic-check`（限速門檻），改到路由、權限、Model 的請 api-reviewer 審查。
-- 不新增執行期的套件；需要新工具時先問使用者。
+- 不新增執行期的套件；需要新工具時先問使用者（2026-11-26 使用者同意 `sharp`，只當 devDependency）。
 - 開發與測試絕不呼叫 OpenRouter。
 
 **不做的事**
@@ -21,7 +21,6 @@
 - Secret Manager（把 `env.yaml` 的機密搬到 GCP Secret Manager）：屬於 GCP 設定、不在 repo 裡，這次只寫建議與步驟（見五、待使用者決定）。
 - 拿掉提示快取（`cache_control`）：先記錄一週的實際用量再判斷。
 - 套件的大版本升級（dotenv 18、web-push 4）：只升小版本。
-- 移除股票日記的舊格式轉換：使用者不確定線上是否已轉完，先保留。
 
 ## 二、項目
 
@@ -44,7 +43,7 @@
 9. **`server.js` 太大**：塔羅路由（draw、manual、cards、narrate、follow-up）抽成 `createTarotRouter({...})`，用注入的方式讓測試載入得到；補塔羅 narrate／追問的 HTTP 層測試（假的串流）。
 10. **AI 串流的共用函式**：「中斷停止計費、出錯退還、`NarrationRefusedError` 回 422」有好幾份，抽成共用的 `streamAiResponse`，用量的記錄、退還與第 1 項的鎖也統一在這裡。
 11. **`startOfTaipeiDay`**：從 `routes/marketAnalysis` 搬到 `services/clock.js`，service 不反過來依賴 route。
-12. **股票日記舊格式轉換**：每次啟動全表掃描一次。使用者不確定線上是否已轉完，先保留（見五）。
+12. **股票日記舊格式轉換**：每次啟動全表掃描一次。從啟動流程移除，改成手動執行的 `scripts/migrateStockJournal.js`。
 13. **套件**：express、mongoose、express-rate-limit 升到最新的小版本。
 
 ## 三、階段與進度
@@ -55,21 +54,26 @@
 | 2 | 測試偶發失敗 | 完成：請求途中的 log 改走 stderr（共用串流的中斷 log、大盤概況）；23 處 withServer 先 closeAllConnections，完整測試約 7.7 秒；4 份完整測試同時跑 10 輪共 40 次，0 次失敗（修之前子代理測到 40 次失敗 8 次） |
 | 3 | 紀錄列表只挑欄位 | 完成：塔羅與雷諾曼列表 `.select().lean()`，摘要改成純函式；實測 20 筆讀取量 114KB → 12KB，回傳形狀不變 |
 | 4 | 訪客抽牌限速 | 完成：共用 `lib/guestLimiter.js`（每 IP 每分鐘 30 次，登入略過），套到 draw、manual、follow-up/draw、cards/random，每日一牌也改用它 |
-| 5 | 牌卡縮圖 | 等使用者安裝 ImageMagick（只做原版 JPG，水彩 SVG 不需要，見決議紀錄） |
+| 5 | 牌卡縮圖 | 完成：`scripts/buildCardThumbs.js`（`sharp` 0.35.5，devDependency）產生 78 張 `public/cards/thumb/<同檔名>.webp`，寬 240px、品質 75；原圖 15898KB → 縮圖 1994KB（約 1/8），平均每張 26KB；只做原版 JPG；`test/cardThumbs.test.js` |
 | 6 | AI 費用觀測、備援模型、追問文字 | 完成：每次記 token／快取／推理 token／費用（`MarketAiUsage`，保留 14 天，不記問題）、`scripts/aiUsageReport.js` 報表；備援改 Sonnet 5；追問的先前解讀與已寫回答以紀錄為準，前端送的截短 |
 | 7 | 行情串流瘦身 | 不做瘦身（原因見決議紀錄）；順便修掉 3～4 檔時行情存不進紀錄的問題 |
 | 8 | `env.yaml` 保護 | 完成：hooks 擋 Read／Grep／shell 讀 env.yaml，前後端同步，`test/hooks.test.js` |
 | 9 | 抽出塔羅路由 | 完成：`routes/tarot.js`（`createTarotRouter`），server.js 1060 → 約 470 行；`test/tarotRoutes.test.js` 7 個 HTTP 層測試（假串流）；4101 煙霧測試既有網址正常 |
 | 10 | AI 串流共用函式 | 完成：`services/aiStream.js`（`streamAiResponse`、`createUserLock`、`createAiUsage`），五條 AI 路徑共用 |
 | 11 | `startOfTaipeiDay` 搬家 | 完成：搬到 `services/clock.js`；順便把另外三處直接 `new Intl.DateTimeFormat` 改用共用的 `dateTimeFormat` |
-| 12 | 舊格式轉換 | 保留（使用者不確定） |
+| 12 | 舊格式轉換 | 完成：啟動流程不再轉換，改成 `scripts/migrateStockJournal.js`（預設只試算，`--write` 才寫入）；沒轉完的舊日記會怎麼顯示見決議紀錄 |
 | 13 | 套件小版本 | 完成：express 5.2.1 → 5.3.0、mongoose 9.12.0 → 9.13.1、express-rate-limit 8.7.4 → 8.7.5；`npm test` 全過，4101 煙霧測試正常 |
 
 ## 四、決議紀錄
 
 - 2026-11-26：使用者決定備援模型由 Claude Opus 5.5（每百萬 token 輸入 US$4／輸出 US$20）改成 Claude Sonnet 5（US$2／US$10，和主模型 Sonnet 5.5 同價），主模型出錯時費用不會翻倍。
-- 2026-11-26：縮圖工具：這台電腦沒有 ImageMagick／ffmpeg／Python 影像套件，使用者選擇自己安裝 ImageMagick，不新增 `sharp` 套件。
-- 2026-11-26：股票日記的舊格式轉換：使用者不確定 Cloud Run 的 log 是否還有「[股票日記] 舊格式轉換」，先保留。
+- 2026-11-26：縮圖工具：這台電腦沒有 ImageMagick／ffmpeg／Python 影像套件，使用者原本選擇自己安裝 ImageMagick；同一天改決定「改用 npm 套件 sharp」。`sharp` 0.35.5（2026-09-27 發布）裝成 devDependency：部署是 Cloud Run 的 `--source`（Google Cloud buildpacks，沒有 Dockerfile），package.json 沒有 `build`／`gcp-build` 腳本時 buildpacks 以 `NODE_ENV=production` 安裝、只裝 dependencies，正式映像不含 sharp 的原生檔。縮圖檔進版控，部署時不重新產生。
+- 2026-11-26（項目 5 品質）：抽 4 張比較 WebP 品質 55／70／80／90，平均 20／24／30／45KB；放大 3 倍看，55 的天空與衣服有色塊，80 以上看不出差別。畫面只顯示約 50px 寬（高解析度螢幕約 100px），取 75，平均 26KB。
+- 2026-11-26：股票日記的舊格式轉換：使用者原本不確定 Cloud Run 的 log 是否還有「[股票日記] 舊格式轉換」而先保留；同一天決定「把它移除」（沒有看 log）。
+- 2026-11-26（項目 12）：為了保險，轉換函式沒有刪掉，移到 `scripts/migrateStockJournal.js`：`node scripts/migrateStockJournal.js` 只列出會轉幾篇、幾篇找不到分析；加 `--write` 才寫入；可重複執行。**之後如果有人回報舊的股票日記不見，執行這支腳本即可。** 線上如果還有沒轉的舊日記（`targetKind: stock`、`targetId` 是分析的 24 碼 id），移除後的顯示：
+  - 月曆：照樣列出那一天的日記（月曆查的是日期，不看 targetId 格式）。
+  - 點進去：前端把 `stock:<分析 id>` 當成舊網址，讀那筆分析後轉到那檔股票的日記頁；日記頁用新的股票鍵（`stock:tw:0050`）查，**舊的那篇不會出現**，所以看起來是「月曆上有、點進去沒有」。分析已被刪掉的，連轉址都不會成功。
+  - 資料沒有遺失：刪除帳號與「刪除我的資料」照樣會清掉；跑一次腳本 `--write` 之後就正常顯示。
 - 2026-11-26（項目 1、10）：鎖放在記憶體（`createUserLock`），Cloud Run 多實例各算各的，只是第一道；每日上限仍以資料庫計數為準。塔羅、追問、雷諾曼各自一把鎖（不同種類可以同時），個股與新聞沿用原本的鎖但改成共用函式。409 訊息「上一個 AI 解讀還在進行，請等它完成。」（股市維持「AI 分析」的字樣）。
 - 2026-11-26（項目 6）：OpenRouter 的 `usage.include` 預設開啟（不加費用，設 `OPENROUTER_INCLUDE_USAGE=false` 可關），每次完成後把 promptTokens、completionTokens、cachedTokens、reasoningTokens、cost、model 寫回那一筆 `MarketAiUsage`；保留天數 2 → 14 天。提示快取先保留，觀察一週後用 `node scripts/aiUsageReport.js 7` 看快取命中率與每次費用再決定。
 - 2026-11-26（項目 7）：實測一檔股票的行情約 70KB（gzip 後約 22KB），最大的 K 線（日／週／月）與回測曲線前端都在畫，數字也已經四捨五入；前端沒用到的只是幾個純量與小陣列，瘦身省不到 5%，又有弄壞畫面的風險，所以不做。量的時候發現原本保存上限 200000 字元（註解寫一檔約 20KB），問 3～4 檔時行情會被靜靜丟掉，改成 400000，`POST /api/readings` 與補存解讀的 body 上限 300kb → 500kb。
@@ -86,4 +90,4 @@
 ## 五、待使用者決定
 
 - **Secret Manager**：建議把 `env.yaml` 裡的機密（MongoDB 帳密、OpenRouter 金鑰、JWT 密鑰等）改放 GCP Secret Manager，Cloud Run 以環境變數或掛載的方式讀取。步驟：在 GCP 建立各個 secret → 給 Cloud Run 的服務帳號 `Secret Manager Secret Accessor` 權限 → Cloud Build／`gcloud run deploy` 改用 `--set-secrets` → 確認線上正常後，刪掉本機 `env.yaml` 裡的明文。
-- **舊格式轉換**：在 Cloud Run 的 log 搜尋「[股票日記] 舊格式轉換」，最近幾次部署都沒出現（或都是 0 篇），就可以移除啟動時的轉換。
+- **舊格式轉換（建議，非必要）**：啟動時的轉換已移除（使用者決定）。想確認線上有沒有沒轉的舊日記，在本機跑 `node scripts/migrateStockJournal.js`（只讀、不寫入），有的話再加 `--write`。

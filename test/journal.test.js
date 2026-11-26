@@ -5,7 +5,8 @@ const express = require('express')
 
 const { validateJournalContent, summaryOf } = require('../src/services/journalContent')
 const { createJournalRouter, parseTarget } = require('../src/routes/journal')
-const { stockKeyOf, parseStockFields, migrateStockJournalTargets } = require('../src/services/stockJournal')
+const { stockKeyOf, parseStockFields } = require('../src/services/stockJournal')
+const { migrateStockJournalTargets } = require('../scripts/migrateStockJournal')
 const { USER_DATA_MODELS } = require('../src/services/accountDeletion')
 
 const OWNER = '507f1f77bcf86cd799439011'
@@ -351,9 +352,15 @@ test('舊格式轉換（D9）：stock:<分析 id> 改成那筆分析的股票；
   // 別人的分析對不上（user 也要符合）
   const MarketAnalysis = { findOne: (filter) => query(analyses[filter._id]?.user === filter.user ? analyses[filter._id] : null) }
   const silent = { log() {} }
+  // v29 項目 12：改成手動腳本，預設只試算、不寫入
+  assert.deepStrictEqual(await migrateStockJournalTargets({ JournalEntry, MarketAnalysis, dryRun: true, log: silent }), { converted: 1, orphaned: 1 })
+  assert.deepStrictEqual(rows.map((r) => r.targetId), [OLD_ID, GONE_ID, 'tw:2330', READING_ID])
   assert.deepStrictEqual(await migrateStockJournalTargets({ JournalEntry, MarketAnalysis, log: silent }), { converted: 1, orphaned: 1 })
   assert.deepStrictEqual(rows.map((r) => r.targetId), ['us:MU', GONE_ID, 'tw:2330', READING_ID])
   assert.deepStrictEqual(await migrateStockJournalTargets({ JournalEntry, MarketAnalysis, log: silent }), { converted: 0, orphaned: 1 })
+  // 啟動流程不再自動轉換（每次啟動全表掃描一次）
+  const serverSource = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'server.js'), 'utf8')
+  assert.doesNotMatch(serverSource, /migrateStockJournalTargets\(/)
 })
 
 test('標題：存下來、可以改、只有標題也算有寫；太長或不是字串回 400（2026-11-20）', async () => {
