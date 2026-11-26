@@ -55,7 +55,7 @@
 | 2 | 測試偶發失敗 | 完成：請求途中的 log 改走 stderr（共用串流的中斷 log、大盤概況）；23 處 withServer 先 closeAllConnections，完整測試約 7.7 秒；4 份完整測試同時跑 10 輪共 40 次，0 次失敗（修之前子代理測到 40 次失敗 8 次） |
 | 3 | 紀錄列表只挑欄位 | 完成：塔羅與雷諾曼列表 `.select().lean()`，摘要改成純函式；實測 20 筆讀取量 114KB → 12KB，回傳形狀不變 |
 | 4 | 訪客抽牌限速 | 完成：共用 `lib/guestLimiter.js`（每 IP 每分鐘 30 次，登入略過），套到 draw、manual、follow-up/draw、cards/random，每日一牌也改用它 |
-| 5 | 牌卡縮圖 | 等使用者安裝 ImageMagick |
+| 5 | 牌卡縮圖 | 等使用者安裝 ImageMagick（只做原版 JPG，水彩 SVG 不需要，見決議紀錄） |
 | 6 | AI 費用觀測、備援模型、追問文字 | 完成：每次記 token／快取／推理 token／費用（`MarketAiUsage`，保留 14 天，不記問題）、`scripts/aiUsageReport.js` 報表；備援改 Sonnet 5；追問的先前解讀與已寫回答以紀錄為準，前端送的截短 |
 | 7 | 行情串流瘦身 | 不做瘦身（原因見決議紀錄）；順便修掉 3～4 檔時行情存不進紀錄的問題 |
 | 8 | `env.yaml` 保護 | 完成：hooks 擋 Read／Grep／shell 讀 env.yaml，前後端同步，`test/hooks.test.js` |
@@ -74,6 +74,8 @@
 - 2026-11-26（項目 6）：OpenRouter 的 `usage.include` 預設開啟（不加費用，設 `OPENROUTER_INCLUDE_USAGE=false` 可關），每次完成後把 promptTokens、completionTokens、cachedTokens、reasoningTokens、cost、model 寫回那一筆 `MarketAiUsage`；保留天數 2 → 14 天。提示快取先保留，觀察一週後用 `node scripts/aiUsageReport.js 7` 看快取命中率與每次費用再決定。
 - 2026-11-26（項目 7）：實測一檔股票的行情約 70KB（gzip 後約 22KB），最大的 K 線（日／週／月）與回測曲線前端都在畫，數字也已經四捨五入；前端沒用到的只是幾個純量與小陣列，瘦身省不到 5%，又有弄壞畫面的風險，所以不做。量的時候發現原本保存上限 200000 字元（註解寫一檔約 20KB），問 3～4 檔時行情會被靜靜丟掉，改成 400000，`POST /api/readings` 與補存解讀的 body 上限 300kb → 500kb。
 - 2026-11-26（項目 4）：訪客限速門檻沿用每日一牌的每 IP 每分鐘 30 次，抽牌、手動、追問抽牌、隨機牌共用一個額度；計數在記憶體，多實例各算各的。
+- 2026-11-26（項目 5，合併遠端 v28 水彩牌面後）：塔羅多了 78 張原創水彩 SVG（`public/cards/<slug>.svg`，每張 gzip 後約 2KB，向量圖縮放不失真），縮圖只對「原版」的 JPG（78 張共約 16MB）有用。縮圖只產生 JPG 的 `public/cards/thumb/<同檔名>.webp`，前端在原版牌面時才換成縮圖網址；狀態維持等使用者安裝 ImageMagick。
+- 2026-11-26（合併後檢查）：`gzipStatic` 同時服務 `/cards`（78 張 SVG，壓縮後 170KB）與 `/lenormand`（52 張，99KB），只常駐壓縮後的內容，合計約 270KB；連同啟動時壓縮的暫時用量，實測 rss 增加約 5MB，對 512MB 的上限可以接受。hooks 的 env 保護不會誤擋 `public/cards`、`scripts/tarot` 的任何檔名；訪客限速只掛在塔羅的抽牌路由，不影響 `/cards` 靜態檔。
 - 2026-11-26（api-reviewer 審查後的修正）：
   - 必修：中斷的監聽原本在檢查次數、取行情之後才掛上，這段時間使用者斷線不會被發現、仍會呼叫 AI。改成 handler 一開始就 `watchClose`，呼叫 AI 前再檢查一次是否已中斷。
   - 前端「重新產生」會先中斷舊請求再送新的，但中斷傳到後端要時間，單純上鎖會讓新請求拿到 409。塔羅解讀、追問、雷諾曼改用 `takeOver`：中斷同一人的舊請求、最多等 5 秒讓它釋放再上鎖。被取代的舊請求照「使用者中斷」處理（次數照算、不退，不會變成繞過上限的方法）；它的連線還在時，還沒開始串流回 409、已經在串流送 error 事件，訊息「同一個帳號又送出了新的 AI 請求，這一次已經停止。」。5 秒內等不到才回原本的 409「上一個 AI 解讀還在進行」。
