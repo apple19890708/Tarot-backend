@@ -3,14 +3,13 @@
 // 沒追蹤的沒有持股，AI 紀錄的 watch 是 null。
 // 分析本身不呼叫 AI；只有 POST /watchlist/:id/analysis/ai 會呼叫（要 AI 權限、有次數限制）。
 // 依賴以參數注入，測試時不必連資料庫、外部 API 或 AI。
-const { dateTimeFormat } = require('../lib/intlFormat')
+const { startOfTaipeiDay } = require('../services/clock')
 const express = require('express')
 const mongoose = require('mongoose')
 
 const { computePosition, normalizeFees, tradesOf, DEFAULT_FEES } = require('../services/market/portfolio')
 const { buildStockAnalysisMessages } = require('../services/market/stockAnalysis')
-const { NarrationRefusedError } = require('../services/narrationService')
-const { startNdjson } = require('../lib/ndjsonStream')
+const { createAiUsage, createUserLock, streamAiResponse } = require('../services/aiStream')
 const { parseStockKey, findForStock, stockKeyOf } = require('../services/stockJournal')
 
 // 每人每天最多幾次 AI 深度分析（admin 不限）；同一檔要隔多久才能再跑一次
@@ -18,16 +17,8 @@ const DAILY_LIMIT = 20
 const COOLDOWN_MS = 5 * 60 * 1000
 // 彈窗與 AI 都只附最近幾則重大訊息
 const NEWS_LIMIT = 3
-const TW_TIMEZONE = 'Asia/Taipei'
 
 // 台北時間今天 00:00 的 Date（每日次數以台北的一天計算）
-function startOfTaipeiDay(nowMs) {
-  const ymd = dateTimeFormat('en-CA', { timeZone: TW_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(
-    new Date(nowMs),
-  )
-  return new Date(`${ymd}T00:00:00+08:00`)
-}
-
 // 存進紀錄與交給 AI 的持股摘要；沒有任何買賣或股利時為 null
 function holdingOf(watch, item, fees) {
   const trades = tradesOf(watch)
@@ -73,25 +64,10 @@ function createMarketAnalysisRouter({
 }) {
   const router = express.Router()
 
-  // AI 開始產生（開始計費）時記一筆用量；記錄失敗只寫 log，不中斷分析
-  function recordUsage(userId) {
-    if (!MarketAiUsage) return null
-    const expireAt = new Date(now() + (MarketAiUsage.KEEP_DAYS || 2) * 86400000)
-    return Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'stock', expireAt })).catch((error) => {
-      console.error('AI 用量記錄失敗：', error.message)
-      return null
-    })
-  }
-  // 伺服器或 AI 那邊出錯（不是使用者停止）時退還這次的次數
-  async function refundUsage(pending) {
-    const record = await pending
-    if (!record?._id || !MarketAiUsage?.deleteOne) return
-    await Promise.resolve(MarketAiUsage.deleteOne({ _id: record._id })).catch((error) =>
-      console.error('AI 用量退還失敗：', error.message),
-    )
-  }
-  // 同一個人同時只能跑一個 AI 分析；最近一次開始的時間（中斷的也算，避免中斷再重來繞過冷卻）
-  const running = new Set()
+  // AI 用量（記錄、退還、費用回報）與同一人同時只能一個的鎖：和塔羅、雷諾曼共用 services/aiStream.js（v29 項目 10）
+  const aiUsage = createAiUsage({ Usage: MarketAiUsage, now })
+  const running = createUserLock()
+  // 最近一次開始的時間（中斷的也算，避免中斷再重來繞過冷卻）
   const startedAt = new Map()
 
   async function feesOf(userId) {
@@ -219,12 +195,11 @@ function createMarketAnalysisRouter({
       const subject = await subjectOf(req, res)
       if (!subject) return
 
-      if (running.has(userId)) {
+      // 檢查與上鎖是同步的，同時送多個請求也只有一個能往下走；早退時由 finally 釋放
+      if (!running.acquire(userId)) {
         res.status(409).json({ message: '上一個 AI 分析還在進行，請等它完成。' })
         return
       }
-      // 檢查完立刻上鎖（同步執行），同時送多個請求也只有一個能往下走；早退時由 finally 釋放
-      running.add(userId)
       locked = true
       // 一開始就監聽中斷：查行情時使用者已經關掉彈窗的話，就不呼叫 AI
       const controller = new AbortController()
@@ -263,68 +238,46 @@ function createMarketAnalysisRouter({
         return
       }
       // NDJSON：delta（一段文字）、done（完成，附存好的紀錄摘要）、error（串流途中失敗）
-      const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
-      let text = ''
-      let usage = null
-
-      try {
-        const { model } = await ai.stream({
-          messages: buildStockAnalysisMessages({ snapshot, holding, news: newsList, now: new Date(now()) }),
-          signal: controller.signal,
-          onStart: () => {
-            // 送出標頭並開始心跳（前端靠它分辨「還在等 AI」和「連線斷了」）
-            startNdjson(res)
-            usage = recordUsage(userId)
-          },
-          onDelta: (delta) => {
-            text += delta
-            writeEvent({ type: 'delta', text: delta })
-          },
-        })
-        // 只有完整產生才存；存檔失敗也要讓前端知道（文字已經顯示，但紀錄裡不會有）
-        let saved = null
-        try {
-          const record = await MarketAnalysis.create({
-            user: userId,
-            watch: subject.watch?._id ?? null,
-            target: subject.target,
-            quote: { price: item.quote.price, change: item.quote.change, changePct: item.quote.changePct, date: item.quote.date },
-            text,
-            model: model || '',
-            snapshot,
-            holding,
-          })
-          saved = record.toSummaryJSON()
-          await trimOldest(userId)
-        } catch (error) {
-          console.error('股票分析存檔失敗：', error.message)
-        }
-        writeEvent({ type: 'done', model, analysis: saved })
-        res.end()
-      } catch (error) {
-        if (controller.signal.aborted) {
-          console.log('股票 AI 分析已由使用者中斷')
-          return
-        }
+      await streamAiResponse({
+        res,
+        controller,
+        label: '股票 AI 分析',
+        messages: { refused: 'AI 無法產生這次的分析。', failed: 'AI 分析中途發生錯誤，這次不算次數，請再試一次。' },
+        usage: {
+          record: () => aiUsage.record(userId, 'stock'),
+          refund: (pending) => aiUsage.refund(pending),
+          report: (pending, usage, model) => aiUsage.report(pending, usage, model),
+        },
+        run: ({ signal, onStart, onDelta }) =>
+          ai.stream({ messages: buildStockAnalysisMessages({ snapshot, holding, news: newsList, now: new Date(now()) }), signal, onStart, onDelta }),
         // 伺服器或 AI 出錯（不是使用者停止）：不算冷卻、退還次數，可以馬上重試
-        startedAt.delete(lockKey)
-        void refundUsage(usage)
-        if (!res.headersSent) throw error
-        console.error(error)
-        writeEvent({
-          type: 'error',
-          message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的分析。' : 'AI 分析中途發生錯誤，這次不算次數，請再試一次。',
-        })
-        res.end()
-      }
+        onFailed: () => startedAt.delete(lockKey),
+        // 只有完整產生才存；存檔失敗也要讓前端知道（文字已經顯示，但紀錄裡不會有）
+        onComplete: async ({ text, model }) => {
+          let saved = null
+          try {
+            const record = await MarketAnalysis.create({
+              user: userId,
+              watch: subject.watch?._id ?? null,
+              target: subject.target,
+              quote: { price: item.quote.price, change: item.quote.change, changePct: item.quote.changePct, date: item.quote.date },
+              text,
+              model: model || '',
+              snapshot,
+              holding,
+            })
+            saved = record.toSummaryJSON()
+            await trimOldest(userId)
+          } catch (error) {
+            console.error('股票分析存檔失敗：', error.message)
+          }
+          return { analysis: saved }
+        },
+      })
     } catch (error) {
-      if (error instanceof NarrationRefusedError) {
-        res.status(422).json({ message: 'AI 無法產生這次的分析。' })
-        return
-      }
       next(error)
     } finally {
-      if (locked) running.delete(userId)
+      if (locked) running.release(userId)
     }
   })
 
@@ -442,4 +395,4 @@ function createMarketAnalysisRouter({
   return router
 }
 
-module.exports = { createMarketAnalysisRouter, DAILY_LIMIT, COOLDOWN_MS, startOfTaipeiDay }
+module.exports = { createMarketAnalysisRouter, DAILY_LIMIT, COOLDOWN_MS }

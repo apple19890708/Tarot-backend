@@ -10,8 +10,12 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-5.5'
 // 個股 AI 分析與財經新聞 AI 分析用的模型（2026-11-14 使用者要求和塔羅分開）。沒設定就和塔羅同一個
 const MARKET_MODEL = process.env.OPENROUTER_MARKET_MODEL || MODEL
-// 主模型出錯（停機、限流、被拒）時 OpenRouter 自動改用這個；費用照實際回答的模型算。設成和主模型一樣就等於不備援
-const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || 'anthropic/claude-opus-5.5'
+// 主模型出錯（停機、限流、被拒）時 OpenRouter 自動改用這個；費用照實際回答的模型算。設成和主模型一樣就等於不備援。
+// 2026-11-26 使用者決定：由 Opus 5.5（每百萬 token US$4／US$20）改成 Sonnet 5（US$2／US$10，和主模型同價），出錯時費用不翻倍
+const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || 'anthropic/claude-sonnet-5'
+// 每次都要 OpenRouter 回報 token 數與費用（v29 項目 6：記在 MarketAiUsage，觀察提示快取值不值得留）。
+// 不增加費用；設 OPENROUTER_INCLUDE_USAGE=false 可以關掉
+const INCLUDE_USAGE = process.env.OPENROUTER_INCLUDE_USAGE !== 'false'
 const REQUEST_TIMEOUT_MS = 240_000
 
 // 讓模型先推理再動筆。牌與牌的互動那節要真的推導，不是把兩張牌的牌義各講一遍。
@@ -738,8 +742,8 @@ function buildRequestBody({ messages, model = MODEL, effort, includeUsage = fals
     // exclude：推理過程不要回傳。前端是直接把串流接成 Markdown 顯示的，混進來會變亂碼般的內容
     reasoning: { effort: REASONING_EFFORTS.includes(effort) ? effort : readReasoningEffort(), exclude: true },
     stream: true,
-    // 最後一段串流附上 token 數與費用（只有評估腳本要）
-    usage: includeUsage ? { include: true } : undefined,
+    // 最後一段串流附上 token 數與費用（評估腳本一定要；正式環境預設也開，記進用量紀錄）
+    usage: includeUsage || INCLUDE_USAGE ? { include: true } : undefined,
     messages: messages.map((message) =>
       message.role === 'system' && typeof message.content === 'string'
         ? { role: 'system', content: [{ type: 'text', text: message.content, cache_control: { type: 'ephemeral' } }] }

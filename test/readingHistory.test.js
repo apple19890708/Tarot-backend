@@ -98,3 +98,28 @@ test('牌陣已經不存在時也退回無位置', () => {
   const record = makeRecord({ spreadKey: 'spread-that-was-removed' })
   assert.strictEqual(toReadingInput(record, spreads).spread, null)
 })
+
+// v29 項目 3：列表用 .select(LIST_FIELDS).lean() 查，摘要要能吃投影後的形狀
+test('紀錄摘要（純函式）：投影後的 narration 是 {} 或 { createdAt } 算有解讀，null／沒有這個欄位算沒有', () => {
+  const Reading = require('../src/models/Reading')
+  const { readingSummary, LIST_FIELDS } = Reading
+  const base = { _id: 'r1', question: 'q', cards: [{ cardId: 'c1', orientation: 'upright', nameZh: '愚者' }], createdAt: new Date(0) }
+  assert.strictEqual(readingSummary({ ...base, narration: { createdAt: new Date() } }).hasNarration, true)
+  assert.strictEqual(readingSummary({ ...base, narration: {} }).hasNarration, true)
+  assert.strictEqual(readingSummary({ ...base, narration: null }).hasNarration, false)
+  assert.strictEqual(readingSummary(base).hasNarration, false)
+  assert.strictEqual(readingSummary({ ...base, followUps: [{ createdAt: new Date() }, {}] }).followUpCount, 2)
+  // 列表查的欄位涵蓋摘要用到的每一個，而且不含 AI 全文與行情
+  for (const field of ['question', 'domain', 'spreadKey', 'spreadName', 'cards', 'createdAt', 'narration.createdAt', 'followUps.createdAt']) {
+    assert.ok(LIST_FIELDS.split(' ').includes(field), field)
+  }
+  assert.ok(!LIST_FIELDS.includes('narration.text') && !LIST_FIELDS.includes('narration.market'))
+
+  const { lenormandSummary, LIST_FIELDS: LENORMAND_FIELDS } = require('../src/models/LenormandReading')
+  const { cardById } = require('../src/data/lenormand/cards')
+  const lenormandBase = { _id: 'l1', spreadKey: 'theme-3', cards: [1, 24, 25], createdAt: new Date(0) }
+  assert.strictEqual(lenormandSummary({ ...lenormandBase, narration: {} }, cardById).hasNarration, true)
+  assert.strictEqual(lenormandSummary(lenormandBase, cardById).hasNarration, false)
+  assert.strictEqual(lenormandSummary(lenormandBase, cardById).cards[1].nameZh, '愛心')
+  assert.ok(!LENORMAND_FIELDS.includes('narration.text'))
+})

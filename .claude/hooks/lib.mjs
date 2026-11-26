@@ -1,7 +1,7 @@
 // Claude Code hooks 共用邏輯（前後端 repo 各放一份，內容相同；差別只在同資料夾的 gate.json）。
 // - 驗證關卡：有改動的 repo 要先通過 build／test，才能結束回合或 commit。
 //   通過的結果以「改動內容的指紋」記在暫存檔，內容沒變就不重跑。
-// - 保護：不准結束使用者的 dev server（4000／5173）、不准讀 .env。
+// - 保護：不准結束使用者的 dev server（4000／5173）、不准讀 .env 與 env.yaml（部署用的環境變數檔，也有密鑰）。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -114,12 +114,13 @@ export function describeFailures(failures) {
 
 // ---------- 保護規則 ----------
 
-// .env、.env.local、.env.production…；.env.example 不算（裡面沒有密鑰）
-export const ENV_IN_COMMAND = /(^|[\s'"`=/\\(:,])\.env(?!\.example\b)(\.[\w.-]+)?(?=$|[\s'"`|;&)<>,*])/m
+// .env、.env.local、.env.production…；.env.example 不算（裡面沒有密鑰）。
+// env.yaml／env.yml：Cloud Run 部署用的環境變數檔，裡面也是明文密鑰（v29 項目 8）
+export const ENV_IN_COMMAND = /(^|[\s'"`=/\\(:,])(?:\.env(?!\.example\b)(\.[\w.-]+)?|env\.ya?ml)(?=$|[\s'"`|;&)<>,*])/im
 export function isEnvPath(p) {
   if (!p) return false
   const base = String(p).split(/[\\/]/).pop()
-  return /^\.env(\..+)?$/.test(base) && base !== '.env.example'
+  return (/^\.env(\..+)?$/.test(base) && base !== '.env.example') || /^env\.ya?ml$/i.test(base)
 }
 
 const PROTECTED_PORTS = ['4000', '5173']

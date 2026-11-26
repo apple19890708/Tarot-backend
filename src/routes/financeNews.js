@@ -9,9 +9,8 @@ const { tradesOf } = require('../services/market/portfolio')
 const { buildFinanceNewsMessages } = require('../services/market/financeNewsAnalysis')
 const { clusterNews, isMopsRepost } = require('../services/market/financeNews')
 const { DIGEST_VERSION, listToneOf, watchMatchers } = require('../services/market/newsDigest')
-const { NarrationRefusedError } = require('../services/narrationService')
-const { startOfTaipeiDay } = require('./marketAnalysis')
-const { startNdjson } = require('../lib/ndjsonStream')
+const { createAiUsage, createUserLock, streamAiResponse } = require('../services/aiStream')
+const { startOfTaipeiDay } = require('../services/clock')
 
 // 每人每天最多幾次（admin 不限）；兩次之間至少隔多久（中斷的也算）
 const DAILY_LIMIT = 10
@@ -81,23 +80,9 @@ function createFinanceNewsRouter({
   const router = express.Router()
 
   // AI 開始產生（開始計費）時記一筆用量；記錄失敗只寫 log，不中斷分析
-  function recordUsage(userId) {
-    if (!MarketAiUsage) return null
-    const expireAt = new Date(now() + (MarketAiUsage.KEEP_DAYS || 2) * 86400000)
-    return Promise.resolve(MarketAiUsage.create({ user: userId, kind: 'news', expireAt })).catch((error) => {
-      console.error('AI 用量記錄失敗：', error.message)
-      return null
-    })
-  }
-  // 伺服器或 AI 那邊出錯（不是使用者停止）時退還這次的次數
-  async function refundUsage(pending) {
-    const record = await pending
-    if (!record?._id || !MarketAiUsage?.deleteOne) return
-    await Promise.resolve(MarketAiUsage.deleteOne({ _id: record._id })).catch((error) =>
-      console.error('AI 用量退還失敗：', error.message),
-    )
-  }
-  const running = new Set()
+  // AI 用量（記錄、退還、費用回報）與同一人同時只能一個的鎖：和塔羅、雷諾曼共用 services/aiStream.js（v29 項目 10）
+  const aiUsage = createAiUsage({ Usage: MarketAiUsage, now })
+  const running = createUserLock()
   const startedAt = new Map()
 
   async function syncQuietly() {
@@ -237,12 +222,11 @@ function createFinanceNewsRouter({
         res.status(400).json({ message: scope.error })
         return
       }
-      if (running.has(userId)) {
+      // 檢查與上鎖是同步的，同時送多個請求也只有一個能往下走；早退時由 finally 釋放
+      if (!running.acquire(userId)) {
         res.status(409).json({ message: '上一個 AI 分析還在進行，請等它完成。' })
         return
       }
-      // 檢查完立刻上鎖（同步執行），同時送多個請求也只有一個能往下走；早退時由 finally 釋放
-      running.add(userId)
       locked = true
       // 一開始就監聽中斷：同步新聞時使用者已經關掉的話，就不呼叫 AI
       const controller = new AbortController()
@@ -270,65 +254,43 @@ function createFinanceNewsRouter({
       // 追蹤清單可能有幾十檔：只交給 AI 新聞有提到的、有持股的，最多 AI_WATCH_LIMIT 檔
       const { watchlist, omitted: omittedWatches } = pickWatchesForAi(watches, news)
 
-      const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
-      let text = ''
-      let usage = null
-
-      try {
-        const { model } = await ai.stream({
-          messages: buildFinanceNewsMessages({ news, watchlist, omittedWatches, ...scope, now: new Date(now()) }),
-          signal: controller.signal,
-          onStart: () => {
-            // 送出標頭並開始心跳（前端靠它分辨「還在等 AI」和「連線斷了」）
-            startNdjson(res)
-            usage = recordUsage(userId)
-          },
-          onDelta: (delta) => {
-            text += delta
-            writeEvent({ type: 'delta', text: delta })
-          },
-        })
-        let saved = null
-        try {
-          const record = await FinanceNewsAnalysis.create({
-            user: userId,
-            region: scope.region,
-            theme: scope.theme,
-            text,
-            model: model || '',
-            news: news.map((n) => ({ title: n.title, sourceLabel: n.sourceLabel, region: n.region, url: n.url, publishedAt: n.publishedAt })),
-          })
-          saved = record.toSummaryJSON()
-          await trimOldest(userId)
-        } catch (error) {
-          console.error('新聞分析存檔失敗：', error.message)
-        }
-        writeEvent({ type: 'done', model, analysis: saved })
-        res.end()
-      } catch (error) {
-        if (controller.signal.aborted) {
-          console.log('新聞 AI 分析已由使用者中斷')
-          return
-        }
+      await streamAiResponse({
+        res,
+        controller,
+        label: '新聞 AI 分析',
+        messages: { refused: 'AI 無法產生這次的分析。', failed: 'AI 分析中途發生錯誤，這次不算次數，請再試一次。' },
+        usage: {
+          record: () => aiUsage.record(userId, 'news'),
+          refund: (pending) => aiUsage.refund(pending),
+          report: (pending, usage, model) => aiUsage.report(pending, usage, model),
+        },
+        run: ({ signal, onStart, onDelta }) =>
+          ai.stream({ messages: buildFinanceNewsMessages({ news, watchlist, omittedWatches, ...scope, now: new Date(now()) }), signal, onStart, onDelta }),
         // 伺服器或 AI 出錯（不是使用者停止）：不算冷卻、退還次數，可以馬上重試
-        startedAt.delete(userId)
-        void refundUsage(usage)
-        if (!res.headersSent) throw error
-        console.error(error)
-        writeEvent({
-          type: 'error',
-          message: error instanceof NarrationRefusedError ? 'AI 無法產生這次的分析。' : 'AI 分析中途發生錯誤，這次不算次數，請再試一次。',
-        })
-        res.end()
-      }
+        onFailed: () => startedAt.delete(userId),
+        onComplete: async ({ text, model }) => {
+          let saved = null
+          try {
+            const record = await FinanceNewsAnalysis.create({
+              user: userId,
+              region: scope.region,
+              theme: scope.theme,
+              text,
+              model: model || '',
+              news: news.map((n) => ({ title: n.title, sourceLabel: n.sourceLabel, region: n.region, url: n.url, publishedAt: n.publishedAt })),
+            })
+            saved = record.toSummaryJSON()
+            await trimOldest(userId)
+          } catch (error) {
+            console.error('新聞分析存檔失敗：', error.message)
+          }
+          return { analysis: saved }
+        },
+      })
     } catch (error) {
-      if (error instanceof NarrationRefusedError) {
-        res.status(422).json({ message: 'AI 無法產生這次的分析。' })
-        return
-      }
       next(error)
     } finally {
-      if (locked) running.delete(userId)
+      if (locked) running.release(userId)
     }
   })
 

@@ -135,29 +135,41 @@ readingSchema.pre('validate', function assessNarrations() {
 // 列表固定以使用者 ＋ 時間倒序查詢
 readingSchema.index({ user: 1, createdAt: -1 })
 
-// 列表用的摘要，不含會隨規則重算的內容
-readingSchema.methods.toSummaryJSON = function toSummaryJSON() {
+// 列表只查這些欄位（v29 項目 3）：AI 解讀全文、行情資料都不讀。
+// 投影 narration.createdAt：有解讀時 narration 會是物件（就算舊資料沒有 createdAt，MongoDB 也回 {}），沒有時是 null 或不存在；
+// followUps.createdAt 只用來算追問次數
+const LIST_FIELDS = 'question domain spreadKey spreadName cards createdAt narration.createdAt followUps.createdAt'
+
+// 列表用的摘要（純函式，查詢時用 .lean() 也能用），不含會隨規則重算的內容
+function readingSummary(doc) {
   return {
-    id: String(this._id),
-    question: this.question || '',
-    domain: this.domain || null,
-    spreadKey: this.spreadKey || null,
-    spreadName: this.spreadName || '',
-    cardCount: this.cards.length,
-    cards: this.cards.map((card) => ({
+    id: String(doc._id),
+    question: doc.question || '',
+    domain: doc.domain || null,
+    spreadKey: doc.spreadKey || null,
+    spreadName: doc.spreadName || '',
+    cardCount: doc.cards.length,
+    cards: doc.cards.map((card) => ({
       id: String(card.cardId),
       nameZh: card.nameZh || '',
       orientation: card.orientation,
     })),
-    hasNarration: Boolean(this.narration && this.narration.text),
-    followUpCount: Array.isArray(this.followUps) ? this.followUps.length : 0,
-    createdAt: this.createdAt,
+    // 完整文件有 text；列表投影過的只剩 { createdAt } 或 {}（text 是必填，不會是空字串）
+    hasNarration: Boolean(doc.narration) && doc.narration.text !== '',
+    followUpCount: Array.isArray(doc.followUps) ? doc.followUps.length : 0,
+    createdAt: doc.createdAt,
   }
+}
+
+readingSchema.methods.toSummaryJSON = function toSummaryJSON() {
+  return readingSummary(this)
 }
 
 const Reading = mongoose.model('Reading', readingSchema)
 
 module.exports = Reading
 module.exports.MAX_READINGS_PER_USER = MAX_READINGS_PER_USER
+module.exports.readingSummary = readingSummary
+module.exports.LIST_FIELDS = LIST_FIELDS
 module.exports.FEEDBACK_VALUES = FEEDBACK_VALUES
 module.exports.FEEDBACK_REASONS = FEEDBACK_REASONS

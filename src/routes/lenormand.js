@@ -27,12 +27,12 @@ const { cardById } = require('../data/lenormand/cards')
 const { validateCommon, validateCardIds, drawCardIds, buildLenormandReading } = require('../services/lenormand/reading')
 const LenormandReadingModel = require('../models/LenormandReading')
 const JournalEntryModel = require('../models/JournalEntry')
-const { MAX_LENORMAND_READINGS_PER_USER, MODES } = LenormandReadingModel
+const { MAX_LENORMAND_READINGS_PER_USER, MODES, lenormandSummary, LIST_FIELDS } = LenormandReadingModel
 const { trimHistory } = require('../services/readingHistory')
 const { resolveNarration } = require('./readings')
 const { userCanUseAi } = require('../middleware/auth')
-const { startNdjson } = require('../lib/ndjsonStream')
-const { isNarrationAvailable, NarrationRefusedError } = require('../services/narrationService')
+const { isNarrationAvailable } = require('../services/narrationService')
+const { streamAiResponse, watchClose, endAborted, BUSY_MESSAGE } = require('../services/aiStream')
 const { streamLenormandNarration } = require('../services/lenormand/narration')
 const { checkLenormandNarration } = require('../services/lenormand/narrationCheck')
 const { createTarotAiQuota } = require('../services/tarotAiQuota')
@@ -177,6 +177,8 @@ function createLenormandRouter({
   }
 
   router.post('/readings/narrate', async (req, res, next) => {
+    // 一開始就監聽斷線（重新產生時前端會先中斷舊的），等待期間斷線就不呼叫 AI
+    const controller = watchClose(res)
     try {
       // 雷諾曼權限在 router 層；AI 權限用已掛好的 req.user 判斷，不再多查一次資料庫
       if (!userCanUseAi(req.user)) {
@@ -203,69 +205,54 @@ function createLenormandRouter({
 
       // 次數記在資料庫：沒連上時回 503（和塔羅一致），不呼叫 AI
       if (!ensureDatabase(res)) return
-      const quota = await aiQuota.check(req.auth, 'lenormand')
-      if (!quota.allowed) {
-        res.status(429).json({ message: aiQuota.limitMessage('lenormand', quota.limit) })
+      // 同一人同時只能一個（v29 項目 1）：先上鎖再檢查次數，同時送很多個請求不會全部通過
+      const userId = req.auth.userId
+      // 新請求取代同一人進行中的舊請求；拿不到才 409
+      if (!(await aiQuota.takeOver(userId, 'lenormand', controller))) {
+        if (controller.signal.aborted) endAborted(res)
+        else res.status(409).json({ message: BUSY_MESSAGE })
         return
       }
-
-      // 前端中斷連線（按停止、關閉頁面）時，連帶中斷對 AI 的請求以停止計費
-      const controller = new AbortController()
-      res.on('close', () => {
-        if (!res.writableFinished) controller.abort()
-      })
-      const writeEvent = (event) => res.write(`${JSON.stringify(event)}\n`)
-      let text = ''
-      let usage = null
       try {
-        const { model } = await ai.stream({
-          reading,
-          signal: controller.signal,
-          onStart: () => {
-            // 送出標頭並開始心跳；AI 開始產生（開始計費）才記一次
-            startNdjson(res)
-            usage = aiQuota.record(req.auth.userId, 'lenormand')
-          },
-          onDelta: (delta) => {
-            text += delta
-            writeEvent({ type: 'delta', text: delta })
-          },
-        })
-        const checks = checkLenormandNarration(text, { spreadKey: common.spread.key, significator: common.significator })
-        // 只有完整產生才存；中途被停止的半截文字不留
-        const saved = await saveNarration({
-          readingId: body.readingId,
-          userId: req.auth.userId,
-          spread: common.spread,
-          cardIds,
-          significator: common.significator,
-          domain: common.domain,
-          text,
-          model,
-          checks,
-        })
-        writeEvent({ type: 'done', model, saved, checks })
-        res.end()
-      } catch (streamError) {
-        if (controller.signal.aborted) {
-          console.log('[lenormand] AI 解讀已由使用者中斷')
+        const quota = await aiQuota.check(req.auth, 'lenormand')
+        if (!quota.allowed) {
+          res.status(429).json({ message: aiQuota.limitMessage('lenormand', quota.limit) })
           return
         }
-        // 伺服器或 AI 出錯（不是使用者停止）：退還這次的次數
-        void aiQuota.refund(usage)
-        if (!res.headersSent) throw streamError
-        console.error(streamError)
-        writeEvent({
-          type: 'error',
-          message: streamError instanceof NarrationRefusedError ? 'AI 無法產生這次的解讀。' : 'AI 解讀中途發生錯誤，請再試一次。',
+        if (controller.signal.aborted) return endAborted(res)
+        let checks = []
+        await streamAiResponse({
+          res,
+          controller,
+          label: '雷諾曼 AI 解讀',
+          messages: { refused: 'AI 無法產生這次的解讀。', failed: 'AI 解讀中途發生錯誤，請再試一次。' },
+          usage: {
+            record: () => aiQuota.record(userId, 'lenormand'),
+            refund: (pending) => aiQuota.refund(pending),
+            report: (pending, usage, model) => aiQuota.report(pending, usage, model),
+          },
+          run: ({ signal, onStart, onDelta }) => ai.stream({ reading, signal, onStart, onDelta }),
+          // 只有完整產生才存；中途被停止的半截文字不留
+          onComplete: async ({ text, model }) => {
+            checks = checkLenormandNarration(text, { spreadKey: common.spread.key, significator: common.significator })
+            const saved = await saveNarration({
+              readingId: body.readingId,
+              userId,
+              spread: common.spread,
+              cardIds,
+              significator: common.significator,
+              domain: common.domain,
+              text,
+              model,
+              checks,
+            })
+            return { saved, checks }
+          },
         })
-        res.end()
+      } finally {
+        aiQuota.release(userId, 'lenormand')
       }
     } catch (error) {
-      if (error instanceof NarrationRefusedError) {
-        res.status(422).json({ message: 'AI 無法產生這次的解讀。' })
-        return
-      }
       next(error)
     }
   })
@@ -337,9 +324,12 @@ function createLenormandRouter({
         LenormandReading.find(filter)
           .sort({ createdAt: -1, _id: -1 })
           .skip((page - 1) * pageSize)
-          .limit(pageSize),
+          .limit(pageSize)
+          // 只讀摘要要的欄位（v29 項目 3）
+          .select(LIST_FIELDS)
+          .lean(),
       ])
-      res.json({ page, pageSize, total, readings: records.map((record) => record.toSummaryJSON(cardById)) })
+      res.json({ page, pageSize, total, readings: records.map((record) => lenormandSummary(record, cardById)) })
     } catch (error) {
       next(error)
     }

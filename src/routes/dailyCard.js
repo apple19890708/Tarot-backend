@@ -6,7 +6,7 @@
 //        v27：占卜紀錄每筆帶 deck（tarot／lenormand）；雷諾曼紀錄與日記只列給有雷諾曼權限的人
 // 每日一牌不呼叫 AI（v26 不做的事）。依賴可以注入，測試不必連資料庫。
 const express = require('express')
-const { rateLimit } = require('express-rate-limit')
+const { createGuestLimiter } = require('../lib/guestLimiter')
 
 const DailyCardModel = require('../models/DailyCard')
 const CardModel = require('../models/Card')
@@ -31,19 +31,8 @@ async function defaultPickCard(Card) {
 }
 
 // 訪客抽牌的每 IP 限速（api-reviewer 2026-11-20）：不用登入就能一直打，每次一個 $sample 聚合加簽憑證。
-// 計數放記憶體（同 auth.js 的限速器），Cloud Run 多實例各算各的，只當第一道。登入的人不受這個限制
-const GUEST_DRAW_WINDOW_MS = 60 * 1000
-const GUEST_DRAW_MAX = 30
-function defaultGuestLimiter() {
-  return rateLimit({
-    windowMs: GUEST_DRAW_WINDOW_MS,
-    limit: GUEST_DRAW_MAX,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    skip: (req) => Boolean(req.auth),
-    message: { message: '抽牌次數太多，請稍後再試。' },
-  })
-}
+// 共用 lib/guestLimiter.js（v29 塔羅抽牌也用同一個做法），登入的人不受這個限制
+const defaultGuestLimiter = () => createGuestLimiter()
 
 function createDailyCardRouter({
   ensureDatabase,

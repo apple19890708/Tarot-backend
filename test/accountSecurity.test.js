@@ -91,6 +91,8 @@ async function withApp(options, run) {
   try {
     await run({ post, call })
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 }
@@ -239,6 +241,8 @@ test('安全標頭：沒有 X-Powered-By、有 nosniff 與 noindex，牌卡圖�
     assert.equal(response.headers.get('x-robots-tag'), 'noindex')
     assert.equal(response.headers.get('cross-origin-resource-policy'), 'cross-origin')
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 })

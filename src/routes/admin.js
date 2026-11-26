@@ -15,7 +15,8 @@ const DEFAULT_MODELS = {
   MarketAlert: require('../models/MarketAlert'),
   PushSubscription: require('../models/PushSubscription'),
 }
-const { startOfTaipeiDay, DAILY_LIMIT: STOCK_AI_DAILY_LIMIT } = require('./marketAnalysis')
+const { DAILY_LIMIT: STOCK_AI_DAILY_LIMIT } = require('./marketAnalysis')
+const { startOfTaipeiDay } = require('../services/clock')
 const { DAILY_LIMIT: NEWS_AI_DAILY_LIMIT } = require('./financeNews')
 const { TAROT_AI_DAILY_LIMITS } = require('../services/tarotAiQuota')
 

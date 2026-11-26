@@ -22,6 +22,8 @@ async function withServer(app, run) {
     const { port } = server.address()
     await run(`http://127.0.0.1:${port}`)
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 }

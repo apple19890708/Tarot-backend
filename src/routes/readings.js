@@ -7,7 +7,7 @@ const mongoose = require('mongoose')
 
 const ReadingModel = require('../models/Reading')
 const JournalEntryModel = require('../models/JournalEntry')
-const { FEEDBACK_VALUES, FEEDBACK_REASONS } = ReadingModel
+const { FEEDBACK_VALUES, FEEDBACK_REASONS, readingSummary, LIST_FIELDS } = ReadingModel
 const spreads = require('../data/spreads')
 const { loadCardsInOrder: defaultLoadCardsInOrder } = require('../services/cardLoader')
 const { buildReadingWithDictionary } = require('../services/readingService')
@@ -163,14 +163,17 @@ function createReadingsRouter({
           // createdAt 只到毫秒，同一毫秒的多筆順序未定義，用 _id 當第二個排序鍵，翻頁才不會重複或漏掉
           .sort({ createdAt: -1, _id: -1 })
           .skip((page - 1) * pageSize)
-          .limit(pageSize),
+          .limit(pageSize)
+          // 只讀摘要要的欄位（v29 項目 3）：AI 解讀全文與行情資料最大可達數百 KB，列表用不到
+          .select(LIST_FIELDS)
+          .lean(),
       ])
 
       res.json({
         page,
         pageSize,
         total,
-        readings: records.map((record) => record.toSummaryJSON()),
+        readings: records.map(readingSummary),
       })
     } catch (error) {
       next(error)
@@ -403,8 +406,9 @@ function createReadingsRouter({
 // 解讀時查到的市場資料由前端帶回來（還沒保存成紀錄時，後端沒有地方先存）。
 // 只有股市諮詢才收；只做形狀、大小與 key 的檢查，不合格就不存（解讀照存）。
 // 內容只有本人讀得到，前端也只當數字與純文字顯示，不會當 HTML
-// 含圖表與回測曲線，一個標的約 20KB，最多 4 個
-const MARKET_MAX_LENGTH = 200000
+// 含 K 線（日／週／月）與回測曲線。2026-11-26 實測一個標的約 70KB（原註解寫 20KB），最多 4 個（symbols.js 的 MAX_TARGETS）：
+// 原本上限 200000 字元，問 3～4 檔時行情會被靜靜丟掉、只存解讀（v29 項目 7 量大小時發現），改成 400000
+const MARKET_MAX_LENGTH = 400000 // bytes
 const MARKET_MAX_DEPTH = 8
 
 // Mongo 不接受以 $ 開頭或含 . 的 key（存進 Mixed 欄位會 save 失敗），結構也不該太深
@@ -421,7 +425,8 @@ function resolveMarket(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.items)) {
     return null
   }
-  if (JSON.stringify(raw).length > MARKET_MAX_LENGTH || hasUnsafeKeys(raw)) {
+  // 用位元組算（中文一字 3 bytes），和 express.json 的 body 上限同一個單位
+  if (Buffer.byteLength(JSON.stringify(raw)) > MARKET_MAX_LENGTH || hasUnsafeKeys(raw)) {
     return null
   }
   return raw

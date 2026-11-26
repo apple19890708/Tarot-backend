@@ -149,6 +149,8 @@ test('靜態路由：SVG 以 image/svg+xml 提供、gzip 壓縮、可以跨網�
     assert.equal((await fetch(`${base}/lenormand/nope.svg`)).status, 404)
     assert.equal((await fetch(`${base}/lenormand/..%2Fcards%2Fcups-01.jpg`)).status, 404)
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
   // server.js 真的有掛這兩條

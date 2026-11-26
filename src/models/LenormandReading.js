@@ -49,21 +49,27 @@ const lenormandReadingSchema = new mongoose.Schema(
 // 列表固定以使用者 ＋ 時間倒序查詢
 lenormandReadingSchema.index({ user: 1, createdAt: -1 })
 
-// 列表的摘要：牌名從靜態牌庫查（不存快照，牌名不會變），只列前 5 張
+// 列表的摘要：牌名從靜態牌庫查（不存快照，牌名不會變），只列前 5 張。
+// 純函式（v29 項目 3）：列表用 .select(LIST_FIELDS).lean() 查，不讀 AI 解讀全文
 const PREVIEW_CARDS = 5
-lenormandReadingSchema.methods.toSummaryJSON = function toSummaryJSON(cardById) {
+const LIST_FIELDS = 'question domain spreadKey spreadName significator cards createdAt narration.createdAt'
+function lenormandSummary(doc, cardById) {
   return {
-    id: String(this._id),
-    question: this.question || '',
-    domain: this.domain || null,
-    spreadKey: this.spreadKey,
-    spreadName: this.spreadName || '',
-    significator: this.significator ?? null,
-    cardCount: this.cards.length,
-    cards: this.cards.slice(0, PREVIEW_CARDS).map((id) => ({ id, nameZh: cardById.get(id)?.nameZh || '' })),
-    hasNarration: Boolean(this.narration && this.narration.text),
-    createdAt: this.createdAt,
+    id: String(doc._id),
+    question: doc.question || '',
+    domain: doc.domain || null,
+    spreadKey: doc.spreadKey,
+    spreadName: doc.spreadName || '',
+    significator: doc.significator ?? null,
+    cardCount: doc.cards.length,
+    cards: doc.cards.slice(0, PREVIEW_CARDS).map((id) => ({ id, nameZh: cardById.get(id)?.nameZh || '' })),
+    // 完整文件有 text；列表投影過的只剩 { createdAt } 或 {}
+    hasNarration: Boolean(doc.narration) && doc.narration.text !== '',
+    createdAt: doc.createdAt,
   }
+}
+lenormandReadingSchema.methods.toSummaryJSON = function toSummaryJSON(cardById) {
+  return lenormandSummary(this, cardById)
 }
 
 const LenormandReading = mongoose.model('LenormandReading', lenormandReadingSchema)
@@ -71,4 +77,6 @@ const LenormandReading = mongoose.model('LenormandReading', lenormandReadingSche
 module.exports = LenormandReading
 module.exports.MAX_LENORMAND_READINGS_PER_USER = MAX_LENORMAND_READINGS_PER_USER
 module.exports.PREVIEW_CARDS = PREVIEW_CARDS
+module.exports.lenormandSummary = lenormandSummary
+module.exports.LIST_FIELDS = LIST_FIELDS
 module.exports.MODES = MODES

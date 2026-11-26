@@ -41,7 +41,10 @@
 
 ## 程式結構
 
-- `src/server.js`：占卜相關路由（`/api/health`、`/api/spreads`、`/api/readings/draw`、`/api/readings/narrate`）
+- `src/server.js`：組裝 app（中介層、body 上限、全域錯誤處理、掛載各路由）與 `/api/health`
+- `src/routes/tarot.js`：塔羅路由（`createTarotRouter`，依賴用注入的方式讓測試載入得到）：`/api/spreads`、`/api/cards`、`/api/readings/draw`、`/manual`、`/narrate`、`/follow-up/*`
+- `src/services/aiStream.js`：AI 串流的共用流程（`streamAiResponse`、同一人同時一個的鎖 `createUserLock`、用量記錄與退還 `createAiUsage`），五條 AI 路徑（塔羅解讀、追問、雷諾曼、個股、新聞）共用
+- `src/lib/guestLimiter.js`：訪客限速（每 IP 每分鐘 30 次，登入略過），抽牌與每日一牌共用
 - `src/routes/auth.js`、`src/routes/admin.js`：會員與管理者路由（`/api/auth/*`、`/api/admin/*`）
 - `src/middleware/auth.js`：`optionalAuth` / `requireAuth` / `requireAdmin`；`src/lib/jwt.js`、`src/lib/password.js`
 - `src/models/User.js`：會員（`passwordHash` 設 `select: false`，不會跟著查出來）
@@ -63,7 +66,7 @@
 - **密碼與 token**：`passwordHash` 絕不出現在任何回應；`JWT_SECRET` 沒設定時伺服器直接不啟動，不要給預設值。
 - **記憶體（線上只有 512MB～1GiB）**：不要直接 `new Intl.DateTimeFormat`，用 `src/lib/intlFormat.js` 的 `dateTimeFormat()`（每 new 一個約 27KB 原生記憶體，K 線每根都 new 曾讓高峰衝到 490MB、Cloud Run 把主機砍掉）；多個請求會同時要的全市場資料，快取要合併「下載中」的請求（`twseData.js` 的 `cached()`、`marketService` 的 `inFlight`），否則 N 檔股票就下載 N 次。新增大量資料處理時，用 `process.memoryUsage().rss` 量一次高峰。
 - **傳出流量（Cloud Run 北美免費 1 GB／月）**：JSON 回應一律用 `res.json()`，會經過 `src/lib/jsonCompression.js` 自動 gzip；不要自己 `res.send(JSON.stringify(...))` 繞過它。串流用 `startNdjson` + `res.write`（不壓縮、逐段送）。內容不會變的靜態檔（牌卡圖片）要設瀏覽器快取。
-- **AI 串流**：開始送資料時用 `src/lib/ndjsonStream.js` 的 `startNdjson(res)`（送標頭＋每 15 秒心跳，前端靠它判斷斷線）；呼叫 AI 走 `streamChat`（90 秒沒資料會主動中止）。伺服器或 AI 出錯的退還次數、不進冷卻，使用者自己停止的才算。
+- **AI 串流**：開始送資料時用 `src/lib/ndjsonStream.js` 的 `startNdjson(res)`（送標頭＋每 15 秒心跳，前端靠它判斷斷線）；呼叫 AI 走 `streamChat`（90 秒沒資料會主動中止）。伺服器或 AI 出錯的退還次數、不進冷卻，使用者自己停止的才算。新的 AI 路徑一律用 `src/services/aiStream.js` 的 `streamAiResponse`（中斷停止計費、出錯退還、AI 拒絕回 422 都在裡面），並且**先上鎖再檢查每日次數**（`createUserLock`），否則同時送很多個請求會全部通過檢查；handler 一開始就 `watchClose(res)`，呼叫 AI 前再檢查是否已中斷。
 - **向下相容**：保留既有回傳欄位（`overview`、`guidance`、`cards`），新增欄位用加的，不改名、不刪除。
 - **不信任前端資料**：需要分析或 AI 解讀時，由後端依牌 id 與正逆位重新計算，不直接使用前端傳來的分析文字。使用者輸入要驗證格式與長度。
 - 新規則要在 `test/combinationRules.test.js` 補上邊界測試；隨機性（例如正逆位）以參數注入，讓測試可固定結果。

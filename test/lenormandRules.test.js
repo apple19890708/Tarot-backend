@@ -350,6 +350,8 @@ async function withApp(run, rng) {
   try {
     await run(`http://127.0.0.1:${server.address().port}/api/lenormand`)
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 }

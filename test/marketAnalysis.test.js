@@ -4,7 +4,8 @@ const express = require('express')
 const mongoose = require('mongoose')
 
 const MarketAnalysis = require('../src/models/MarketAnalysis')
-const { createMarketAnalysisRouter, DAILY_LIMIT, startOfTaipeiDay } = require('../src/routes/marketAnalysis')
+const { createMarketAnalysisRouter, DAILY_LIMIT } = require('../src/routes/marketAnalysis')
+const { startOfTaipeiDay } = require('../src/services/clock')
 const { buildStockAnalysisMessage, STOCK_ANALYSIS_PROMPT } = require('../src/services/market/stockAnalysis')
 
 const USER = new mongoose.Types.ObjectId().toString()
@@ -19,6 +20,8 @@ async function withServer(app, run) {
     const { port } = server.address()
     await run(`http://127.0.0.1:${port}`)
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 }

@@ -5,7 +5,7 @@ const mongoose = require('mongoose')
 
 const FinanceNewsAnalysis = require('../src/models/FinanceNewsAnalysis')
 const { createFinanceNewsRouter, pickWatchesForAi, DAILY_LIMIT, AI_NEWS_LIMIT, AI_WATCH_LIMIT } = require('../src/routes/financeNews')
-const { startOfTaipeiDay } = require('../src/routes/marketAnalysis')
+const { startOfTaipeiDay } = require('../src/services/clock')
 const {
   SOURCES,
   parseRss,
@@ -269,6 +269,8 @@ async function withServer(app, run) {
     const { port } = server.address()
     await run(`http://127.0.0.1:${port}`)
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 }

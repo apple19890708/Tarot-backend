@@ -1,5 +1,5 @@
 // PreToolUse hook：在工具執行前擋下 CLAUDE.md 禁止的動作。
-// 1. 讀 .env（Read、Grep、或 shell 指令裡出現 .env 檔）
+// 1. 讀 .env 或 env.yaml（Read、Grep、或 shell 指令裡出現這些檔名）
 // 2. 結束使用者的 dev server（4000／5173 的程序、其上層與子程序；或依名稱一次結束 node）
 // 3. git commit 時，有改動的 repo 沒通過 build／test
 // 關卡本身出錯時一律放行（不能因為 hook 壞掉而卡住工作）。
@@ -23,7 +23,7 @@ function deny(reason) {
   process.exit(0)
 }
 
-const ENV_REASON = 'CLAUDE.md 規定不得讀出或印出 .env* 的內容。需要知道設定時請問使用者，或看 .env.example。'
+const ENV_REASON = 'CLAUDE.md 規定不得讀出或印出 .env* 與 env.yaml 的內容（裡面有密鑰）。需要知道設定時請問使用者，或看 .env.example。'
 const KILL_WORD = /\b(taskkill|Stop-Process|spps|kill|pkill|killall|kill-port|fuser)\b/i
 const KILL_BY_NAME = /\/IM\b|-Name\b|-ProcessName\b|\bpkill\b|\bkillall\b/i
 const PORT_TOOL = /\b(kill-port|fuser)\b[^\n]*\b(4000|5173)\b/i
@@ -49,7 +49,7 @@ try {
   const ti = input.tool_input ?? {}
 
   if (tool === 'Read' && isEnvPath(ti.file_path)) deny(ENV_REASON)
-  if (tool === 'Grep' && (isEnvPath(ti.path) || /(^|[\\/{,])\.env\b(?!\.example)/.test(ti.glob ?? ''))) deny(ENV_REASON)
+  if (tool === 'Grep' && (isEnvPath(ti.path) || /(^|[\\/{,])(\.env\b(?!\.example)|env\.ya?ml\b)/i.test(ti.glob ?? ''))) deny(ENV_REASON)
 
   if (tool === 'Bash' || tool === 'PowerShell') {
     const cmd = String(ti.command ?? '')

@@ -17,6 +17,7 @@ const { createTarotAiQuota, TAROT_AI_DAILY_LIMITS } = require('../src/services/t
 const { createLenormandRouter } = require('../src/routes/lenormand')
 const LenormandReading = require('../src/models/LenormandReading')
 const MarketAiUsage = require('../src/models/MarketAiUsage')
+const { createUserLock } = require('../src/services/aiStream')
 
 const NOW = new Date('2026-11-25T08:00:00Z') // 台灣時間星期三
 const OWNER = '507f1f77bcf86cd799439011'
@@ -203,6 +204,21 @@ function fakeQuota({ allowed = true } = {}) {
     limitMessage: (kind, limit) => `今天的雷諾曼 AI 解讀已用完（每天 ${limit} 次），明天再試。`,
     record: (userId, kind) => (recorded.push([userId, kind]), Promise.resolve({ _id: `u${recorded.length}` })),
     refund: async (pending) => refunded.push(await pending),
+    reported: [],
+    async report(pending, usage, model) {
+      this.reported.push([await pending, usage, model])
+    },
+    // 和正式的一樣：同一人同一種 AI 同時只能一個，新請求取代舊的（用正式的 createUserLock）
+    lock: createUserLock(),
+    acquire(userId, kind, controller) {
+      return this.lock.acquire(`${kind}:${userId}`, controller)
+    },
+    takeOver(userId, kind, controller) {
+      return this.lock.takeOver(`${kind}:${userId}`, controller)
+    },
+    release(userId, kind) {
+      this.lock.release(`${kind}:${userId}`)
+    },
   }
 }
 
@@ -247,6 +263,8 @@ async function withServer(app, run) {
   try {
     await run(`http://127.0.0.1:${server.address().port}/api/lenormand/readings/narrate`)
   } finally {
+    // keep-alive 連線不等它逾時（約 3 秒），直接關掉
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   }
 }
@@ -396,4 +414,69 @@ test('使用者中斷：停止串流、不退還次數、不存半截', async ()
   assert.deepEqual(quota.recorded, [[OWNER, 'lenormand']])
   assert.deepEqual(quota.refunded, [])
   assert.equal(readings.updates.length, 0)
+})
+
+test('同一人再送一次就取代進行中的那次（v29 項目 1）：舊的被中斷、不退還次數，新的正常完成；完成後回報 token 與費用', async () => {
+  const quota = fakeQuota()
+  let calls = 0
+  // 照 signal 停止的假 AI：第一次會一直等到被中斷；第二次直接完成
+  const ai = {
+    isAvailable: () => true,
+    stream: ({ signal, onStart, onDelta }) => {
+      calls += 1
+      onStart()
+      onDelta(`第 ${calls} 次`)
+      if (calls === 1) {
+        return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted'))))
+      }
+      return Promise.resolve({ model: 'fake-model', usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 } })
+    },
+  }
+  await withServer(narrateApp({ ai, quota }), async (url) => {
+    const first = await fetch(url, post(BODY))
+    const second = await fetch(url, post(BODY))
+    assert.equal(second.status, 200)
+    const list = await events(second)
+    assert.equal(list.at(-1).type, 'done')
+    // 舊的被中斷：只收到開頭那段、沒有 done
+    const firstEvents = await events(first).catch(() => [])
+    assert.equal(firstEvents.some((e) => e.type === 'done'), false)
+  })
+  assert.equal(calls, 2)
+  // 兩次都開始產生（都算次數），被取代的那次不退還
+  assert.deepEqual(quota.recorded.length, 2)
+  assert.deepEqual(quota.refunded, [])
+  assert.deepEqual(quota.reported[0], [{ _id: 'u2' }, { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 }, 'fake-model'])
+})
+
+test('等待期間斷線就不呼叫 AI；鎖會釋放，下一個請求照常（審查 2026-11-26）', async () => {
+  const quota = fakeQuota()
+  let release
+  const slow = new Promise((resolve) => {
+    release = resolve
+  })
+  const originalCheck = quota.check
+  let first = true
+  quota.check = async (...args) => {
+    if (first) {
+      first = false
+      await slow
+    }
+    return originalCheck(...args)
+  }
+  const ai = fakeAi()
+  await withServer(narrateApp({ ai, quota }), async (url) => {
+    const controller = new AbortController()
+    const pending = fetch(url, { ...post(BODY), signal: controller.signal }).catch(() => null)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    controller.abort()
+    await pending
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const next = await fetch(url, post(BODY))
+    assert.equal(next.status, 200)
+    await next.text()
+  })
+  assert.equal(ai.calls.length, 1, '斷線的那次不能呼叫 AI')
 })

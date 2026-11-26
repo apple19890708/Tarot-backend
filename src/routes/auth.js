@@ -1,5 +1,6 @@
 // 註冊、登入、取得目前使用者；Google 登入與忘記密碼（v17 規格 I）。路由本身不碰 mongoose 連線狀態，由 ensureDatabase 注入。
 const crypto = require('crypto')
+const { dateTimeFormat } = require('../lib/intlFormat')
 const express = require('express')
 const mongoose = require('mongoose')
 const { rateLimit } = require('express-rate-limit')
@@ -97,7 +98,8 @@ function verifyMail(link) {
 }
 
 function taipeiTime(ms) {
-  return new Intl.DateTimeFormat('zh-TW', {
+  // 共用的 dateTimeFormat（CLAUDE.md：不要直接 new Intl.DateTimeFormat）
+  return dateTimeFormat('zh-TW', {
     timeZone: 'Asia/Taipei',
     year: 'numeric',
     month: '2-digit',

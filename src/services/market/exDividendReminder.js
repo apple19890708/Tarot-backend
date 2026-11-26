@@ -2,6 +2,7 @@
 // 只用證交所／櫃買已公告的除權息預告（推估的不提醒）；只對開了這個提醒、而且有設推播的會員，針對他追蹤的台股。
 // 純函式在上面，排程呼叫的 createExDividendReminder 在下面；同一位會員、同一檔、同一次除息只送一次（MarketReminder 唯一索引）。
 const { computePosition, tradesOf } = require('./portfolio')
+const { dateTimeFormat } = require('../../lib/intlFormat')
 const { rocDate } = require('./corporateEvents')
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -82,7 +83,7 @@ function reminderMessage({ name, code, event, quantity, today }) {
 
 const TAIPEI = 'Asia/Taipei'
 function taipeiDate(date) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TAIPEI, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
+  return dateTimeFormat('en-CA', { timeZone: TAIPEI, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
 
 // 排程（/api/cron/market，台股盤中每 10 分鐘）呼叫。盤中才跑，第一次跑到（約 9 點）就送出
